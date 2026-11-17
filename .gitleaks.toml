@@ -1,0 +1,58 @@
+title = "Trip Animator publication secret scanning"
+
+[extend]
+useDefault = true
+
+# Extend only this default rule. Each exception requires BOTH the exact source
+# path and an exact, reviewed non-secret line; no directories are excluded.
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "PostgreSQL concurrency test: fixed request idempotency identifier, not authentication"
+condition = "AND"
+regexTarget = "line"
+paths = ['''(^|/)apps/api/tests/test_postgres_concurrency\.py$''']
+regexes = ['''^\s*headers=\{"X-CSRF-Token": csrf, "Idempotency-Key": "pg-idem-key-1234"\},$''']
+
+[[rules.allowlists]]
+description = "Fake S3 client: deliberately nonexistent object filename used to test 404 handling"
+condition = "AND"
+regexTarget = "line"
+paths = ['''(^|/)apps/api/tests/test_security_and_health\.py$''']
+regexes = ['''^\s*if key == "missing-nokey\.mp4":$''']
+
+[[rules.allowlists]]
+description = "Reaper test: explicit placeholder instead of a usable Argon2 password hash"
+condition = "AND"
+regexTarget = "line"
+paths = ['''(^|/)apps/api/tests/test_reaper\.py$''']
+regexes = ['''^\s*password_hash="argon2-placeholder",$''']
+
+[[rules.allowlists]]
+description = "Web client test: fixed idempotency identifier, not an authentication key"
+condition = "AND"
+regexTarget = "line"
+paths = ['''(^|/)apps/web/src/test/api\.client\.test\.ts$''']
+regexes = ['''^\s*idempotency_key: "idem-key-12345",$''']
+
+[[rules.allowlists]]
+description = "Worker SSRF policy test: internal service URL with no userinfo or token"
+condition = "AND"
+regexTarget = "line"
+paths = ['''(^|/)apps/worker/tests/test_worker_security\.py$''']
+regexes = ['''^\s*"http://api:8000/api/v1/renders",$''']
+
+[[rules.allowlists]]
+description = "Workspace package description: technology names, not an API credential"
+condition = "AND"
+regexTarget = "line"
+paths = ['''(^|/)pyproject\.toml$''']
+regexes = ['''^\s*description = "Trip Animator( v2)? workspace: FastAPI API, Polars/DuckDB/dbt telemetry platform, Playwright/FFmpeg render worker"$''']
+
+[[rules.allowlists]]
+description = "Architecture service table: API technology names and container hardening settings"
+condition = "AND"
+regexTarget = "line"
+paths = ['''(^|/)docs/ARCHITECTURE\.md$''']
+regexes = ['''^\s*\| `api` \| `infra/docker/Dockerfile\.api` \(`python:3\.12-slim` \+ `uv`\) \| `8000` \(internal\) \| FastAPI REST/SSE API, DuckDB/Polars orchestration; non-root UID `10001`, `read_only`, `tmpfs /tmp`, `cap_drop: ALL` \|$''']

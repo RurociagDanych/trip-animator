@@ -1,0 +1,910 @@
+from __future__ import annotations
+
+import base64
+import getpass
+import io
+import sys
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from threading import Barrier
+from typing import TYPE_CHECKING, Any, cast
+
+import httpx
+import pytest
+from alembic import command
+from alembic.config import Config
+from fastapi.testclient import TestClient
+from sqlalchemy import func, inspect, select
+from starlette.requests import Request
+from trip_api.cli import main as cli_main
+from trip_api.db import OAuthConnection, RenderJob, SessionRecord, User, create_db_engine
+from trip_api.deps import get_client_ip
+from trip_api.main import create_app
+from trip_api.security import hash_password, hash_session_token, verify_password
+from trip_api.storage import LocalObjectStore
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+if TYPE_CHECKING:
+    from conftest import AppHarness, HarnessFactory
+
+
+def test_alembic_initial_migration_and_schema_parity(tmp_path: Path) -> None:
+    db_file = tmp_path / "alembic_check.db"
+    db_url = f"sqlite:///{db_file}"
+    api_dir = Path(__file__).resolve().parents[1]
+    cfg = Config(str(api_dir / "alembic.ini"))
+    cfg.set_main_option("script_location", str(api_dir / "alembic"))
+    cfg.set_main_option("sqlalchemy.url", db_url)
+
+    command.upgrade(cfg, "head")
+    command.check(cfg)
+
+    engine = create_db_engine(db_url)
+    try:
+        tables = set(inspect(engine).get_table_names())
+        assert {
+            "users",
+            "sessions",
+            "oauth_states",
+            "oauth_connections",
+            "projects",
+            "stages",
+            "render_jobs",
+            "audit_events",
+            "rate_limits",
+        }.issubset(tables)
+    finally:
+        engine.dispose()
+
+
+def test_cli_create_user_argon2id_and_duplicate_rejection(tmp_path: Path) -> None:
+    db_file = tmp_path / "cli.db"
+    db_url = f"sqlite:///{db_file}"
+    api_dir = Path(__file__).resolve().parents[1]
+    cfg = Config(str(api_dir / "alembic.ini"))
+    cfg.set_main_option("script_location", str(api_dir / "alembic"))
+    cfg.set_main_option("sqlalchemy.url", db_url)
+    command.upgrade(cfg, "head")
+
+    rc = cli_main(
+        [
+            "create-user",
+            "--email",
+            "Rider@Example.com",
+            "--password",
+            "correct-horse-battery-staple",
+            "--display-name",
+            "Fictional Rider",
+            "--database-url",
+            db_url,
+        ]
+    )
+    assert rc == 0
+
+    engine = create_db_engine(db_url)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(select(User)).mappings().one()
+            assert row["email"] == "rider@example.com"
+            assert row["display_name"] == "Fictional Rider"
+            assert str(row["password_hash"]).startswith("$argon2id$")
+            assert verify_password(str(row["password_hash"]), "correct-horse-battery-staple")
+    finally:
+        engine.dispose()
+
+    dup_rc = cli_main(
+        [
+            "create-user",
+            "--email",
+            "rider@example.com",
+            "--password",
+            "another-valid-password",
+            "--database-url",
+            db_url,
+        ]
+    )
+    assert dup_rc == 1
+
+
+def test_cli_create_user_login_parity_and_input_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from trip_api.config import Settings
+    from trip_api.db import create_session_factory
+
+    db_file = tmp_path / "cli_parity.db"
+    db_url = f"sqlite:///{db_file}"
+    api_dir = Path(__file__).resolve().parents[1]
+    cfg = Config(str(api_dir / "alembic.ini"))
+    cfg.set_main_option("script_location", str(api_dir / "alembic"))
+    cfg.set_main_option("sqlalchemy.url", db_url)
+    command.upgrade(cfg, "head")
+
+    # Invalid email and short password fail cleanly with exit code 1
+    assert (
+        cli_main(
+            [
+                "create-user",
+                "--email",
+                "invalid-email-no-at",
+                "--password",
+                "valid-password-123",
+                "--database-url",
+                db_url,
+            ]
+        )
+        == 1
+    )
+    assert "Invalid email address" in capsys.readouterr().err
+
+    assert (
+        cli_main(
+            [
+                "create-user",
+                "--email",
+                "short@example.com",
+                "--password",
+                "too-short",
+                "--database-url",
+                db_url,
+            ]
+        )
+        == 1
+    )
+    assert "at least 12 characters" in capsys.readouterr().err
+
+    # 1) Standard --password CLI flag with mixed-case email and padded display name
+    assert (
+        cli_main(
+            [
+                "create-user",
+                "--email",
+                "  MixEd.User@Example.COM  ",
+                "--password",
+                "cli-created-pass-1234",
+                "--display-name",
+                "  Mountain Goat  ",
+                "--database-url",
+                db_url,
+            ]
+        )
+        == 0
+    )
+
+    # 2) --password-stdin mode
+    monkeypatch.setattr(sys, "stdin", io.StringIO("stdin-secret-pass-999\n"))
+    assert (
+        cli_main(
+            [
+                "create-user",
+                "--email",
+                "stdin@example.com",
+                "--password-stdin",
+                "--database-url",
+                db_url,
+            ]
+        )
+        == 0
+    )
+
+    # 3) Interactive getpass fallback
+    monkeypatch.setattr(getpass, "getpass", lambda _prompt="": "getpass-secret-pass-777")
+    assert (
+        cli_main(
+            [
+                "create-user",
+                "--email",
+                "prompt@example.com",
+                "--database-url",
+                db_url,
+            ]
+        )
+        == 0
+    )
+
+    # Verify HTTP POST /api/v1/auth/login parity against the exact same database
+    engine = create_db_engine(db_url)
+    try:
+        sf = create_session_factory(engine)
+        settings = Settings(
+            app_env="test",
+            dev_auth_enabled=False,
+            database_url=db_url,
+            session_secret="cli-parity-session-secret-min-32-chars",
+            token_encryption_key=base64.urlsafe_b64encode(b"c" * 32).decode("ascii"),
+            local_object_store_dir=str(tmp_path / "objects"),
+        )
+        app = create_app(
+            settings,
+            engine=engine,
+            session_factory=sf,
+            object_store=LocalObjectStore(tmp_path / "objects"),
+        )
+        for login_email, pw, expected_email, expected_name in (
+            (
+                "MIXED.USER@EXAMPLE.COM",
+                "cli-created-pass-1234",
+                "mixed.user@example.com",
+                "Mountain Goat",
+            ),
+            ("stdin@example.com", "stdin-secret-pass-999", "stdin@example.com", "stdin"),
+            ("prompt@example.com", "getpass-secret-pass-777", "prompt@example.com", "prompt"),
+        ):
+            client = TestClient(app)
+            login_resp = client.post(
+                "/api/v1/auth/login",
+                json={"email": login_email, "password": pw},
+            )
+            assert login_resp.status_code == 200, login_resp.text
+            body = login_resp.json()
+            assert body["user"]["email"] == expected_email
+            assert body["user"]["display_name"] == expected_name
+            me_resp = client.get("/api/v1/auth/me")
+            assert me_resp.status_code == 200
+            assert me_resp.json()["user"]["email"] == expected_email
+    finally:
+        engine.dispose()
+
+
+def test_login_session_cookie_csrf_and_logout(harness: AppHarness) -> None:
+    harness.create_user("alice@example.com", "alice-secret-password-123")
+    client = TestClient(harness.app)
+
+    # Unknown email exercises constant-time dummy Argon2 check
+    unknown_resp = client.post(
+        "/api/v1/auth/login",
+        json={"email": "nobody@example.com", "password": "wrong-password"},
+    )
+    assert unknown_resp.status_code == 401
+
+    bad_resp = client.post(
+        "/api/v1/auth/login",
+        json={"email": "alice@example.com", "password": "wrong-password"},
+    )
+    assert bad_resp.status_code == 401
+
+    login_resp = client.post(
+        "/api/v1/auth/login",
+        json={"email": "alice@example.com", "password": "alice-secret-password-123"},
+    )
+    assert login_resp.status_code == 200
+    data = login_resp.json()
+    csrf = data["csrf_token"]
+    assert data["user"]["email"] == "alice@example.com"
+    assert "trip_session" in client.cookies
+
+    raw_cookie = client.cookies.get("trip_session")
+    assert raw_cookie is not None
+    expected_hash = hash_session_token(raw_cookie, harness.settings.session_secret)
+    with harness.session_factory() as db:
+        session_row = db.scalar(select(SessionRecord))
+        assert session_row is not None
+        assert session_row.token_hash == expected_hash
+        assert session_row.token_hash != raw_cookie
+
+    set_cookie_hdr = login_resp.headers.get("set-cookie", "").lower()
+    assert "httponly" in set_cookie_hdr
+    assert "samesite=lax" in set_cookie_hdr
+
+    me_resp = client.get("/api/v1/auth/me")
+    assert me_resp.status_code == 200
+    assert me_resp.json()["user"]["email"] == "alice@example.com"
+
+    # Mutating route without CSRF header must fail with 403
+    no_csrf_logout = client.post("/api/v1/auth/logout")
+    assert no_csrf_logout.status_code == 403
+
+    bad_csrf_logout = client.post("/api/v1/auth/logout", headers={"X-CSRF-Token": "wrong-token"})
+    assert bad_csrf_logout.status_code == 403
+
+    ok_logout = client.post("/api/v1/auth/logout", headers={"X-CSRF-Token": csrf})
+    assert ok_logout.status_code == 200
+    assert client.get("/api/v1/auth/me").status_code == 401
+
+
+def test_expired_tampered_cookies_inactive_user_and_prod_cookie_flags(
+    make_harness: HarnessFactory,
+) -> None:
+    h = make_harness()
+    user = h.create_user("expiry@example.com", "expiry-secret-password-123")
+    client, _csrf = h.login_client("expiry@example.com", "expiry-secret-password-123")
+    raw_cookie = client.cookies.get("trip_session")
+    assert raw_cookie is not None
+
+    # Tampered cookies are rejected with 401
+    tampered = raw_cookie[:-1] + ("A" if raw_cookie[-1] != "A" else "B")
+    for bad_val in (tampered, "completely-forged-token", ""):
+        bad_c = TestClient(h.app, cookies={"trip_session": bad_val})
+        assert bad_c.get("/api/v1/auth/me").status_code == 401
+
+    # Expired session returns 401 and deletes the expired SessionRecord from DB
+    with h.session_factory() as db:
+        sess = db.scalar(select(SessionRecord).where(SessionRecord.user_id == user.id))
+        assert sess is not None
+        sess_id = sess.id
+        sess.expires_at = datetime.now(UTC) - timedelta(seconds=5)
+        db.commit()
+
+    assert client.get("/api/v1/auth/me").status_code == 401
+    with h.session_factory() as db:
+        assert db.get(SessionRecord, sess_id) is None
+
+    # Inactive user cannot use existing session or log in again
+    client2, _ = h.login_client("expiry@example.com", "expiry-secret-password-123")
+    with h.session_factory() as db:
+        db_user = db.get(User, user.id)
+        assert db_user is not None
+        db_user.is_active = False
+        db.commit()
+
+    assert client2.get("/api/v1/auth/me").status_code == 401
+    assert (
+        TestClient(h.app)
+        .post(
+            "/api/v1/auth/login",
+            json={"email": "expiry@example.com", "password": "expiry-secret-password-123"},
+        )
+        .status_code
+        == 401
+    )
+
+    # Production environment sets Secure flag on session cookie
+    prod_h = make_harness(
+        app_env="production",
+        dev_auth_enabled=False,
+        session_secret="prod-cookie-secret-minimum-32-characters",
+        token_encryption_key=base64.urlsafe_b64encode(b"p" * 32).decode("ascii"),
+    )
+    prod_h.create_user("prod@example.com", "prod-secret-password-123")
+    prod_login = TestClient(prod_h.app).post(
+        "/api/v1/auth/login",
+        json={"email": "prod@example.com", "password": "prod-secret-password-123"},
+    )
+    assert prod_login.status_code == 200
+    cookie_hdr = prod_login.headers.get("set-cookie", "").lower()
+    assert "secure" in cookie_hdr
+    assert "httponly" in cookie_hdr
+
+
+def test_dev_login_disabled_in_prod_and_allowed_in_dev(make_harness: HarnessFactory) -> None:
+    prod_harness = make_harness(
+        app_env="production",
+        dev_auth_enabled=False,
+        session_secret="prod-session-secret-minimum-32-characters-long",
+        token_encryption_key=base64.urlsafe_b64encode(b"z" * 32).decode("ascii"),
+    )
+    prod_client = TestClient(prod_harness.app)
+    assert prod_client.post("/api/v1/auth/dev-login").status_code == 403
+    assert prod_client.get("/api/v1/public-config").json()["dev_auth_enabled"] is False
+
+    dev_harness = make_harness(app_env="development", dev_auth_enabled=True)
+    dev_client = TestClient(dev_harness.app)
+    resp = dev_client.post("/api/v1/auth/dev-login")
+    assert resp.status_code == 200
+    assert resp.json()["user"]["email"] == "dev@trip-animator.local"
+    assert dev_client.get("/api/v1/auth/me").status_code == 200
+
+
+def test_login_rate_limiting_enforced_in_db(make_harness: HarnessFactory) -> None:
+    h = make_harness(rate_limit_login_max=3, rate_limit_login_window_s=60)
+    h.create_user("bob@example.com", "bob-secret-password-123")
+    client = TestClient(h.app)
+
+    for _ in range(3):
+        r = client.post(
+            "/api/v1/auth/login",
+            json={"email": "bob@example.com", "password": "wrong-password"},
+        )
+        assert r.status_code == 401
+
+    limited = client.post(
+        "/api/v1/auth/login",
+        json={"email": "bob@example.com", "password": "wrong-password"},
+    )
+    assert limited.status_code == 429
+    assert "retry-after" in limited.headers
+    assert limited.json()["status"] == 429
+
+
+def test_dev_login_handles_concurrent_first_login_integrity_race(
+    make_harness: HarnessFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import trip_api.routers.auth as auth_router
+
+    # 1. Deterministic IntegrityError race simulation on fresh DB
+    h1 = make_harness(app_env="development", dev_auth_enabled=True)
+
+    def racing_hash_password(password: str) -> str:
+        # Insert the dev user from a concurrent session before the handler commits.
+        with h1.session_factory() as other_db:
+            if other_db.scalar(select(User).where(User.email == "dev@trip-animator.local")) is None:
+                other_db.add(
+                    User(
+                        email="dev@trip-animator.local",
+                        display_name="Developer",
+                        password_hash=hash_password("concurrent-winner-pw"),
+                        is_active=True,
+                    )
+                )
+                other_db.commit()
+        return hash_password(password)
+
+    monkeypatch.setattr(auth_router, "hash_password", racing_hash_password)
+    c1 = TestClient(h1.app)
+    resp = c1.post("/api/v1/auth/dev-login")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["user"]["email"] == "dev@trip-animator.local"
+    assert c1.get("/api/v1/auth/me").status_code == 200
+
+    with h1.session_factory() as db:
+        count = db.scalar(
+            select(func.count()).select_from(User).where(User.email == "dev@trip-animator.local")
+        )
+        assert count == 1
+
+    # 2. Real multi-threaded concurrent first dev-login requests on a fresh DB
+    monkeypatch.undo()
+    h2 = make_harness(app_env="development", dev_auth_enabled=True)
+    barrier = Barrier(2)
+
+    def _call_dev_login(_idx: int) -> int:
+        client = TestClient(h2.app)
+        barrier.wait(timeout=5.0)
+        return int(client.post("/api/v1/auth/dev-login").status_code)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        statuses = list(pool.map(_call_dev_login, [0, 1]))
+    assert statuses == [200, 200]
+    with h2.session_factory() as db:
+        count2 = db.scalar(
+            select(func.count()).select_from(User).where(User.email == "dev@trip-animator.local")
+        )
+        assert count2 == 1
+
+
+def test_full_idor_cross_user_and_unauthenticated_matrix(
+    make_harness: HarnessFactory,
+    sample_gpx: bytes,
+) -> None:
+    h = make_harness(rate_limit_gpx_max=20, rate_limit_render_max=20)
+    alice_user = h.create_user("alice-idor@example.com")
+    h.create_user("bob-idor@example.com")
+    alice, alice_csrf = h.login_client("alice-idor@example.com")
+    bob, bob_csrf = h.login_client("bob-idor@example.com")
+    anon = TestClient(h.app)
+
+    proj_a1 = alice.post(
+        "/api/v1/projects",
+        json={"title": "Alice Private Trip"},
+        headers={"X-CSRF-Token": alice_csrf},
+    ).json()["id"]
+    proj_a2 = alice.post(
+        "/api/v1/projects",
+        json={"title": "Alice Empty Trip"},
+        headers={"X-CSRF-Token": alice_csrf},
+    ).json()["id"]
+
+    stage_a1 = alice.post(
+        f"/api/v1/projects/{proj_a1}/gpx",
+        files={"file": ("stage.gpx", sample_gpx, "application/gpx+xml")},
+        headers={"X-CSRF-Token": alice_csrf},
+    ).json()["id"]
+
+    alice.post(
+        f"/api/v1/projects/{proj_a1}/share",
+        headers={"X-CSRF-Token": alice_csrf},
+    )
+
+    queued_job_id = alice.post(
+        f"/api/v1/projects/{proj_a1}/renders",
+        json={"resolution": "1280x720", "fps": 30},
+        headers={"X-CSRF-Token": alice_csrf, "Idempotency-Key": "alice-queued-1"},
+    ).json()["id"]
+
+    done_job_id = uuid.uuid4()
+    h.store.put_bytes(f"outputs/{done_job_id}.mp4", b"ALICE-MP4", content_type="video/mp4")
+    h.store.put_bytes(f"outputs/{done_job_id}.webp", b"ALICE-WEBP", content_type="image/webp")
+    with h.session_factory() as db:
+        db.add(
+            RenderJob(
+                id=done_job_id,
+                project_id=uuid.UUID(proj_a1),
+                owner_user_id=alice_user.id,
+                idempotency_key="alice-done-1",
+                idempotency_hash="a" * 64,
+                spec_json={"version": 2},
+                status="succeeded",
+                progress_pct=100,
+                output_object_key=f"outputs/{done_job_id}.mp4",
+                thumbnail_key=f"outputs/{done_job_id}.webp",
+            )
+        )
+        db.add(
+            OAuthConnection(
+                user_id=alice_user.id,
+                provider="strava",
+                external_athlete_id="123000",
+                access_token_enc="v1:a",
+                refresh_token_enc="v1:b",
+                expires_at=datetime.now(UTC) + timedelta(hours=1),
+                scope="read",
+            )
+        )
+        db.commit()
+
+    alice_state = str(alice.get("/api/v1/strava/connect").json()["state"])
+
+    # 1. Unauthenticated requests must receive 401 across all protected routes
+    unauth_requests: list[tuple[str, str, dict[str, Any] | None]] = [
+        ("GET", "/api/v1/auth/me", None),
+        ("POST", "/api/v1/auth/logout", None),
+        ("GET", "/api/v1/projects", None),
+        ("POST", "/api/v1/projects", {"json": {"title": "No Auth"}}),
+        ("GET", f"/api/v1/projects/{proj_a1}", None),
+        ("PATCH", f"/api/v1/projects/{proj_a1}", {"json": {"revision": 1, "title": "X"}}),
+        ("DELETE", f"/api/v1/projects/{proj_a1}", None),
+        ("POST", f"/api/v1/projects/{proj_a1}/share", None),
+        ("DELETE", f"/api/v1/projects/{proj_a1}/share", None),
+        ("GET", f"/api/v1/projects/{proj_a1}/audit", None),
+        ("GET", f"/api/v1/projects/{proj_a1}/export?format=gpx", None),
+        (
+            "POST",
+            f"/api/v1/projects/{proj_a1}/gpx",
+            {"files": {"file": ("s.gpx", sample_gpx, "application/gpx+xml")}},
+        ),
+        ("PATCH", f"/api/v1/projects/{proj_a1}/stages/{stage_a1}", {"json": {"name": "X"}}),
+        ("DELETE", f"/api/v1/projects/{proj_a1}/stages/{stage_a1}", None),
+        ("POST", f"/api/v1/projects/{proj_a1}/stages/reorder", {"json": {"stage_ids": [stage_a1]}}),
+        ("GET", f"/api/v1/projects/{proj_a1}/telemetry/chart", None),
+        ("GET", f"/api/v1/projects/{proj_a1}/telemetry/geometry", None),
+        ("GET", f"/api/v1/projects/{proj_a1}/stages/{stage_a1}/geometry", None),
+        ("GET", f"/api/v1/projects/{proj_a1}/kpis", None),
+        ("GET", f"/api/v1/projects/{proj_a1}/analytics/highlights", None),
+        ("GET", "/api/v1/analytics/career", None),
+        ("GET", "/api/v1/analytics/heatmap", None),
+        ("GET", "/api/v1/strava/connect", None),
+        ("GET", f"/api/v1/strava/callback?code=c&state={alice_state}", None),
+        ("POST", "/api/v1/strava/disconnect", None),
+        ("GET", "/api/v1/strava/activities", None),
+        ("POST", f"/api/v1/projects/{proj_a1}/import-strava", {"json": {"activity_id": 1}}),
+        (
+            "POST",
+            f"/api/v1/projects/{proj_a1}/import-strava/batch",
+            {"json": {"items": [{"activity_id": 1}]}},
+        ),
+        ("POST", f"/api/v1/projects/{proj_a1}/renders", {"json": {"resolution": "1280x720"}}),
+        ("GET", f"/api/v1/projects/{proj_a1}/renders", None),
+        ("GET", f"/api/v1/renders/{queued_job_id}", None),
+        ("GET", f"/api/v1/renders/{queued_job_id}/events", None),
+        ("POST", f"/api/v1/renders/{queued_job_id}/cancel", None),
+        ("GET", f"/api/v1/renders/{done_job_id}/download", None),
+        ("GET", f"/api/v1/renders/{done_job_id}/thumbnail", None),
+    ]
+    for method, path, kwargs in unauth_requests:
+        resp = anon.request(method, path, **(kwargs or {}))
+        assert resp.status_code == 401, f"{method} {path} returned {resp.status_code}: {resp.text}"
+
+    # 2. Bob (authenticated with his own CSRF) cannot list, view, or mutate Alice's resources
+    assert bob.get("/api/v1/projects").json() == []
+    bob_headers = {"X-CSRF-Token": bob_csrf}
+    bob_idor_matrix: list[tuple[str, str, dict[str, Any] | None]] = [
+        ("GET", f"/api/v1/projects/{proj_a1}", None),
+        (
+            "PATCH",
+            f"/api/v1/projects/{proj_a1}",
+            {"json": {"revision": 1, "title": "Hijacked"}, "headers": bob_headers},
+        ),
+        ("DELETE", f"/api/v1/projects/{proj_a1}", {"headers": bob_headers}),
+        ("POST", f"/api/v1/projects/{proj_a1}/share", {"headers": bob_headers}),
+        ("DELETE", f"/api/v1/projects/{proj_a1}/share", {"headers": bob_headers}),
+        ("GET", f"/api/v1/projects/{proj_a1}/audit", None),
+        ("GET", f"/api/v1/projects/{proj_a1}/export?format=gpx", None),
+        ("GET", f"/api/v1/projects/{proj_a1}/export?format=geojson", None),
+        (
+            "POST",
+            f"/api/v1/projects/{proj_a1}/gpx",
+            {
+                "files": {"file": ("s.gpx", sample_gpx, "application/gpx+xml")},
+                "headers": bob_headers,
+            },
+        ),
+        (
+            "PATCH",
+            f"/api/v1/projects/{proj_a1}/stages/{stage_a1}",
+            {"json": {"name": "Hijacked"}, "headers": bob_headers},
+        ),
+        ("DELETE", f"/api/v1/projects/{proj_a1}/stages/{stage_a1}", {"headers": bob_headers}),
+        (
+            "POST",
+            f"/api/v1/projects/{proj_a1}/stages/reorder",
+            {"json": {"stage_ids": [stage_a1]}, "headers": bob_headers},
+        ),
+        ("GET", f"/api/v1/projects/{proj_a1}/telemetry/chart", None),
+        ("GET", f"/api/v1/projects/{proj_a1}/telemetry/geometry", None),
+        ("GET", f"/api/v1/projects/{proj_a1}/stages/{stage_a1}/geometry", None),
+        ("GET", f"/api/v1/projects/{proj_a1}/kpis", None),
+        ("GET", f"/api/v1/projects/{proj_a1}/analytics/highlights", None),
+        (
+            "POST",
+            f"/api/v1/projects/{proj_a1}/import-strava",
+            {"json": {"activity_id": 99}, "headers": bob_headers},
+        ),
+        (
+            "POST",
+            f"/api/v1/projects/{proj_a1}/import-strava/batch",
+            {"json": {"items": [{"activity_id": 99}]}, "headers": bob_headers},
+        ),
+        (
+            "POST",
+            f"/api/v1/projects/{proj_a1}/renders",
+            {
+                "json": {"resolution": "1280x720"},
+                "headers": {**bob_headers, "Idempotency-Key": "bob-hijack-key-1"},
+            },
+        ),
+        ("GET", f"/api/v1/projects/{proj_a1}/renders", None),
+        ("GET", f"/api/v1/renders/{queued_job_id}", None),
+        ("GET", f"/api/v1/renders/{queued_job_id}/events", None),
+        ("POST", f"/api/v1/renders/{queued_job_id}/cancel", {"headers": bob_headers}),
+        ("GET", f"/api/v1/renders/{done_job_id}/download", None),
+        ("GET", f"/api/v1/renders/{done_job_id}/thumbnail", None),
+    ]
+    for method, path, kwargs in bob_idor_matrix:
+        resp = bob.request(method, path, **(kwargs or {}))
+        assert resp.status_code == 404, f"Bob {method} {path} returned {resp.status_code}"
+
+    # Account-wide analytics are authenticated and scoped to Bob's empty account.
+    career = bob.get("/api/v1/analytics/career")
+    assert career.status_code == 200, career.text
+    assert career.json()["total_projects"] == 0
+    heatmap = bob.get("/api/v1/analytics/heatmap")
+    assert heatmap.status_code == 200, heatmap.text
+    assert heatmap.json()["trips"] == []
+
+    # Bob cannot hijack Alice's OAuth state
+    assert bob.get(f"/api/v1/strava/callback?code=c&state={alice_state}").status_code == 400
+
+    # 3. Cross-project stage IDOR (even within Alice's own account)
+    assert (
+        alice.patch(
+            f"/api/v1/projects/{proj_a2}/stages/{stage_a1}",
+            json={"name": "Cross Project"},
+            headers={"X-CSRF-Token": alice_csrf},
+        ).status_code
+        == 404
+    )
+    assert (
+        alice.delete(
+            f"/api/v1/projects/{proj_a2}/stages/{stage_a1}",
+            headers={"X-CSRF-Token": alice_csrf},
+        ).status_code
+        == 404
+    )
+    assert alice.get(f"/api/v1/projects/{proj_a2}/stages/{stage_a1}/geometry").status_code == 404
+    assert (
+        alice.get(f"/api/v1/projects/{proj_a2}/telemetry/chart?stage_id={stage_a1}").status_code
+        == 404
+    )
+    assert (
+        alice.get(
+            f"/api/v1/projects/{proj_a2}/telemetry/geometry?stage_id={stage_a1}"
+        ).status_code
+        == 404
+    )
+
+    # Alice's project and stage remain intact
+    alice_detail = alice.get(f"/api/v1/projects/{proj_a1}").json()
+    assert alice_detail["title"] == "Alice Private Trip"
+    assert len(alice_detail["stages"]) == 1
+    assert alice_detail["share_enabled"] is True
+
+
+def test_csrf_and_cors_origin_enforcement(
+    make_harness: HarnessFactory,
+    sample_gpx: bytes,
+) -> None:
+    h = make_harness(ALLOWED_ORIGINS="http://localhost:5173,https://app.trip-animator.example")
+    h.create_user("csrf-alice@example.com")
+    h.create_user("csrf-bob@example.com")
+    alice, alice_csrf = h.login_client("csrf-alice@example.com")
+    _, bob_csrf = h.login_client("csrf-bob@example.com")
+
+    proj_id = alice.post(
+        "/api/v1/projects",
+        json={"title": "CSRF Project"},
+        headers={"X-CSRF-Token": alice_csrf},
+    ).json()["id"]
+    stage_id = alice.post(
+        f"/api/v1/projects/{proj_id}/gpx",
+        files={"file": ("s.gpx", sample_gpx, "application/gpx+xml")},
+        headers={"X-CSRF-Token": alice_csrf},
+    ).json()["id"]
+    job_id = alice.post(
+        f"/api/v1/projects/{proj_id}/renders",
+        json={"resolution": "1280x720"},
+        headers={"X-CSRF-Token": alice_csrf, "Idempotency-Key": "csrf-render-key-1"},
+    ).json()["id"]
+
+    mutating_routes: list[tuple[str, str, dict[str, Any] | None]] = [
+        ("POST", "/api/v1/projects", {"json": {"title": "No CSRF"}}),
+        ("PATCH", f"/api/v1/projects/{proj_id}", {"json": {"revision": 1, "title": "No CSRF"}}),
+        ("DELETE", f"/api/v1/projects/{proj_id}", None),
+        ("POST", f"/api/v1/projects/{proj_id}/share", None),
+        ("DELETE", f"/api/v1/projects/{proj_id}/share", None),
+        (
+            "POST",
+            f"/api/v1/projects/{proj_id}/gpx",
+            {"files": {"file": ("s.gpx", sample_gpx, "application/gpx+xml")}},
+        ),
+        ("PATCH", f"/api/v1/projects/{proj_id}/stages/{stage_id}", {"json": {"name": "No CSRF"}}),
+        ("DELETE", f"/api/v1/projects/{proj_id}/stages/{stage_id}", None),
+        ("POST", f"/api/v1/projects/{proj_id}/stages/reorder", {"json": {"stage_ids": [stage_id]}}),
+        ("POST", f"/api/v1/projects/{proj_id}/import-strava", {"json": {"activity_id": 1}}),
+        (
+            "POST",
+            f"/api/v1/projects/{proj_id}/import-strava/batch",
+            {"json": {"items": [{"activity_id": 1}]}},
+        ),
+        ("POST", f"/api/v1/projects/{proj_id}/renders", {"json": {"resolution": "1280x720"}}),
+        ("POST", f"/api/v1/renders/{job_id}/cancel", None),
+        ("POST", "/api/v1/strava/disconnect", None),
+        ("POST", "/api/v1/auth/logout", None),
+    ]
+    for method, path, kwargs in mutating_routes:
+        missing = alice.request(method, path, **(kwargs or {}))
+        assert missing.status_code == 403, f"Missing CSRF {method} {path}: {missing.status_code}"
+        cross_user = alice.request(
+            method,
+            path,
+            headers={"X-CSRF-Token": bob_csrf},
+            **(kwargs or {}),
+        )
+        assert cross_user.status_code == 403, (
+            f"Bob CSRF {method} {path}: {cross_user.status_code}"
+        )
+
+    # CORS preflight and simple origin checks
+    anon = TestClient(h.app)
+    allowed_preflight = anon.options(
+        "/api/v1/projects",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "Content-Type, X-CSRF-Token, Idempotency-Key",
+        },
+    )
+    assert allowed_preflight.status_code == 200
+    assert allowed_preflight.headers["access-control-allow-origin"] == "http://localhost:5173"
+    assert allowed_preflight.headers["access-control-allow-credentials"] == "true"
+
+    evil_preflight = anon.options(
+        "/api/v1/projects",
+        headers={
+            "Origin": "https://evil.attacker.example",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "Content-Type, X-CSRF-Token",
+        },
+    )
+    assert "access-control-allow-origin" not in evil_preflight.headers
+
+    evil_get = anon.get(
+        "/api/v1/public-config",
+        headers={"Origin": "https://evil.attacker.example"},
+    )
+    assert evil_get.status_code == 200
+    assert "access-control-allow-origin" not in evil_get.headers
+
+
+async def test_x_forwarded_for_spoofing_vs_trusted_forwarded_allow_ips(
+    make_harness: HarnessFactory,
+) -> None:
+    h = make_harness(
+        rate_limit_login_max=3,
+        rate_limit_login_window_s=60,
+        rate_limit_share_max=2,
+        rate_limit_share_window_s=60,
+        rate_limit_strava_webhook_max=2,
+        rate_limit_strava_webhook_window_s=60,
+    )
+    h.create_user("xff@example.com", "xff-secret-password-123")
+    # Uses 1 of 3 login tokens for client IP "testclient"
+    owner, csrf = h.login_client("xff@example.com", "xff-secret-password-123")
+    proj_id = owner.post(
+        "/api/v1/projects",
+        json={"title": "XFF Share"},
+        headers={"X-CSRF-Token": csrf},
+    ).json()["id"]
+    slug = owner.post(
+        f"/api/v1/projects/{proj_id}/share",
+        headers={"X-CSRF-Token": csrf},
+    ).json()["share_slug"]
+
+    # Direct bare request with missing client resolves to "unknown"
+    bare_req = Request({"type": "http", "headers": [], "client": None})
+    assert get_client_ip(bare_req) == "unknown"
+
+    # 1. Direct app ignores spoofed X-Forwarded-For on login and share
+    direct_client = TestClient(h.app)
+    for idx in range(2):
+        r = direct_client.post(
+            "/api/v1/auth/login",
+            json={"email": "xff@example.com", "password": "wrong-password"},
+            headers={"X-Forwarded-For": f"10.0.0.{idx + 1}"},
+        )
+        assert r.status_code == 401
+    assert (
+        direct_client.post(
+            "/api/v1/auth/login",
+            json={"email": "xff@example.com", "password": "wrong-password"},
+            headers={"X-Forwarded-For": "10.0.0.99"},
+        ).status_code
+        == 429
+    )
+
+    for idx in range(2):
+        assert (
+            direct_client.get(
+                f"/api/v1/share/{slug}",
+                headers={"X-Forwarded-For": f"172.16.0.{idx + 1}"},
+            ).status_code
+            == 200
+        )
+    assert (
+        direct_client.get(
+            f"/api/v1/share/{slug}",
+            headers={"X-Forwarded-For": "172.16.0.99"},
+        ).status_code
+        == 429
+    )
+
+    # 2. ProxyHeadersMiddleware with FORWARDED_ALLOW_IPS="127.0.0.1,::1":
+    #    - Untrusted peer cannot spoof X-Forwarded-For
+    #    - Trusted proxy (127.0.0.1) uses rightmost untrusted hop, blocking leftmost spoofing
+    proxied_app: Any = ProxyHeadersMiddleware(cast(Any, h.app), trusted_hosts=["127.0.0.1", "::1"])
+
+    untrusted_transport = httpx.ASGITransport(app=proxied_app, client=("203.0.113.77", 54321))
+    async with httpx.AsyncClient(
+        transport=untrusted_transport, base_url="http://test"
+    ) as untrusted:
+        for spoof in ("198.51.100.1", "198.51.100.2", "198.51.100.3"):
+            res = await untrusted.post(
+                "/api/v1/auth/login",
+                json={"email": "xff@example.com", "password": "wrong-password"},
+                headers={"X-Forwarded-For": spoof},
+            )
+            assert res.status_code == 401
+        blocked = await untrusted.post(
+            "/api/v1/auth/login",
+            json={"email": "xff@example.com", "password": "wrong-password"},
+            headers={"X-Forwarded-For": "198.51.100.4"},
+        )
+        assert blocked.status_code == 429
+
+    trusted_transport = httpx.ASGITransport(app=proxied_app, client=("127.0.0.1", 54321))
+    async with httpx.AsyncClient(transport=trusted_transport, base_url="http://test") as trusted:
+        # Leftmost spoofed IPs still map to the rightmost untrusted client IP (198.51.100.50)
+        for spoofed_left in ("1.1.1.1", "8.8.8.8", "4.2.2.1"):
+            res = await trusted.post(
+                "/api/v1/auth/login",
+                json={"email": "xff@example.com", "password": "wrong-password"},
+                headers={"X-Forwarded-For": f"{spoofed_left}, 198.51.100.50"},
+            )
+            assert res.status_code == 401
+        blocked_spoof = await trusted.post(
+            "/api/v1/auth/login",
+            json={"email": "xff@example.com", "password": "wrong-password"},
+            headers={"X-Forwarded-For": "9.9.9.9, 198.51.100.50"},
+        )
+        assert blocked_spoof.status_code == 429
+
+        # Distinct real client IP behind trusted proxy gets an independent rate-limit bucket
+        other_client_res = await trusted.post(
+            "/api/v1/auth/login",
+            json={"email": "xff@example.com", "password": "wrong-password"},
+            headers={"X-Forwarded-For": "198.51.100.51"},
+        )
+        assert other_client_res.status_code == 401

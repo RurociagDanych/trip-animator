@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  publication-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install verified Gitleaks 8.30.1
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/gitleaks_8.30.1_linux_x64.tar.gz"
+          curl --fail --silent --show-error --location \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+            --output "$archive"
+          printf '%s  %s\n' \
+            '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb' \
+            "$archive" | sha256sum --check --status
+          tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
+          mkdir -p "$RUNNER_TEMP/gitleaks-bin"
+          install -m 0755 "$RUNNER_TEMP/gitleaks" "$RUNNER_TEMP/gitleaks-bin/gitleaks"
+          echo "$RUNNER_TEMP/gitleaks-bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/gitleaks-bin/gitleaks" version | grep -Fx '8.30.1'
+      - name: Scan publication history and source
+        run: bash scripts/check-publication-secrets.sh
+      - name: Exercise publication gate regressions
+        run: python3 -m unittest discover -s scripts/tests -v
+
+  python-and-dbt:
+    runs-on: ubuntu-latest
+    env:
+      TEST_POSTGRES_URL: postgresql://trip:trip@127.0.0.1:5432/trip_test
+    services:
+      postgres:
+        image: postgres:17.6-bookworm
+        env:
+          POSTGRES_DB: trip_test
+          POSTGRES_USER: trip
+          POSTGRES_PASSWORD: trip
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U trip -d trip_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python workspace
+        run: uv sync --all-packages --frozen
+      - name: Ruff lint
+        run: uv run ruff check apps packages airflow
+      - name: Mypy typecheck
+        run: uv run mypy apps/api/src apps/worker/src packages/telemetry/src airflow/src
+      - name: Pytest suite
+        run: uv run pytest -ra
+      - name: dbt parse
+        run: uv run dbt parse --project-dir dbt --profiles-dir dbt
+      - name: Airflow DAG integrity & task suite
+        run: |
+          uv sync --project airflow --frozen
+          uv run --project airflow pytest airflow/tests -v
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck
+        run: pnpm typecheck:web
+      - name: Lint
+        run: pnpm lint:web
+      - name: Test
+        run: pnpm test:web
+      - name: Build
+        run: pnpm build:web
+
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose config
+        run: |
+          docker compose -f infra/compose.yaml --env-file .env.example config --quiet
+          docker compose -f infra/compose.yaml --env-file .env.example --profile airflow config --quiet
+
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.6"
+          terraform_wrapper: false
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive infra/terraform
+      - name: Terraform Validate (dev)
+        working-directory: infra/terraform/environments/dev
+        run: |
+          terraform init -backend=false
+          terraform validate
+      - name: Terraform Validate (prod)
+        working-directory: infra/terraform/environments/prod
+        run: |
+          terraform init -backend=false
+          terraform validate

@@ -1,0 +1,10 @@
+trip_telemetry_duckdb:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('DBT_DUCKDB_PATH', '../data/gold/trip_analytics.duckdb') }}"
+      threads: 4
+      extensions:
+        - parquet
+        - spatial

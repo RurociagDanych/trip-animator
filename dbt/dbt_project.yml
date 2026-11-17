@@ -1,0 +1,27 @@
+name: trip_telemetry_gold
+version: "0.1.0"
+config-version: 2
+
+profile: trip_telemetry_duckdb
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  trip_telemetry_gold:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table
+
+vars:
+  silver_parquet_glob: "../data/silver/**/*.parquet"
+  ref_data_dir: "../data/ref"

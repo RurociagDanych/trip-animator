@@ -1,0 +1,59 @@
+[project]
+name = "trip-animator-workspace"
+version = "0.1.0"
+description = "Trip Animator workspace: FastAPI API, Polars/DuckDB/dbt telemetry platform, Playwright/FFmpeg render worker"
+requires-python = ">=3.12,<3.14"
+dependencies = []
+
+[tool.uv.workspace]
+members = [
+  "packages/telemetry",
+  "apps/api",
+  "apps/worker",
+]
+
+[dependency-groups]
+dev = [
+  "mypy>=1.14.0",
+  "pytest>=8.3.0",
+  "pytest-asyncio>=0.25.0",
+  "ruff>=0.9.0",
+  "httpx>=0.28.0",
+  "dbt-duckdb>=1.9.0",
+  "types-defusedxml>=0.7.0",
+  "boto3-stubs>=1.36.0",
+  "pytest-cov>=7.1.0",
+  "hypothesis>=6.170.15",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "ASYNC"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["S101", "S105", "S106", "S108"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_configs = true
+disallow_any_generics = true
+mypy_path = ["apps/api/src", "packages/telemetry/src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+pythonpath = ["airflow/src"]
+markers = [
+  "postgres: tests requiring a real PostgreSQL Docker container",
+]
+testpaths = [
+  "packages/telemetry/tests",
+  "apps/api/tests",
+  "apps/worker/tests",
+  "airflow/tests",
+]

@@ -1,0 +1,196 @@
+version: 2
+
+models:
+  - name: stg_telemetry_points
+    description: "Validated active Silver telemetry points read from GeoParquet/Parquet files."
+    columns:
+      - name: trip_id
+        tests:
+          - not_null
+      - name: stage_id
+        tests:
+          - not_null
+      - name: seq
+        tests:
+          - not_null
+      - name: lat
+        tests:
+          - not_null
+      - name: lon
+        tests:
+          - not_null
+      - name: elev_m
+        tests:
+          - not_null
+      - name: delta_dist_m
+        tests:
+          - not_null
+      - name: cum_dist_m
+        tests:
+          - not_null
+      - name: speed_mps
+        tests:
+          - not_null
+      - name: segment_idx
+        tests:
+          - not_null
+      - name: is_moving
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [true, false]
+
+  - name: mart_stage_summary
+    description: "Incremental Gold per-stage telemetry KPIs (distance, ascent/descent, moving time, HR/cadence/power, bounds)."
+    columns:
+      - name: stage_id
+        tests:
+          - not_null
+          - unique
+      - name: trip_id
+        tests:
+          - not_null
+      - name: started_at_local_date
+        tests:
+          - not_null
+      - name: point_count
+        tests:
+          - not_null
+      - name: total_distance_m
+        tests:
+          - not_null
+      - name: elevation_gain_m
+        tests:
+          - not_null
+      - name: elevation_loss_m
+        tests:
+          - not_null
+      - name: moving_seconds
+        tests:
+          - not_null
+      - name: elapsed_seconds
+        tests:
+          - not_null
+      - name: avg_moving_speed_mps
+        tests:
+          - not_null
+      - name: max_speed_mps
+        tests:
+          - not_null
+      - name: vam_m_per_h
+        tests:
+          - not_null
+
+  - name: mart_trip_daily_summary
+    description: "Gold local-date daily trip rollup across stages."
+    columns:
+      - name: trip_id
+        tests:
+          - not_null
+      - name: trip_date
+        tests:
+          - not_null
+      - name: started_at_local_date
+        tests:
+          - not_null
+      - name: stage_count
+        tests:
+          - not_null
+      - name: total_points
+        tests:
+          - not_null
+      - name: total_distance_m
+        tests:
+          - not_null
+      - name: total_elevation_gain_m
+        tests:
+          - not_null
+      - name: total_elevation_loss_m
+        tests:
+          - not_null
+      - name: total_moving_seconds
+        tests:
+          - not_null
+      - name: total_elapsed_seconds
+        tests:
+          - not_null
+      - name: peak_speed_mps
+        tests:
+          - not_null
+
+  - name: fct_climbs
+    description: "Categorized climbs (HC / Cat 1-4) detected from smoothed Silver grades."
+    columns:
+      - name: climb_id
+        tests:
+          - not_null
+          - unique
+      - name: stage_id
+        tests:
+          - not_null
+      - name: category
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["HC", "Cat 1", "Cat 2", "Cat 3", "Cat 4"]
+
+  - name: fct_splits
+    description: "Per-kilometer metric splits with pace, grade, elevation, HR, and power."
+    columns:
+      - name: split_id
+        tests:
+          - not_null
+          - unique
+      - name: stage_id
+        tests:
+          - not_null
+      - name: split_index
+        tests:
+          - not_null
+
+  - name: fct_dwell_stops
+    description: "Detected stationary dwell stops (>=180s) with suggested transition icons."
+    columns:
+      - name: dwell_id
+        tests:
+          - not_null
+          - unique
+      - name: stage_id
+        tests:
+          - not_null
+
+  - name: mart_stage_geo_context
+    description: "Spatial geo-enrichment per stage (countries, admin regions, mountain passes)."
+    columns:
+      - name: stage_id
+        tests:
+          - not_null
+          - unique
+      - name: trip_id
+        tests:
+          - not_null
+
+  - name: mart_user_career_summary
+    description: "Per-trip/year career KPI and country rollup for Atlas analytics."
+    columns:
+      - name: trip_id
+        tests:
+          - not_null
+      - name: year
+        tests:
+          - not_null
+
+  - name: mart_spatial_coverage_h3
+    description: "Hexagonal spatial coverage grid per trip/year."
+    columns:
+      - name: trip_id
+        tests:
+          - not_null
+      - name: h3_index
+        tests:
+          - not_null
+      - name: point_count
+        tests:
+          - not_null

@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "trip-telemetry"
+version = "0.1.0"
+description = "Hardened GPX/Strava ingestion, Polars Silver GeoParquet ETL, and DuckDB spatial telemetry analytics"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "defusedxml>=0.7.1",
+  "duckdb>=1.1.3",
+  "fitdecode>=0.10.0",
+  "numpy>=1.26.0",
+  "polars>=1.20.0",
+  "pyarrow>=18.1.0",
+  "pydantic>=2.10.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/trip_telemetry"]

@@ -1,0 +1,12 @@
+{
+  "name": "trip-animator",
+  "private": true,
+  "packageManager": "pnpm@11.21.0",
+  "scripts": {
+    "dev:web": "pnpm --filter @trip-animator/web dev",
+    "build:web": "pnpm --filter @trip-animator/web build",
+    "typecheck:web": "pnpm --filter @trip-animator/web typecheck",
+    "test:web": "pnpm --filter @trip-animator/web test",
+    "lint:web": "pnpm --filter @trip-animator/web lint"
+  }
+}

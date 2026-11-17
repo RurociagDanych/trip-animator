@@ -1,0 +1,68 @@
+{
+	admin off
+}
+
+(app_security_headers) {
+	@share_embed path /share/*
+	@non_share not path /share/*
+
+	header @non_share {
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: {$CADDY_TILE_CSP_ORIGINS:https://tiles.openfreemap.org https://s3.amazonaws.com https://server.arcgisonline.com}; font-src 'self' data: {$CADDY_TILE_CSP_ORIGINS:https://tiles.openfreemap.org https://s3.amazonaws.com https://server.arcgisonline.com}; connect-src 'self' {$CADDY_TILE_CSP_ORIGINS:https://tiles.openfreemap.org https://s3.amazonaws.com https://server.arcgisonline.com}; worker-src 'self' blob:; child-src 'self' blob:; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "geolocation=(), camera=(), microphone=()"
+		-Server
+	}
+
+	header @share_embed {
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: {$CADDY_TILE_CSP_ORIGINS:https://tiles.openfreemap.org https://s3.amazonaws.com https://server.arcgisonline.com}; font-src 'self' data: {$CADDY_TILE_CSP_ORIGINS:https://tiles.openfreemap.org https://s3.amazonaws.com https://server.arcgisonline.com}; connect-src 'self' {$CADDY_TILE_CSP_ORIGINS:https://tiles.openfreemap.org https://s3.amazonaws.com https://server.arcgisonline.com}; worker-src 'self' blob:; child-src 'self' blob:; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors *"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "geolocation=(), camera=(), microphone=()"
+		-Server
+	}
+}
+
+(app_routes) {
+	encode zstd gzip
+
+	request_body {
+		max_size 25MB
+	}
+
+	import app_security_headers
+
+	handle /api/* {
+		reverse_proxy api:8000 {
+			flush_interval -1
+		}
+	}
+
+	handle /health {
+		reverse_proxy api:8000
+	}
+
+	handle /ready {
+		reverse_proxy api:8000
+	}
+
+	handle /metrics {
+		respond 403
+	}
+
+	handle {
+		reverse_proxy web:8080
+	}
+}
+
+# Internal HTTP edge for the Playwright render worker and local HTTP development
+http://caddy:80, http://localhost:80, http://127.0.0.1:80 {
+	import app_routes
+}
+
+# HTTPS edge (Caddy internal CA for localhost; automatic ACME TLS when DOMAIN is set)
+{$DOMAIN:localhost} {
+	import app_routes
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+}

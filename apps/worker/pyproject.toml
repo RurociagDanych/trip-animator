@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "trip-worker"
+version = "0.1.0"
+description = "Deterministic Playwright + FFmpeg video render worker for Trip Animator"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "boto3>=1.36.0",
+  "httpx>=0.28.0",
+  "numpy>=1.26.0",
+  "playwright>=1.50.0",
+  "psycopg[binary]>=3.2.0",
+  "pydantic-settings>=2.7.0",
+  "trip-telemetry",
+]
+
+[tool.uv.sources]
+trip-telemetry = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/trip_worker"]

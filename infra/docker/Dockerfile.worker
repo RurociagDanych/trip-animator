@@ -1,0 +1,62 @@
+FROM python:3.12-slim AS base
+
+COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /uvx /bin/
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        ffmpeg \
+        fonts-liberation \
+        fonts-noto-core \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/app/.venv \
+    PATH="/app/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock* ./
+COPY packages/telemetry/pyproject.toml ./packages/telemetry/pyproject.toml
+COPY apps/api/pyproject.toml ./apps/api/pyproject.toml
+COPY apps/worker/pyproject.toml ./apps/worker/pyproject.toml
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ -f uv.lock ]; then \
+        uv sync --frozen --no-dev --no-install-workspace --package trip-worker; \
+    else \
+        uv sync --no-dev --no-install-workspace --package trip-worker; \
+    fi
+
+RUN /app/.venv/bin/playwright install-deps chromium \
+    && /app/.venv/bin/playwright install chromium \
+    && chmod -R a+rX /opt/ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY packages/telemetry ./packages/telemetry
+COPY apps/worker ./apps/worker
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ -f uv.lock ]; then \
+        uv sync --frozen --no-dev --no-editable --package trip-worker; \
+    else \
+        uv sync --no-dev --no-editable --package trip-worker; \
+    fi
+
+RUN groupadd --system --gid 10001 appgroup \
+    && useradd --system --uid 10001 --gid appgroup --create-home --home-dir /home/appuser --shell /usr/sbin/nologin appuser \
+    && mkdir -p /data/objects /data/tile_cache \
+    && chown -R 10001:10001 /home/appuser /data/objects /data/tile_cache
+
+# Chromium writes crash/cache/config state into $HOME and XDG dirs; map to tmpfs /tmp when read_only: true
+ENV HOME=/tmp \
+    XDG_CONFIG_HOME=/tmp/.config \
+    XDG_CACHE_HOME=/tmp/.cache
+
+USER 10001:10001
+
+CMD ["python", "-c", "from trip_worker.runner import run_worker_loop; run_worker_loop()"]

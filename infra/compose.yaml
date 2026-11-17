@@ -1,0 +1,443 @@
+name: trip-animator-v2
+
+x-api-build: &api-build
+  context: ..
+  dockerfile: infra/docker/Dockerfile.api
+
+x-app-env: &app-env
+  APP_ENV: ${APP_ENV:-development}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  DEV_AUTH_ENABLED: ${DEV_AUTH_ENABLED:-true}
+  DATABASE_URL: ${COMPOSE_DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-trip_app}:${POSTGRES_PASSWORD:-dev-postgres-password-change-me}@postgres:5432/${POSTGRES_DB:-trip_animator}}
+  SESSION_SECRET: ${SESSION_SECRET:-dev-only-session-secret-minimum-32-characters-long}
+  TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
+  ALLOWED_ORIGINS: ${COMPOSE_ALLOWED_ORIGINS:-http://localhost,https://localhost,http://localhost:5173,http://localhost:8080}
+  OBJECT_STORE_BACKEND: ${COMPOSE_OBJECT_STORE_BACKEND:-s3}
+  LOCAL_OBJECT_STORE_DIR: /data/objects
+  S3_ENDPOINT_URL: ${COMPOSE_S3_ENDPOINT_URL:-http://minio:9000}
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-minioadmin}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-minioadmin-change-me}
+  S3_BUCKET: ${S3_BUCKET:-trip-animator}
+  S3_REGION: ${S3_REGION:-us-east-1}
+  STRAVA_CLIENT_ID: ${STRAVA_CLIENT_ID:-}
+  STRAVA_CLIENT_SECRET: ${STRAVA_CLIENT_SECRET:-}
+  STRAVA_REDIRECT_URI: ${STRAVA_REDIRECT_URI:-http://localhost/strava/callback}
+  MAP_TILE_ALLOWLIST: ${MAP_TILE_ALLOWLIST:-https://tiles.openfreemap.org,https://s3.amazonaws.com,https://server.arcgisonline.com}
+  RENDER_RETENTION_DAYS: ${RENDER_RETENTION_DAYS:-7}
+  RATE_LIMIT_RETENTION_HOURS: ${RATE_LIMIT_RETENTION_HOURS:-24}
+  METRICS_TOKEN: ${METRICS_TOKEN:-}
+
+services:
+  postgres:
+    image: postgres:17.6-bookworm
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-trip_animator}
+      POSTGRES_USER: ${POSTGRES_USER:-trip_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev-postgres-password-change-me}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - backend
+
+  minio:
+    image: rustfs/rustfs:latest
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ADDRESS: ":9001"
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY_ID:-minioadmin}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_ACCESS_KEY:-minioadmin-change-me}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/health/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - backend
+
+  minio-init:
+    image: trip-animator-v2-api:local
+    build: *api-build
+    pull_policy: build
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      S3_ENDPOINT_URL: ${COMPOSE_S3_ENDPOINT_URL:-http://minio:9000}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-minioadmin}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-minioadmin-change-me}
+      S3_BUCKET: ${S3_BUCKET:-trip-animator}
+      S3_REGION: ${S3_REGION:-us-east-1}
+    depends_on:
+      minio:
+        condition: service_healthy
+    command:
+      - python
+      - -c
+      - |
+        import os
+        import boto3
+        from botocore.exceptions import ClientError
+
+        client = boto3.client(
+            "s3",
+            endpoint_url=os.environ["S3_ENDPOINT_URL"],
+            aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],
+            aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"],
+            region_name=os.environ.get("S3_REGION", "us-east-1"),
+        )
+        bucket = os.environ["S3_BUCKET"]
+        try:
+            client.head_bucket(Bucket=bucket)
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code in {"404", "NoSuchBucket", "NotFound"}:
+                client.create_bucket(Bucket=bucket)
+            else:
+                raise
+    read_only: true
+    tmpfs:
+      - /tmp:size=32M,mode=1777,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+    networks:
+      - backend
+
+  migrate:
+    image: trip-animator-v2-api:local
+    build: *api-build
+    pull_policy: build
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      <<: *app-env
+    working_dir: /app/apps/api
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M,mode=1777,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+    networks:
+      - backend
+
+  api:
+    image: trip-animator-v2-api:local
+    build: *api-build
+    pull_policy: build
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      <<: *app-env
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
+      GOLD_OUTPUT_DIR: /data/gold
+      STRAVA_VERIFY_TOKEN: ${STRAVA_VERIFY_TOKEN:-}
+      STRAVA_WEBHOOK_SUBSCRIPTION_ID: ${STRAVA_WEBHOOK_SUBSCRIPTION_ID:-}
+    expose:
+      - "8000"
+    volumes:
+      - object_data:/data/objects
+      - gold_data:/data/gold:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    read_only: true
+    tmpfs:
+      - /tmp:size=256M,mode=1777,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    networks:
+      - backend
+      - edge
+
+  worker:
+    image: trip-animator-v2-worker:local
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile.worker
+    pull_policy: build
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      <<: *app-env
+      RENDER_BASE_URL: ${COMPOSE_RENDER_BASE_URL:-http://caddy}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
+      TILE_CACHE_DIR: ${TILE_CACHE_DIR:-/data/tile_cache}
+    volumes:
+      - object_data:/data/objects
+      - tile_cache:/data/tile_cache
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+      caddy:
+        condition: service_started
+    shm_size: "1gb"
+    read_only: true
+    tmpfs:
+      - /tmp:size=2G,mode=1777,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    networks:
+      - backend
+      - edge
+
+  web:
+    image: trip-animator-v2-web:local
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile.web
+    pull_policy: build
+    expose:
+      - "8080"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O /dev/null http://127.0.0.1:8080/nginx-health || exit 1",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    read_only: true
+    tmpfs:
+      - /tmp:size=32M,mode=1777,noexec,nosuid,nodev
+      - /var/cache/nginx:size=32M,mode=0755,uid=101,gid=101,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    networks:
+      - edge
+
+  caddy:
+    image: caddy:2-alpine
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+      CADDY_TILE_CSP_ORIGINS: ${CADDY_TILE_CSP_ORIGINS:-https://tiles.openfreemap.org https://s3.amazonaws.com https://server.arcgisonline.com}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    networks:
+      - edge
+
+  airflow-init:
+    profiles: ["airflow"]
+    image: trip-animator-v2-airflow:local
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile.airflow
+    pull_policy: build
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      <<: *app-env
+      HOME: /tmp
+      AIRFLOW_HOME: /opt/airflow
+      AIRFLOW_DB: ${AIRFLOW_DB:-airflow}
+      POSTGRES_DB: ${POSTGRES_DB:-trip_animator}
+      POSTGRES_USER: ${POSTGRES_USER:-trip_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev-postgres-password-change-me}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-trip_app}:${POSTGRES_PASSWORD:-dev-postgres-password-change-me}@postgres:5432/${AIRFLOW_DB:-airflow}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+    command:
+      - bash
+      - -ec
+      - |
+        python - <<'PY'
+        import os
+        import psycopg
+        from psycopg import sql
+
+        db_name = os.environ.get("AIRFLOW_DB", "airflow")
+        user = os.environ["POSTGRES_USER"]
+        password = os.environ["POSTGRES_PASSWORD"]
+        with psycopg.connect(
+            host="postgres",
+            port=5432,
+            dbname=os.environ.get("POSTGRES_DB", "trip_animator"),
+            user=user,
+            password=password,
+            autocommit=True,
+        ) as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM pg_database WHERE datname = %s",
+                (db_name,),
+            ).fetchone()
+            if not exists:
+                conn.execute(
+                    sql.SQL("CREATE DATABASE {} OWNER {}").format(
+                        sql.Identifier(db_name),
+                        sql.Identifier(user),
+                    )
+                )
+        PY
+        exec airflow db migrate
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M,mode=1777,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+    networks:
+      - backend
+
+  airflow:
+    profiles: ["airflow"]
+    image: trip-animator-v2-airflow:local
+    build:
+      context: ..
+      dockerfile: infra/docker/Dockerfile.airflow
+    pull_policy: build
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      <<: *app-env
+      HOME: /tmp
+      AIRFLOW_HOME: /opt/airflow
+      GOLD_OUTPUT_DIR: /data/gold
+      TRIP_DBT_PROJECT_DIR: /app/dbt
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__DAGS_FOLDER: /app/airflow/dags
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-trip_app}:${POSTGRES_PASSWORD:-dev-postgres-password-change-me}@postgres:5432/${AIRFLOW_DB:-airflow}
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+      AIRFLOW__API__SECRET_KEY: ${AIRFLOW_API_SECRET_KEY:-}
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-}
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: ${AIRFLOW_SIMPLE_AUTH_USERS:-}
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /tmp/simple_auth_manager_passwords.json.generated
+      AIRFLOW__LOGGING__BASE_LOG_FOLDER: /opt/airflow/logs
+    ports:
+      - "127.0.0.1:${AIRFLOW_PORT:-8081}:8080"
+    volumes:
+      - object_data:/data/objects
+      - gold_data:/data/gold
+      - airflow_logs:/opt/airflow/logs
+      - ../airflow/dags:/app/airflow/dags:ro
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/v2/monitor/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+    read_only: true
+    tmpfs:
+      - /tmp:size=512M,mode=1777,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    networks:
+      - backend
+
+volumes:
+  postgres_data:
+  minio_data:
+  object_data:
+  gold_data:
+  tile_cache:
+  airflow_logs:
+  caddy_data:
+  caddy_config:
+
+networks:
+  backend:
+    driver: bridge
+  edge:
+    driver: bridge

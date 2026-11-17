@@ -1,0 +1,94 @@
+@import "tailwindcss";
+
+@theme {
+  --color-canvas: #0d1319;
+  --color-surface: #141c24;
+  --color-elevated: #1b2530;
+  --color-border: #273442;
+  --color-ink: #eef2f6;
+  --color-ink-muted: #8fa0b2;
+  --color-sky-accent: #38bdf8;
+  --color-amber-accent: #f59e0b;
+  --color-teal-accent: #14b8a6;
+  --color-coral-accent: #fb7185;
+
+  --font-sans: "Inter", "SF Pro Text", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    min-height: 100%;
+    background-color: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    color-scheme: dark;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  input[type="date"] {
+    color-scheme: dark;
+  }
+
+  button,
+  a,
+  input,
+  select,
+  textarea {
+    outline-color: var(--color-sky-accent);
+  }
+}
+
+.tabular-telemetry {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.topo-grid-surface {
+  background-image:
+    linear-gradient(to right, rgba(143, 160, 178, 0.06) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(143, 160, 178, 0.06) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+/* Subtle dark scrollbars for studio panels */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(143, 160, 178, 0.22);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(143, 160, 178, 0.4);
+}
+
+/* uPlot theme tweaks */
+.uplot {
+  font-family: var(--font-mono);
+  color: var(--color-ink-muted);
+}
+
+.uplot .u-legend {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
