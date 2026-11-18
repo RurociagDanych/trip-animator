@@ -38,7 +38,11 @@ import {
   formatElevation,
   parseResolutionPreset,
 } from "../../lib/geo/format";
-import { clampFitTrackPadding, solveStageLayout } from "../../lib/geo/layout";
+import {
+  clampFitTrackPadding,
+  projectLngLatToScreen,
+  solveStageLayout,
+} from "../../lib/geo/layout";
 import {
   TERRAIN_SOURCE_ID,
   buildDeckOverlayProps,
@@ -69,6 +73,8 @@ const ASPECT_RATIO_CLASS: Record<ResolutionPreset, string> = {
 };
 
 const BUILDINGS_LAYER_ID = "trip-3d-buildings";
+const EMPTY_MATCHED_PHOTOS: readonly MatchedPhoto[] = [];
+const EMPTY_CLIMBS: readonly (ClimbHighlightOut | ManifestClimb)[] = [];
 
 export interface TripStageCanvasHandle {
   waitForReady: () => Promise<void>;
@@ -579,10 +585,12 @@ interface ProjectedPhoto {
   y: number;
 }
 
-interface ProjectedClimb {
-  climb: ClimbProgressMarker;
-  x: number;
-  y: number;
+interface FitCameraSnapshot {
+  boundsKey: string;
+  center: [number, number];
+  zoom: number;
+  pitch: number;
+  bearing: number;
 }
 
 interface ProjectedPoint {
@@ -635,9 +643,9 @@ export function TripStageCanvas({
   jobId,
   controllerRef,
   geometryStatus,
-  matchedPhotos = [],
+  matchedPhotos = EMPTY_MATCHED_PHOTOS,
   activePhoto = null,
-  climbs = [],
+  climbs = EMPTY_CLIMBS,
   pinModeActive = false,
   onMapPinClick,
   onCancelPinMode,
@@ -654,7 +662,7 @@ export function TripStageCanvas({
   const [webglAvailable] = useState<boolean>(() => isWebGlSupported());
   const [projectedStops, setProjectedStops] = useState<ProjectedStop[]>([]);
   const [projectedPhotos, setProjectedPhotos] = useState<ProjectedPhoto[]>([]);
-  const [projectedClimbs, setProjectedClimbs] = useState<ProjectedClimb[]>([]);
+  const [fitCamera, setFitCamera] = useState<FitCameraSnapshot | null>(null);
   const [projectedMarker, setProjectedMarker] = useState<ProjectedPoint | null>(null);
   const [measuredHudSize, setMeasuredHudSize] = useState<{ width: number; height: number } | null>(
     null,
@@ -756,6 +764,52 @@ export function TripStageCanvas({
     [spec, evaluated, adaptiveFollow],
   );
 
+  const keyframeZoomOffset = Number.isFinite(cameraFrame.zoomOffset) ? cameraFrame.zoomOffset! : 0;
+  const effectiveFollowZoom = adaptiveFollow
+    ? Math.min(18, Math.max(3, adaptiveFollow.zoom + keyframeZoomOffset))
+    : null;
+
+  const fitClimbTargets = useMemo(() => {
+    if (
+      spec.camera_mode !== "fit-track" ||
+      spec.show_climb_callouts === false ||
+      !fitCamera ||
+      reachedClimbs.length === 0
+    ) {
+      return undefined;
+    }
+    const targets: { id: string; screenX: number; screenY: number }[] = [];
+    for (const climb of reachedClimbs) {
+      if (
+        !Number.isFinite(climb.summitPosition[0]) ||
+        !Number.isFinite(climb.summitPosition[1]) ||
+        Math.abs(climb.summitPosition[1]) > 90
+      ) {
+        continue;
+      }
+      const scr = projectLngLatToScreen(
+        climb.summitPosition,
+        fitCamera.center,
+        fitCamera.zoom,
+        fitCamera.pitch,
+        fitCamera.bearing,
+        viewportSize.width,
+        viewportSize.height,
+      );
+      if (scr.visible) {
+        targets.push({ id: climb.id, screenX: scr.x, screenY: scr.y });
+      }
+    }
+    return targets.length > 0 ? targets : undefined;
+  }, [
+    spec.camera_mode,
+    spec.show_climb_callouts,
+    fitCamera,
+    reachedClimbs,
+    viewportSize.width,
+    viewportSize.height,
+  ]);
+
   const layout = useMemo(
     () =>
       solveStageLayout({
@@ -770,10 +824,11 @@ export function TripStageCanvas({
         hasActiveChapterCard,
         hasActiveFinalePoster,
         climbMarkers: reachedClimbs,
+        climbCalloutTargets: fitClimbTargets,
         followCamera: adaptiveFollow
           ? {
               center: adaptiveFollow.center,
-              zoom: adaptiveFollow.zoom,
+              zoom: effectiveFollowZoom ?? adaptiveFollow.zoom,
               pitch: cameraFrame.pitch,
               bearing: cameraFrame.bearing,
             }
@@ -793,7 +848,9 @@ export function TripStageCanvas({
       hasActiveChapterCard,
       hasActiveFinalePoster,
       reachedClimbs,
+      fitClimbTargets,
       adaptiveFollow,
+      effectiveFollowZoom,
       cameraFrame.pitch,
       cameraFrame.bearing,
       travelDurationS,
@@ -813,8 +870,8 @@ export function TripStageCanvas({
 
   const is3dActive = is3dCameraActive(spec);
 
-  // Initialize MapLibre + Deck.gl when WebGL is available
-  useEffect(() => {
+  // Initialize MapLibre + Deck.gl when WebGL is available (layout phase so camera/overlay commit runs on mount)
+  useLayoutEffect(() => {
     const container = mapContainerRef.current;
     if (!container || !webglAvailable) {
       mapReadyPromiseRef.current = Promise.resolve();
@@ -956,7 +1013,7 @@ export function TripStageCanvas({
     );
 
     const padKey = `${layout.fitPadding.top},${layout.fitPadding.bottom},${layout.fitPadding.left},${layout.fitPadding.right}`;
-    const boundsKey = `${evaluated.bounds.join(",")}|${spec.camera_mode}|${spec.camera_preset}|${cameraFrame.pitch.toFixed(2)}|${cameraFrame.bearing.toFixed(2)}|${viewportSize.width}x${viewportSize.height}|${padKey}`;
+    const boundsKey = `${evaluated.bounds.join(",")}|${spec.camera_mode}|${spec.camera_preset}|${cameraFrame.pitch.toFixed(2)}|${cameraFrame.bearing.toFixed(2)}|${keyframeZoomOffset.toFixed(2)}|${viewportSize.width}x${viewportSize.height}|${padKey}`;
 
     const hasValidBounds = evaluated.bounds.every(Number.isFinite);
     const targetCenter = adaptiveFollow?.center ?? evaluated.markerPosition;
@@ -998,14 +1055,28 @@ export function TripStageCanvas({
                 bearing: cameraFrame.bearing,
               })
             : undefined;
-        if (fitted && fitted.center && Number.isFinite(fitted.zoom)) {
+        let fallbackCenter: [number, number] | null = null;
+        let fallbackZoom: number | null = null;
+        const fittedZoom = fitted?.zoom;
+        if (fitted && fitted.center && typeof fittedZoom === "number" && Number.isFinite(fittedZoom)) {
+          const targetZoom =
+            keyframeZoomOffset !== 0
+              ? Math.min(18, Math.max(2, fittedZoom + keyframeZoomOffset))
+              : fittedZoom;
           map.jumpTo({
             center: fitted.center,
-            zoom: fitted.zoom,
+            zoom: targetZoom,
             bearing: cameraFrame.bearing,
             pitch: cameraFrame.pitch,
             padding: zeroPadding,
           });
+          const fc = fitted.center as { lng?: number; lat?: number } | [number, number];
+          if (Array.isArray(fc) && fc.length >= 2) {
+            fallbackCenter = [fc[0], fc[1]];
+          } else if (fc && typeof fc === "object" && "lng" in fc && "lat" in fc) {
+            fallbackCenter = [Number(fc.lng), Number(fc.lat)];
+          }
+          fallbackZoom = targetZoom;
         } else {
           map.fitBounds(bounds, {
             padding: 24,
@@ -1017,10 +1088,49 @@ export function TripStageCanvas({
             map.setPitch(cameraFrame.pitch);
           }
         }
+
+        const rawCenter =
+          typeof map.getCenter === "function"
+            ? (map.getCenter() as unknown as { lng?: number; lat?: number } | [number, number] | null)
+            : null;
+        const mapCenter: [number, number] | null = Array.isArray(rawCenter)
+          ? rawCenter.length >= 2 && Number.isFinite(rawCenter[0]) && Number.isFinite(rawCenter[1])
+            ? [rawCenter[0], rawCenter[1]]
+            : null
+          : rawCenter &&
+              typeof rawCenter === "object" &&
+              typeof rawCenter.lng === "number" &&
+              typeof rawCenter.lat === "number" &&
+              Number.isFinite(rawCenter.lng) &&
+              Number.isFinite(rawCenter.lat)
+            ? [rawCenter.lng, rawCenter.lat]
+            : null;
+        const mapZoom = typeof map.getZoom === "function" ? map.getZoom() : null;
+        const mapPitch = typeof map.getPitch === "function" ? map.getPitch() : null;
+        const mapBearing = typeof map.getBearing === "function" ? map.getBearing() : null;
+        const resolvedCenter = mapCenter ?? fallbackCenter;
+        const resolvedZoom =
+          typeof mapZoom === "number" && Number.isFinite(mapZoom) ? mapZoom : fallbackZoom;
+        if (resolvedCenter && resolvedZoom !== null && Number.isFinite(resolvedZoom)) {
+          setFitCamera({
+            boundsKey,
+            center: resolvedCenter,
+            zoom: resolvedZoom,
+            pitch:
+              typeof mapPitch === "number" && Number.isFinite(mapPitch)
+                ? mapPitch
+                : cameraFrame.pitch,
+            bearing:
+              typeof mapBearing === "number" && Number.isFinite(mapBearing)
+                ? mapBearing
+                : cameraFrame.bearing,
+          });
+        }
       }
     } else {
       fitAppliedBoundsRef.current = null;
-      const followZoom = adaptiveFollow?.zoom ?? 11.5;
+      setFitCamera((prev) => (prev !== null ? null : prev));
+      const followZoom = effectiveFollowZoom ?? 11.5;
       if (hasValidMarker && Number.isFinite(followZoom)) {
         map.jumpTo({
           center: targetCenter,
@@ -1043,7 +1153,7 @@ export function TripStageCanvas({
           Math.abs(s.position[1]) <= 90,
       );
       if (reached.length === 0) {
-        setProjectedStops([]);
+        setProjectedStops((prev) => (prev.length === 0 ? prev : []));
       } else {
         setProjectedStops(
           reached.map((stop) => {
@@ -1054,7 +1164,7 @@ export function TripStageCanvas({
       }
 
       if (reachedPhotos.length === 0) {
-        setProjectedPhotos([]);
+        setProjectedPhotos((prev) => (prev.length === 0 ? prev : []));
       } else {
         setProjectedPhotos(
           reachedPhotos
@@ -1079,27 +1189,11 @@ export function TripStageCanvas({
         Math.abs(evaluated.markerPosition[1]) <= 90
       ) {
         const mPt = map.project(evaluated.markerPosition);
-        setProjectedMarker({ x: mPt.x, y: mPt.y });
-      } else {
-        setProjectedMarker(null);
-      }
-
-      if (reachedClimbs.length === 0 || !spec.show_climb_callouts) {
-        setProjectedClimbs([]);
-      } else {
-        setProjectedClimbs(
-          reachedClimbs
-            .filter(
-              (c) =>
-                Number.isFinite(c.summitPosition[0]) &&
-                Number.isFinite(c.summitPosition[1]) &&
-                Math.abs(c.summitPosition[1]) <= 90,
-            )
-            .map((climb) => {
-              const pt = map.project(climb.summitPosition);
-              return { climb, x: pt.x, y: pt.y };
-            }),
+        setProjectedMarker((prev) =>
+          prev && prev.x === mPt.x && prev.y === mPt.y ? prev : { x: mPt.x, y: mPt.y },
         );
+      } else {
+        setProjectedMarker((prev) => (prev === null ? prev : null));
       }
     };
 
@@ -1114,6 +1208,8 @@ export function TripStageCanvas({
     reachedClimbs,
     stages,
     adaptiveFollow,
+    effectiveFollowZoom,
+    keyframeZoomOffset,
     layout.fitPadding,
     layout.followPadding,
     spec.camera_mode,
@@ -1178,7 +1274,8 @@ export function TripStageCanvas({
         if (
           cameraChanged ||
           spec.camera_mode === "follow-marker" ||
-          spec.camera_preset !== "flat"
+          spec.camera_preset !== "flat" ||
+          (spec.camera_keyframes?.length ?? 0) > 0
         ) {
           await new Promise<void>((resolve) => {
             const timeout = window.setTimeout(resolve, 1200);
@@ -1191,7 +1288,7 @@ export function TripStageCanvas({
         await awaitNextAnimationFrames(1);
       },
     }),
-    [spec.camera_mode, spec.camera_preset, photoUrlsKey],
+    [spec.camera_mode, spec.camera_preset, spec.camera_keyframes?.length, photoUrlsKey],
   );
 
   const miniElevation = useMemo(
@@ -1221,7 +1318,7 @@ export function TripStageCanvas({
       data-camera-preset={spec.camera_preset}
       data-visibility-mode={spec.visibility_mode}
       data-resolution={spec.resolution}
-      data-follow-zoom={adaptiveFollow ? adaptiveFollow.zoom.toFixed(3) : undefined}
+      data-follow-zoom={effectiveFollowZoom !== null ? effectiveFollowZoom.toFixed(3) : undefined}
       data-hud-slot={layout.hud?.slot ?? spec.statistics_panel.position}
       data-job-id={jobId}
       className={wrapperClass}
@@ -1268,7 +1365,7 @@ export function TripStageCanvas({
       {/* Projected crisp icons for overnight stops, climb summits, photo pins, and active stage activity marker */}
       {webglAvailable &&
       (projectedStops.length > 0 ||
-        projectedClimbs.length > 0 ||
+        layout.climbCallouts.length > 0 ||
         projectedPhotos.length > 0 ||
         (projectedMarker && evaluated.activeStage)) ? (
         <div className="pointer-events-none absolute inset-0 z-10 overflow-hidden">
@@ -1284,24 +1381,72 @@ export function TripStageCanvas({
             </div>
           ))}
 
-          {spec.show_climb_callouts !== false
-            ? projectedClimbs.map(({ climb, x, y }) => (
-                <div
-                  key={climb.id}
-                  data-testid={`climb-callout-${climb.id}`}
-                  className="absolute -translate-x-1/2 -translate-y-full pb-1"
-                  style={{ left: `${x}px`, top: `${y}px` }}
-                >
-                  <div className="inline-flex items-center gap-1 rounded border border-orange-400/60 bg-canvas/92 px-1.5 py-0.5 text-[9px] font-semibold text-ink shadow-md backdrop-blur-sm">
-                    <Mountain className="h-2.5 w-2.5 text-orange-400" aria-hidden="true" />
-                    <span className="text-orange-300">{climb.category}</span>
-                    <span className="max-w-[96px] truncate">{climb.name}</span>
-                    <span className="tabular-telemetry text-ink-muted">
-                      {formatElevation(climb.summitElevM, spec.units)}
-                    </span>
-                  </div>
-                </div>
-              ))
+          {spec.show_climb_callouts !== false && layout.climbCallouts.length > 0
+            ? (() => {
+                const climbById = new Map(reachedClimbs.map((c) => [c.id, c]));
+                const renderedSlots = layout.climbCallouts.filter((slot) => climbById.has(slot.id));
+                if (renderedSlots.length === 0) return null;
+                return (
+                  <>
+                    <svg
+                      data-testid="climb-callout-leaders"
+                      className="pointer-events-none absolute inset-0 h-full w-full"
+                      aria-hidden="true"
+                    >
+                      {renderedSlots.map((slot) => {
+                        const edgeX = Math.min(
+                          slot.rect.x + slot.rect.width,
+                          Math.max(slot.rect.x, slot.anchorX),
+                        );
+                        const edgeY = Math.min(
+                          slot.rect.y + slot.rect.height,
+                          Math.max(slot.rect.y, slot.anchorY),
+                        );
+                        return (
+                          <line
+                            key={slot.id}
+                            data-testid={`climb-leader-${slot.id}`}
+                            x1={slot.anchorX}
+                            y1={slot.anchorY}
+                            x2={edgeX}
+                            y2={edgeY}
+                            stroke="rgba(251, 146, 60, 0.85)"
+                            strokeWidth="1.5"
+                          />
+                        );
+                      })}
+                    </svg>
+                    {renderedSlots.map((slot) => {
+                      const climb = climbById.get(slot.id)!;
+                      return (
+                        <div
+                          key={slot.id}
+                          data-testid={`climb-callout-${slot.id}`}
+                          className="absolute flex items-center"
+                          style={{
+                            left: `${slot.rect.x}px`,
+                            top: `${slot.rect.y}px`,
+                            width: `${slot.rect.width}px`,
+                            height: `${slot.rect.height}px`,
+                          }}
+                        >
+                          <div className="inline-flex w-full items-center gap-1 rounded border border-orange-400/60 bg-canvas/92 px-1.5 py-0.5 text-[9px] font-semibold text-ink shadow-md backdrop-blur-sm">
+                            <Mountain
+                              className="h-2.5 w-2.5 shrink-0 text-orange-400"
+                              aria-hidden="true"
+                            />
+                            <span className="shrink-0 text-orange-300">{climb.category}</span>
+                            <span className="min-w-0 flex-1 truncate">{climb.name}</span>
+                            <span className="tabular-telemetry shrink-0 text-ink-muted">
+                              {formatElevation(climb.summitElevM, spec.units)}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </>
+                );
+              })()
             : null}
 
           {projectedPhotos.map(({ photo, x, y }) => (
@@ -1452,15 +1597,23 @@ export function TripStageCanvas({
       ) : null}
 
       {/* Color-by Micro-Legend */}
-      {spec.color_by !== "stage" && evaluated.colorLegendStops && evaluated.colorLegendStops.length > 0 ? (
+      {spec.color_by !== "stage" &&
+      evaluated.colorLegendStops &&
+      evaluated.colorLegendStops.length > 0 &&
+      layout.colorLegend ? (
         <div
           data-testid="color-by-legend"
-          className="pointer-events-none absolute top-3 right-3 z-20 flex items-center gap-1.5 rounded-md border border-white/15 bg-canvas/85 px-2.5 py-1 text-[10px] text-ink shadow-md backdrop-blur-md"
+          className="pointer-events-none absolute z-20 flex flex-wrap items-center gap-1.5 rounded-md border border-white/15 bg-canvas/85 px-2.5 py-1 text-[10px] text-ink shadow-md backdrop-blur-md"
+          style={{
+            left: `${layout.colorLegend.rect.x}px`,
+            top: `${layout.colorLegend.rect.y}px`,
+            maxWidth: `${layout.colorLegend.rect.width}px`,
+          }}
         >
           <span className="font-semibold uppercase tracking-wide text-ink-muted">
             {spec.color_by}
           </span>
-          <div className="flex items-center gap-1">
+          <div className="flex flex-wrap items-center gap-1">
             {evaluated.colorLegendStops.map((stop, idx) => (
               <span key={`${stop.label}-${idx}`} className="inline-flex items-center gap-1">
                 <span

@@ -104,8 +104,14 @@ def test_incremental_dbt_gold_delta_cache_and_new_marts(
             "SELECT trip_id, total_distance_m FROM mart_user_career_summary"
         ).fetchall()
         assert len(career_rows) == 1
-        h3_rows = con.execute("SELECT COUNT(*) FROM mart_spatial_coverage_h3").fetchone()
-        assert h3_rows is not None and h3_rows[0] >= 1
+        h3_rows = con.execute(
+            "SELECT stage_id, year, center_lat, center_lon, point_count, stage_count "
+            "FROM mart_spatial_coverage_h3"
+        ).fetchall()
+        assert len(h3_rows) >= 1
+        assert all(
+            r[0] == str(stage1.id) and r[2] is not None and r[3] is not None for r in h3_rows
+        )
     finally:
         con.close()
 
@@ -309,3 +315,93 @@ def test_ingest_worker_webhook_queue_and_silver_replay(
         )
         assert del_res["succeeded"] == 1
         assert db.scalar(select(Stage).where(Stage.strava_activity_id == 555001)) is None
+
+
+def test_materialize_gold_marts_seeds_existing_duckdb_from_s3_in_ephemeral_container(
+    airflow_harness: AirflowTaskHarness,
+    tmp_path: Path,
+) -> None:
+    from botocore.exceptions import ClientError
+    from trip_api.storage import S3ObjectStore
+
+    user = airflow_harness.create_user("s3seed@example.com")
+    proj = airflow_harness.create_project(user.id, "S3 Seed Tour")
+    stage1 = airflow_harness.ingest_sample_stage(proj, name="Stage 1")
+    silver_bytes = airflow_harness.store.get_bytes(stage1.silver_object_key)
+
+    class _FakePaginator:
+        def __init__(self, objects: dict[str, bytes]) -> None:
+            self._objects = objects
+
+        def paginate(self, *, Bucket: str, Prefix: str) -> list[dict[str, Any]]:
+            _ = Bucket
+            contents = [
+                {
+                    "Key": k,
+                    "ETag": f'"{len(v)}"',
+                    "Size": len(v),
+                    "LastModified": datetime.now(UTC),
+                }
+                for k, v in sorted(self._objects.items())
+                if k.startswith(Prefix)
+            ]
+            return [{"Contents": contents}]
+
+    class _FakeBody:
+        def __init__(self, data: bytes) -> None:
+            self._data = data
+
+        def read(self) -> bytes:
+            return self._data
+
+        def close(self) -> None:
+            return None
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.objects: dict[str, bytes] = {stage1.silver_object_key: silver_bytes}
+            self.gold_get_calls = 0
+
+        def get_paginator(self, op_name: str) -> _FakePaginator:
+            assert op_name == "list_objects_v2"
+            return _FakePaginator(self.objects)
+
+        def get_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
+            _ = Bucket
+            if Key == "gold/trip_analytics.duckdb":
+                self.gold_get_calls += 1
+            if Key not in self.objects:
+                raise ClientError(
+                    {
+                        "Error": {"Code": "NoSuchKey", "Message": "Not Found"},
+                        "ResponseMetadata": {"HTTPStatusCode": 404},
+                    },
+                    "GetObject",
+                )
+            return {"Body": _FakeBody(self.objects[Key])}
+
+    s3_store = S3ObjectStore(
+        endpoint_url="http://localhost:9000",
+        access_key_id="test",
+        secret_access_key="test",
+        bucket="trip-test",
+        region="us-east-1",
+    )
+    fake_client = _FakeClient()
+    s3_store.client = fake_client
+
+    ephemeral_gold_1 = tmp_path / "ephemeral_run_1"
+    res1 = materialize_gold_marts(s3_store, gold_dir=ephemeral_gold_1)
+    assert res1["silver_count"] == 1
+    assert fake_client.gold_get_calls == 1
+
+    # Upload built Gold DB to S3 and run in a second fresh ephemeral dir without local target_db
+    fake_client.objects["gold/trip_analytics.duckdb"] = (
+        ephemeral_gold_1 / "trip_analytics.duckdb"
+    ).read_bytes()
+    ephemeral_gold_2 = tmp_path / "ephemeral_run_2"
+    res2 = materialize_gold_marts(s3_store, gold_dir=ephemeral_gold_2)
+    assert res2["silver_count"] == 1
+    assert fake_client.gold_get_calls == 2
+    validated = validate_gold_marts(gold_dir=ephemeral_gold_2, expected_stage_count=1)
+    assert validated["validated"] is True

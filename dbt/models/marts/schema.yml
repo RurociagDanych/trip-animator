@@ -183,12 +183,24 @@ models:
           - not_null
 
   - name: mart_spatial_coverage_h3
-    description: "Hexagonal spatial coverage grid per trip/year."
+    description: "Hexagonal spatial coverage grid per trip/stage/year."
     columns:
       - name: trip_id
         tests:
           - not_null
+      - name: stage_id
+        tests:
+          - not_null
+      - name: year
+        tests:
+          - not_null
       - name: h3_index
+        tests:
+          - not_null
+      - name: center_lat
+        tests:
+          - not_null
+      - name: center_lon
         tests:
           - not_null
       - name: point_count

@@ -226,6 +226,18 @@ variable "dbt_schedule_expression" {
   default     = "cron(30 3 * * ? *)"
 }
 
+variable "enable_ingest_schedule" {
+  description = "Enable EventBridge Scheduler recurring ECS RunTask to drain Strava webhook IngestJobs."
+  type        = bool
+  default     = true
+}
+
+variable "ingest_schedule_expression" {
+  description = "EventBridge Scheduler cron/rate expression for the IngestJob drain task."
+  type        = string
+  default     = "rate(1 minute)"
+}
+
 variable "kms_deletion_window_days" {
   description = "Waiting period in days before deleting KMS keys."
   type        = number

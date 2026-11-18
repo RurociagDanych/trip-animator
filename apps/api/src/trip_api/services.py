@@ -25,10 +25,12 @@ from trip_telemetry import (
     LodLevel,
     ParsedTrack,
     PhotoAlignmentInput,
+    StageEventsBundle,
     StageTrackInput,
     align_photos_to_stages,
     apply_non_destructive_trim,
     build_chart_cache_from_parquet,
+    build_chart_cache_payload,
     build_lod_cache_from_parquet,
     build_lod_cache_payload,
     build_silver_dataframe,
@@ -40,6 +42,7 @@ from trip_telemetry import (
     parse_stage_events_parquet_bytes,
     query_stage_kpis,
     query_telemetry_profile,
+    serialize_stage_events_parquet_bytes,
     write_silver_parquet,
 )
 
@@ -936,35 +939,59 @@ def build_project_geometry_collection(
     return TelemetryGeometryOut(project_id=project_id, features=features)
 
 
-def build_project_telemetry_chart(
+def _downsample_chart_profile(
+    profile: list[dict[str, object]],
+    target_points: int,
+) -> list[dict[str, object]]:
+    if len(profile) <= target_points:
+        return profile
+    if target_points <= 2:
+        return [profile[0], profile[-1]] if len(profile) >= 2 else list(profile)
+    step = (len(profile) - 1) / (target_points - 1)
+    return [profile[round(i * step)] for i in range(target_points)]
+
+
+def _load_or_build_stage_chart_profile(
     store: ObjectStore,
     project_id: uuid.UUID,
-    stages: list[Stage],
-    max_points: int,
-) -> TelemetryChartOut:
-    """Build combined LTTB telemetry chart points with a per-stage minimum resolution floor."""
-    if not stages:
-        return TelemetryChartOut(project_id=project_id, total_distance_m=0.0, points=[])
+    stage: Stage,
+    per_stage_budget: int,
+) -> tuple[list[dict[str, object]], float]:
+    profile: list[dict[str, object]] | None = None
+    chart_key = stage_chart_cache_key(project_id, stage.id)
+    if per_stage_budget <= _DEFAULT_CHART_CACHE_POINTS:
+        try:
+            profile = parse_chart_cache_payload(
+                store.get_bytes(chart_key),
+                trim_start_s=stage.trim_start_s,
+                trim_end_s=stage.trim_end_s,
+            )
+        except Exception:
+            profile = None
+        if profile is not None:
+            profile = _downsample_chart_profile(profile, per_stage_budget)
 
-    combined: list[TelemetryChartPoint] = []
-    distance_offset = 0.0
-    per_stage_budget = max(2, min(max_points, max(25, max_points // len(stages))))
-
-    with materialize_silver_parquets(store, stages) as pairs:
-        for stage, parquet_path in pairs:
-            profile: list[dict[str, object]] | None = None
-            chart_key = stage_chart_cache_key(project_id, stage.id)
-            if per_stage_budget == _DEFAULT_CHART_CACHE_POINTS:
+    if profile is None:
+        with materialize_silver_parquet(store, stage) as parquet_path:
+            if per_stage_budget <= _DEFAULT_CHART_CACHE_POINTS:
+                full_profile = query_telemetry_profile(
+                    parquet_path,
+                    max_points=_DEFAULT_CHART_CACHE_POINTS,
+                    trim_start_s=stage.trim_start_s,
+                    trim_end_s=stage.trim_end_s,
+                )
                 try:
-                    profile = parse_chart_cache_payload(
-                        store.get_bytes(chart_key),
+                    chart_gz = build_chart_cache_payload(
+                        full_profile,
                         trim_start_s=stage.trim_start_s,
                         trim_end_s=stage.trim_end_s,
+                        max_points=_DEFAULT_CHART_CACHE_POINTS,
                     )
+                    store.put_bytes(chart_key, chart_gz, content_type="application/gzip")
                 except Exception:
-                    profile = None
-
-            if profile is None:
+                    logger.warning("Could not persist backfilled chart cache %s", chart_key)
+                profile = _downsample_chart_profile(full_profile, per_stage_budget)
+            else:
                 profile = query_telemetry_profile(
                     parquet_path,
                     max_points=per_stage_budget,
@@ -972,22 +999,91 @@ def build_project_telemetry_chart(
                     trim_end_s=stage.trim_end_s,
                 )
 
-            stage_dist = 0.0
-            for row in profile:
-                d_val = float(cast(float, row["cum_dist_m"]))
-                stage_dist = max(stage_dist, d_val)
-                combined.append(
-                    TelemetryChartPoint(
-                        cum_dist_m=round(distance_offset + d_val, 2),
-                        elev_m=cast(float | None, row["elev_m"]),
-                        speed_mps=float(cast(float, row["speed_mps"])),
-                        grade_pct=cast(float | None, row["grade_pct"]),
-                        hr_bpm=cast(float | None, row["hr_bpm"]),
-                        watts=cast(float | None, row["watts"]),
-                    )
+    has_trim = stage.trim_start_s is not None or stage.trim_end_s is not None
+    max_row_dist = max((float(cast(float, row["cum_dist_m"])) for row in profile), default=0.0)
+    stage_dist = max_row_dist if has_trim else float(stage.distance_m or 0.0)
+    return profile, stage_dist
+
+
+def _load_or_build_stage_events(
+    store: ObjectStore,
+    project_id: uuid.UUID,
+    stage: Stage,
+) -> StageEventsBundle:
+    events_key = stage_events_cache_key(project_id, stage.id)
+    bundle: StageEventsBundle | None = None
+    try:
+        bundle = parse_stage_events_parquet_bytes(
+            store.get_bytes(events_key),
+            trim_start_s=stage.trim_start_s,
+            trim_end_s=stage.trim_end_s,
+        )
+    except Exception:
+        bundle = None
+
+    if bundle is None:
+        with materialize_silver_parquet(store, stage) as parquet_path:
+            bundle = extract_stage_highlights(
+                parquet_path,
+                stage_id=str(stage.id),
+                trim_start_s=stage.trim_start_s,
+                trim_end_s=stage.trim_end_s,
+            )
+        try:
+            store.put_bytes(
+                events_key,
+                serialize_stage_events_parquet_bytes(bundle),
+                content_type="application/vnd.apache.parquet",
+            )
+        except Exception:
+            logger.warning("Could not persist backfilled events sidecar %s", events_key)
+
+    return bundle
+
+
+def build_project_telemetry_chart(
+    store: ObjectStore,
+    project_id: uuid.UUID,
+    stages: list[Stage],
+    max_points: int,
+) -> TelemetryChartOut:
+    """Build combined LTTB telemetry chart points with lazy Silver Parquet materialization."""
+    if not stages:
+        return TelemetryChartOut(project_id=project_id, total_distance_m=0.0, points=[])
+
+    combined: list[TelemetryChartPoint] = []
+    distance_offset = 0.0
+    per_stage_budget = max(2, min(max_points, max(25, max_points // len(stages))))
+
+    if len(stages) == 1:
+        resolved = [
+            _load_or_build_stage_chart_profile(store, project_id, stages[0], per_stage_budget)
+        ]
+    else:
+        with ThreadPoolExecutor(max_workers=min(8, len(stages))) as pool:
+            resolved = list(
+                pool.map(
+                    lambda st: _load_or_build_stage_chart_profile(
+                        store, project_id, st, per_stage_budget
+                    ),
+                    stages,
                 )
-            has_trim = stage.trim_start_s is not None or stage.trim_end_s is not None
-            distance_offset += stage_dist if has_trim else stage.distance_m
+            )
+
+    for profile, stage_dist in resolved:
+        for row in profile:
+            d_val = float(cast(float, row["cum_dist_m"]))
+            combined.append(
+                TelemetryChartPoint(
+                    cum_dist_m=round(distance_offset + d_val, 2),
+                    elev_m=cast(float | None, row["elev_m"]),
+                    speed_mps=float(cast(float, row["speed_mps"])),
+                    grade_pct=cast(float | None, row["grade_pct"]),
+                    hr_bpm=cast(float | None, row["hr_bpm"]),
+                    watts=cast(float | None, row["watts"]),
+                )
+            )
+        distance_offset += stage_dist
 
     if len(combined) > max_points:
         step = (len(combined) - 1) / (max_points - 1)
@@ -1016,133 +1112,120 @@ def build_project_highlights(
     all_peaks: list[PeakEffortOut] = []
     all_geo: list[StageGeoContextOut] = []
 
+    if len(stages) == 1:
+        bundles = [_load_or_build_stage_events(store, project_id, stages[0])]
+    else:
+        with ThreadPoolExecutor(max_workers=min(8, len(stages))) as pool:
+            bundles = list(
+                pool.map(lambda st: _load_or_build_stage_events(store, project_id, st), stages)
+            )
+
     distance_offset = 0.0
-
-    with materialize_silver_parquets(store, stages) as pairs:
-        for stage, parquet_path in pairs:
-            bundle = None
-            events_key = stage_events_cache_key(project_id, stage.id)
-            try:
-                bundle = parse_stage_events_parquet_bytes(
-                    store.get_bytes(events_key),
-                    trim_start_s=stage.trim_start_s,
-                    trim_end_s=stage.trim_end_s,
-                )
-            except Exception:
-                bundle = None
-
-            if bundle is None:
-                bundle = extract_stage_highlights(
-                    parquet_path,
-                    stage_id=str(stage.id),
-                    trim_start_s=stage.trim_start_s,
-                    trim_end_s=stage.trim_end_s,
-                )
-
-            denom = (
-                total_project_distance
-                if total_project_distance > 0
-                else max(stage.distance_m, 1.0)
-            )
-            for idx, c in enumerate(bundle.climbs):
-                sd = float(c.start_dist_m)
-                ed = float(c.end_dist_m)
-                all_climbs.append(
-                    ClimbHighlightOut(
-                        id=str(c.id or f"{stage.id}-climb-{idx}"),
-                        stage_id=stage.id,
-                        name=str(c.name or f"Climb {idx + 1}"),
-                        category=c.category,
-                        start_dist_m=round(distance_offset + sd, 2),
-                        end_dist_m=round(distance_offset + ed, 2),
-                        start_progress=round(
-                            min(max((distance_offset + sd) / denom, 0.0), 1.0), 6
-                        ),
-                        end_progress=round(
-                            min(max((distance_offset + ed) / denom, 0.0), 1.0), 6
-                        ),
-                        summit_progress=round(
-                            min(
-                                max(
-                                    (distance_offset + sd + (ed - sd) * float(c.summit_progress))
-                                    / denom,
-                                    0.0,
-                                ),
-                                1.0,
-                            ),
-                            6,
-                        ),
-                        summit_lat=float(c.summit_lat),
-                        summit_lon=float(c.summit_lon),
-                        summit_elev_m=float(c.summit_elev_m),
-                        distance_m=float(c.distance_m),
-                        elevation_gain_m=float(c.elevation_gain_m),
-                        avg_grade_pct=float(c.avg_grade_pct),
-                        max_grade_pct=float(c.max_grade_pct),
-                        fiets_score=float(c.fiets_score),
-                    )
-                )
-            for sp in bundle.splits:
-                all_splits.append(
-                    MetricSplitOut(
-                        stage_id=stage.id,
-                        split_index=int(sp.split_index),
-                        split_km=int(sp.split_index) + 1,
-                        distance_m=float(sp.distance_m),
-                        elapsed_seconds=float(sp.duration_s),
-                        moving_seconds=float(sp.duration_s),
-                        elevation_gain_m=float(sp.elev_gain_m),
-                        elevation_loss_m=float(sp.elev_loss_m),
-                        avg_speed_mps=float(sp.avg_speed_mps),
-                        avg_grade_pct=sp.avg_grade_pct,
-                        avg_hr_bpm=sp.avg_hr_bpm,
-                        avg_watts=sp.avg_watts,
-                    )
-                )
-            for idx, dw in enumerate(bundle.dwell_stops):
-                cd = float(dw.start_dist_m)
-                all_dwells.append(
-                    DwellStopOut(
-                        id=str(dw.id or f"{stage.id}-dwell-{idx}"),
-                        stage_id=stage.id,
-                        lat=float(dw.lat),
-                        lon=float(dw.lon),
-                        cum_dist_m=round(distance_offset + cd, 2),
-                        progress=round(
-                            min(max((distance_offset + cd) / denom, 0.0), 1.0), 6
-                        ),
-                        duration_seconds=float(dw.duration_s),
-                        started_at=dw.started_at_utc,
-                        ended_at=dw.ended_at_utc,
-                        inferred_kind=str(dw.suggested_icon),
-                    )
-                )
-            for pk in bundle.peak_efforts:
-                win_s = int(pk.window_s)
-                win_label = f"{win_s // 60}m" if win_s >= 60 and win_s % 60 == 0 else f"{win_s}s"
-                all_peaks.append(
-                    PeakEffortOut(
-                        stage_id=stage.id,
-                        metric=str(pk.metric),
-                        window_label=win_label,
-                        window_seconds=win_s,
-                        value=float(pk.value),
-                        start_dist_m=round(distance_offset + float(pk.start_dist_m), 2),
-                        end_dist_m=round(distance_offset + float(pk.end_dist_m), 2),
-                    )
-                )
-            countries_list = list(bundle.geo_context.countries)
-            all_geo.append(
-                StageGeoContextOut(
+    for stage, bundle in zip(stages, bundles, strict=True):
+        denom = (
+            total_project_distance
+            if total_project_distance > 0
+            else max(stage.distance_m, 1.0)
+        )
+        for idx, c in enumerate(bundle.climbs):
+            sd = float(c.start_dist_m)
+            ed = float(c.end_dist_m)
+            all_climbs.append(
+                ClimbHighlightOut(
+                    id=str(c.id or f"{stage.id}-climb-{idx}"),
                     stage_id=stage.id,
-                    countries=countries_list,
-                    regions=list(bundle.geo_context.regions),
-                    passes=list(bundle.geo_context.passes),
-                    primary_country=countries_list[0] if countries_list else None,
+                    name=str(c.name or f"Climb {idx + 1}"),
+                    category=c.category,
+                    start_dist_m=round(distance_offset + sd, 2),
+                    end_dist_m=round(distance_offset + ed, 2),
+                    start_progress=round(
+                        min(max((distance_offset + sd) / denom, 0.0), 1.0), 6
+                    ),
+                    end_progress=round(
+                        min(max((distance_offset + ed) / denom, 0.0), 1.0), 6
+                    ),
+                    summit_progress=round(
+                        min(
+                            max(
+                                (distance_offset + sd + (ed - sd) * float(c.summit_progress))
+                                / denom,
+                                0.0,
+                            ),
+                            1.0,
+                        ),
+                        6,
+                    ),
+                    summit_lat=float(c.summit_lat),
+                    summit_lon=float(c.summit_lon),
+                    summit_elev_m=float(c.summit_elev_m),
+                    distance_m=float(c.distance_m),
+                    elevation_gain_m=float(c.elevation_gain_m),
+                    avg_grade_pct=float(c.avg_grade_pct),
+                    max_grade_pct=float(c.max_grade_pct),
+                    fiets_score=float(c.fiets_score),
                 )
             )
+        for sp in bundle.splits:
+            all_splits.append(
+                MetricSplitOut(
+                    stage_id=stage.id,
+                    split_index=int(sp.split_index),
+                    split_km=int(sp.split_index) + 1,
+                    distance_m=float(sp.distance_m),
+                    elapsed_seconds=float(sp.duration_s),
+                    moving_seconds=float(sp.duration_s),
+                    elevation_gain_m=float(sp.elev_gain_m),
+                    elevation_loss_m=float(sp.elev_loss_m),
+                    avg_speed_mps=float(sp.avg_speed_mps),
+                    avg_grade_pct=sp.avg_grade_pct,
+                    avg_hr_bpm=sp.avg_hr_bpm,
+                    avg_watts=sp.avg_watts,
+                )
+            )
+        for idx, dw in enumerate(bundle.dwell_stops):
+            cd = float(dw.start_dist_m)
+            all_dwells.append(
+                DwellStopOut(
+                    id=str(dw.id or f"{stage.id}-dwell-{idx}"),
+                    stage_id=stage.id,
+                    lat=float(dw.lat),
+                    lon=float(dw.lon),
+                    cum_dist_m=round(distance_offset + cd, 2),
+                    progress=round(
+                        min(max((distance_offset + cd) / denom, 0.0), 1.0), 6
+                    ),
+                    duration_seconds=float(dw.duration_s),
+                    started_at=dw.started_at_utc,
+                    ended_at=dw.ended_at_utc,
+                    inferred_kind=str(dw.suggested_icon),
+                )
+            )
+        for pk in bundle.peak_efforts:
+            win_s = int(pk.window_s)
+            win_label = f"{win_s // 60}m" if win_s >= 60 and win_s % 60 == 0 else f"{win_s}s"
+            all_peaks.append(
+                PeakEffortOut(
+                    stage_id=stage.id,
+                    metric=str(pk.metric),
+                    window_label=win_label,
+                    window_seconds=win_s,
+                    value=float(pk.value),
+                    start_dist_m=round(distance_offset + float(pk.start_dist_m), 2),
+                    end_dist_m=round(distance_offset + float(pk.end_dist_m), 2),
+                )
+            )
+        countries_list = list(bundle.geo_context.countries)
+        all_geo.append(
+            StageGeoContextOut(
+                stage_id=stage.id,
+                countries=countries_list,
+                regions=list(bundle.geo_context.regions),
+                passes=list(bundle.geo_context.passes),
+                primary_country=countries_list[0] if countries_list else None,
+            )
+        )
 
-            distance_offset += max(float(stage.distance_m or 0.0), 0.0)
+        distance_offset += max(float(stage.distance_m or 0.0), 0.0)
 
     return ProjectHighlightsOut(
         project_id=project_id,

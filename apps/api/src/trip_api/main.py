@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -28,6 +30,7 @@ from trip_api.db import (
     create_db_engine,
     create_session_factory,
 )
+from trip_api.gold_sync import ensure_local_gold_duckdb
 from trip_api.reaper import build_object_store
 from trip_api.routers import (
     analytics,
@@ -80,12 +83,22 @@ def create_app(
     db_session_factory = session_factory or create_session_factory(db_engine)
     store = object_store or _build_object_store(cfg)
 
+    @asynccontextmanager
+    async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
+        if cfg.object_store_backend == "s3":
+            try:
+                await asyncio.to_thread(ensure_local_gold_duckdb, store, cfg)
+            except Exception as exc:
+                logger.warning("Startup Gold DuckDB sync skipped: %s", type(exc).__name__)
+        yield
+
     application = FastAPI(
         title="Trip Animator API",
         version="0.1.0",
         docs_url="/api/docs" if cfg.app_env != "production" else None,
         redoc_url=None,
         openapi_url="/api/openapi.json" if cfg.app_env != "production" else None,
+        lifespan=_lifespan,
     )
     application.state.settings = cfg
     application.state.engine = db_engine

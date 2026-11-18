@@ -15,6 +15,7 @@ from trip_telemetry import ActivityType, LodLevel
 
 from trip_api.db import Project, Stage
 from trip_api.deps import AppSettings, CurrentAuth, DbSession, StoreDep, ensure_utc
+from trip_api.gold_sync import ensure_local_gold_duckdb
 from trip_api.schemas import (
     ActivityBreakdownOut,
     AnalyticsHeatmapOut,
@@ -35,16 +36,14 @@ router = APIRouter(tags=["analytics"])
 logger = logging.getLogger(__name__)
 
 
-def _gold_duckdb_path(gold_output_dir: str) -> Path:
-    return Path(gold_output_dir) / "trip_analytics.duckdb"
-
-
 def _query_gold_countries_and_stages(
     gold_db_path: Path,
     project_ids: list[str],
+    *,
+    stage_ids: list[str] | None = None,
 ) -> tuple[set[str], set[str]]:
     """Query countries visited and known Gold stage IDs scoped strictly to `project_ids`."""
-    if not project_ids or not gold_db_path.is_file():
+    if not project_ids or (stage_ids is not None and not stage_ids) or not gold_db_path.is_file():
         return set(), set()
 
     countries: set[str] = set()
@@ -67,23 +66,41 @@ def _query_gold_countries_and_stages(
                 ).fetchall()
             }
             if "trip_id" in cols and "primary_country" in cols:
-                rows = con.execute(
-                    "SELECT DISTINCT primary_country FROM mart_stage_geo_context "
-                    "WHERE list_contains(CAST(? AS VARCHAR[]), trip_id) "
-                    "AND primary_country IS NOT NULL",
-                    [project_ids],
-                ).fetchall()
+                if stage_ids is not None and "stage_id" in cols:
+                    rows = con.execute(
+                        "SELECT DISTINCT primary_country FROM mart_stage_geo_context "
+                        "WHERE list_contains(CAST(? AS VARCHAR[]), trip_id) "
+                        "AND list_contains(CAST(? AS VARCHAR[]), stage_id) "
+                        "AND primary_country IS NOT NULL",
+                        [project_ids, stage_ids],
+                    ).fetchall()
+                else:
+                    rows = con.execute(
+                        "SELECT DISTINCT primary_country FROM mart_stage_geo_context "
+                        "WHERE list_contains(CAST(? AS VARCHAR[]), trip_id) "
+                        "AND primary_country IS NOT NULL",
+                        [project_ids],
+                    ).fetchall()
                 for row in rows:
                     val = str(row[0]).strip()
                     if val:
                         countries.add(val)
             elif "trip_id" in cols and "country_name" in cols:
-                rows = con.execute(
-                    "SELECT DISTINCT country_name FROM mart_stage_geo_context "
-                    "WHERE list_contains(CAST(? AS VARCHAR[]), trip_id) "
-                    "AND country_name IS NOT NULL",
-                    [project_ids],
-                ).fetchall()
+                if stage_ids is not None and "stage_id" in cols:
+                    rows = con.execute(
+                        "SELECT DISTINCT country_name FROM mart_stage_geo_context "
+                        "WHERE list_contains(CAST(? AS VARCHAR[]), trip_id) "
+                        "AND list_contains(CAST(? AS VARCHAR[]), stage_id) "
+                        "AND country_name IS NOT NULL",
+                        [project_ids, stage_ids],
+                    ).fetchall()
+                else:
+                    rows = con.execute(
+                        "SELECT DISTINCT country_name FROM mart_stage_geo_context "
+                        "WHERE list_contains(CAST(? AS VARCHAR[]), trip_id) "
+                        "AND country_name IS NOT NULL",
+                        [project_ids],
+                    ).fetchall()
                 for row in rows:
                     val = str(row[0]).strip()
                     if val:
@@ -97,11 +114,19 @@ def _query_gold_countries_and_stages(
                 ).fetchall()
             }
             if "stage_id" in cols and "trip_id" in cols:
-                srows = con.execute(
-                    "SELECT DISTINCT stage_id FROM mart_stage_summary "
-                    "WHERE list_contains(CAST(? AS VARCHAR[]), trip_id)",
-                    [project_ids],
-                ).fetchall()
+                if stage_ids is not None:
+                    srows = con.execute(
+                        "SELECT DISTINCT stage_id FROM mart_stage_summary "
+                        "WHERE list_contains(CAST(? AS VARCHAR[]), trip_id) "
+                        "AND list_contains(CAST(? AS VARCHAR[]), stage_id)",
+                        [project_ids, stage_ids],
+                    ).fetchall()
+                else:
+                    srows = con.execute(
+                        "SELECT DISTINCT stage_id FROM mart_stage_summary "
+                        "WHERE list_contains(CAST(? AS VARCHAR[]), trip_id)",
+                        [project_ids],
+                    ).fetchall()
                 for row in srows:
                     gold_stage_ids.add(str(row[0]))
     except Exception as exc:
@@ -116,11 +141,12 @@ def _query_gold_heatmap_cells(
     gold_db_path: Path,
     project_ids: list[str],
     *,
+    stage_ids: list[str] | None = None,
     year: int | None = None,
     activity_type: ActivityType | None = None,
 ) -> list[HeatmapCellOut]:
     """Query `mart_spatial_coverage_h3` scoped strictly to owned `project_ids`."""
-    if not project_ids or not gold_db_path.is_file():
+    if not project_ids or (stage_ids is not None and not stage_ids) or not gold_db_path.is_file():
         return []
 
     cells: list[HeatmapCellOut] = []
@@ -153,10 +179,115 @@ def _query_gold_heatmap_cells(
         if not ((has_center_lat or has_lat) and (has_center_lon or has_lon)):
             return []
 
-        if has_center_lat and has_center_lon and "point_count" in cols and "stage_count" in cols:
+        if has_center_lat and has_center_lon and "stage_id" in cols and "point_count" in cols:
+            if stage_ids is not None and "year" in cols:
+                rows = con.execute(
+                    "SELECT h3_index, "
+                    "COALESCE("
+                    "ROUND(SUM(center_lat * point_count) / NULLIF(SUM(point_count), 0), 5), "
+                    "AVG(center_lat)"
+                    ") AS lat, "
+                    "COALESCE("
+                    "ROUND(SUM(center_lon * point_count) / NULLIF(SUM(point_count), 0), 5), "
+                    "AVG(center_lon)"
+                    ") AS lon, "
+                    "SUM(point_count) AS point_count, "
+                    "COUNT(DISTINCT stage_id) AS stage_count "
+                    "FROM mart_spatial_coverage_h3 "
+                    "WHERE list_contains(CAST(? AS VARCHAR[]), trip_id) "
+                    "AND list_contains(CAST(? AS VARCHAR[]), stage_id) "
+                    "AND (CAST(? AS INTEGER) IS NULL OR year = CAST(? AS INTEGER)) "
+                    "GROUP BY h3_index ORDER BY point_count DESC LIMIT 5000",
+                    [project_ids, stage_ids, year, year],
+                ).fetchall()
+            elif stage_ids is not None:
+                rows = con.execute(
+                    "SELECT h3_index, "
+                    "COALESCE("
+                    "ROUND(SUM(center_lat * point_count) / NULLIF(SUM(point_count), 0), 5), "
+                    "AVG(center_lat)"
+                    ") AS lat, "
+                    "COALESCE("
+                    "ROUND(SUM(center_lon * point_count) / NULLIF(SUM(point_count), 0), 5), "
+                    "AVG(center_lon)"
+                    ") AS lon, "
+                    "SUM(point_count) AS point_count, "
+                    "COUNT(DISTINCT stage_id) AS stage_count "
+                    "FROM mart_spatial_coverage_h3 "
+                    "WHERE list_contains(CAST(? AS VARCHAR[]), trip_id) "
+                    "AND list_contains(CAST(? AS VARCHAR[]), stage_id) "
+                    "GROUP BY h3_index ORDER BY point_count DESC LIMIT 5000",
+                    [project_ids, stage_ids],
+                ).fetchall()
+            elif "year" in cols and "activity_type" in cols:
+                rows = con.execute(
+                    "SELECT h3_index, "
+                    "COALESCE("
+                    "ROUND(SUM(center_lat * point_count) / NULLIF(SUM(point_count), 0), 5), "
+                    "AVG(center_lat)"
+                    ") AS lat, "
+                    "COALESCE("
+                    "ROUND(SUM(center_lon * point_count) / NULLIF(SUM(point_count), 0), 5), "
+                    "AVG(center_lon)"
+                    ") AS lon, "
+                    "SUM(point_count) AS point_count, "
+                    "COUNT(DISTINCT stage_id) AS stage_count "
+                    "FROM mart_spatial_coverage_h3 "
+                    "WHERE list_contains(CAST(? AS VARCHAR[]), trip_id) "
+                    "AND (CAST(? AS INTEGER) IS NULL OR year = CAST(? AS INTEGER)) "
+                    "AND (CAST(? AS VARCHAR) IS NULL OR activity_type = CAST(? AS VARCHAR)) "
+                    "GROUP BY h3_index ORDER BY point_count DESC LIMIT 5000",
+                    [project_ids, year, year, activity_type, activity_type],
+                ).fetchall()
+            elif "year" in cols:
+                rows = con.execute(
+                    "SELECT h3_index, "
+                    "COALESCE("
+                    "ROUND(SUM(center_lat * point_count) / NULLIF(SUM(point_count), 0), 5), "
+                    "AVG(center_lat)"
+                    ") AS lat, "
+                    "COALESCE("
+                    "ROUND(SUM(center_lon * point_count) / NULLIF(SUM(point_count), 0), 5), "
+                    "AVG(center_lon)"
+                    ") AS lon, "
+                    "SUM(point_count) AS point_count, "
+                    "COUNT(DISTINCT stage_id) AS stage_count "
+                    "FROM mart_spatial_coverage_h3 "
+                    "WHERE list_contains(CAST(? AS VARCHAR[]), trip_id) "
+                    "AND (CAST(? AS INTEGER) IS NULL OR year = CAST(? AS INTEGER)) "
+                    "GROUP BY h3_index ORDER BY point_count DESC LIMIT 5000",
+                    [project_ids, year, year],
+                ).fetchall()
+            else:
+                rows = con.execute(
+                    "SELECT h3_index, "
+                    "COALESCE("
+                    "ROUND(SUM(center_lat * point_count) / NULLIF(SUM(point_count), 0), 5), "
+                    "AVG(center_lat)"
+                    ") AS lat, "
+                    "COALESCE("
+                    "ROUND(SUM(center_lon * point_count) / NULLIF(SUM(point_count), 0), 5), "
+                    "AVG(center_lon)"
+                    ") AS lon, "
+                    "SUM(point_count) AS point_count, "
+                    "COUNT(DISTINCT stage_id) AS stage_count "
+                    "FROM mart_spatial_coverage_h3 "
+                    "WHERE list_contains(CAST(? AS VARCHAR[]), trip_id) "
+                    "GROUP BY h3_index ORDER BY point_count DESC LIMIT 5000",
+                    [project_ids],
+                ).fetchall()
+        elif has_center_lat and has_center_lon and "point_count" in cols and "stage_count" in cols:
             if "year" in cols and "activity_type" in cols:
                 rows = con.execute(
-                    "SELECT h3_index, AVG(center_lat) AS lat, AVG(center_lon) AS lon, "
+                    "SELECT h3_index, "
+                    "COALESCE("
+                    "ROUND(SUM(center_lat * point_count) / NULLIF(SUM(point_count), 0), 5), "
+                    "AVG(center_lat)"
+                    ") AS lat, "
+                    "COALESCE("
+                    "ROUND(SUM(center_lon * point_count) / NULLIF(SUM(point_count), 0), 5), "
+                    "AVG(center_lon)"
+                    ") AS lon, "
                     "SUM(point_count) AS point_count, SUM(stage_count) AS stage_count "
                     "FROM mart_spatial_coverage_h3 "
                     "WHERE list_contains(CAST(? AS VARCHAR[]), trip_id) "
@@ -165,18 +296,62 @@ def _query_gold_heatmap_cells(
                     "GROUP BY h3_index ORDER BY point_count DESC LIMIT 5000",
                     [project_ids, year, year, activity_type, activity_type],
                 ).fetchall()
+            elif "year" in cols:
+                rows = con.execute(
+                    "SELECT h3_index, "
+                    "COALESCE("
+                    "ROUND(SUM(center_lat * point_count) / NULLIF(SUM(point_count), 0), 5), "
+                    "AVG(center_lat)"
+                    ") AS lat, "
+                    "COALESCE("
+                    "ROUND(SUM(center_lon * point_count) / NULLIF(SUM(point_count), 0), 5), "
+                    "AVG(center_lon)"
+                    ") AS lon, "
+                    "SUM(point_count) AS point_count, SUM(stage_count) AS stage_count "
+                    "FROM mart_spatial_coverage_h3 "
+                    "WHERE list_contains(CAST(? AS VARCHAR[]), trip_id) "
+                    "AND (CAST(? AS INTEGER) IS NULL OR year = CAST(? AS INTEGER)) "
+                    "GROUP BY h3_index ORDER BY point_count DESC LIMIT 5000",
+                    [project_ids, year, year],
+                ).fetchall()
             else:
                 rows = con.execute(
-                    "SELECT h3_index, AVG(center_lat) AS lat, AVG(center_lon) AS lon, "
+                    "SELECT h3_index, "
+                    "COALESCE("
+                    "ROUND(SUM(center_lat * point_count) / NULLIF(SUM(point_count), 0), 5), "
+                    "AVG(center_lat)"
+                    ") AS lat, "
+                    "COALESCE("
+                    "ROUND(SUM(center_lon * point_count) / NULLIF(SUM(point_count), 0), 5), "
+                    "AVG(center_lon)"
+                    ") AS lon, "
                     "SUM(point_count) AS point_count, SUM(stage_count) AS stage_count "
                     "FROM mart_spatial_coverage_h3 "
                     "WHERE list_contains(CAST(? AS VARCHAR[]), trip_id) "
                     "GROUP BY h3_index ORDER BY point_count DESC LIMIT 5000",
                     [project_ids],
                 ).fetchall()
-        else:
+        elif "point_count" in cols and has_lat and has_lon:
             rows = con.execute(
                 "SELECT h3_index, AVG(lat) AS lat, AVG(lon) AS lon, "
+                "SUM(point_count) AS point_count, COUNT(DISTINCT trip_id) AS stage_count "
+                "FROM mart_spatial_coverage_h3 "
+                "WHERE list_contains(CAST(? AS VARCHAR[]), trip_id) "
+                "GROUP BY h3_index ORDER BY point_count DESC LIMIT 5000",
+                [project_ids],
+            ).fetchall()
+        elif has_lat and has_lon:
+            rows = con.execute(
+                "SELECT h3_index, AVG(lat) AS lat, AVG(lon) AS lon, "
+                "COUNT(*) AS point_count, COUNT(DISTINCT trip_id) AS stage_count "
+                "FROM mart_spatial_coverage_h3 "
+                "WHERE list_contains(CAST(? AS VARCHAR[]), trip_id) "
+                "GROUP BY h3_index ORDER BY point_count DESC LIMIT 5000",
+                [project_ids],
+            ).fetchall()
+        else:
+            rows = con.execute(
+                "SELECT h3_index, AVG(center_lat) AS lat, AVG(center_lon) AS lon, "
                 "COUNT(*) AS point_count, COUNT(DISTINCT trip_id) AS stage_count "
                 "FROM mart_spatial_coverage_h3 "
                 "WHERE list_contains(CAST(? AS VARCHAR[]), trip_id) "
@@ -222,6 +397,7 @@ def get_career_analytics(
     auth: CurrentAuth,
     db: DbSession,
     settings: AppSettings,
+    store: StoreDep,
     year: Annotated[int | None, Query(ge=1970, le=2100)] = None,
     activity_type: ActivityType | None = None,
 ) -> CareerAnalyticsOut:
@@ -245,12 +421,8 @@ def get_career_analytics(
         ).all()
     )
 
-    countries_visited, _ = _query_gold_countries_and_stages(
-        _gold_duckdb_path(settings.gold_output_dir),
-        owned_ids_str,
-    )
-
     matched_project_ids: set[uuid.UUID] = set()
+    matched_stage_ids: list[str] = []
     by_year_projects: dict[int, set[uuid.UUID]] = defaultdict(set)
     by_year_stats: dict[int, dict[str, float]] = defaultdict(
         lambda: {"stages": 0, "dist": 0.0, "elev": 0.0, "moving": 0.0}
@@ -274,6 +446,7 @@ def get_career_analytics(
             continue
 
         matched_project_ids.add(st.project_id)
+        matched_stage_ids.append(str(st.id))
         total_stages += 1
         dist = float(st.distance_m or 0.0)
         elev = float(st.elevation_gain_m or 0.0)
@@ -295,6 +468,13 @@ def get_career_analytics(
         ab["dist"] += dist
         ab["elev"] += elev
         ab["moving"] += mov
+
+    gold_db_path = ensure_local_gold_duckdb(store, settings)
+    countries_visited, _ = _query_gold_countries_and_stages(
+        gold_db_path,
+        owned_ids_str,
+        stage_ids=matched_stage_ids if (year is not None or activity_type is not None) else None,
+    )
 
     if year is None and activity_type is None:
         total_projects = len(projects)
@@ -361,6 +541,7 @@ def get_analytics_heatmap(
         return AnalyticsHeatmapOut()
 
     owned_ids_str = [str(p.id) for p in projects]
+    matched_stage_ids: list[str] = []
     trips: list[AtlasTripOut] = []
 
     for proj in projects:
@@ -373,6 +554,7 @@ def get_analytics_heatmap(
             if activity_type is not None and st.activity_type != activity_type:
                 continue
             filtered_stages.append(st)
+            matched_stage_ids.append(str(st.id))
 
         if not filtered_stages:
             if year is None and activity_type is None:
@@ -445,9 +627,11 @@ def get_analytics_heatmap(
             )
         )
 
+    gold_db_path = ensure_local_gold_duckdb(store, settings)
     hex_cells = _query_gold_heatmap_cells(
-        _gold_duckdb_path(settings.gold_output_dir),
+        gold_db_path,
         owned_ids_str,
+        stage_ids=matched_stage_ids,
         year=year,
         activity_type=activity_type,
     )

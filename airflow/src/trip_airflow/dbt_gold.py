@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -25,6 +26,7 @@ SILVER_PARQUET_KEY_RE = re.compile(
 )
 _PARITY_TOLERANCE = 1e-6
 _MANIFEST_FILE = ".silver_cache_manifest.json"
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +182,16 @@ def materialize_gold_marts(
                 shutil.copyfile(target_db, tmp_gold_dir / "trip_analytics.duckdb")
                 seeded_existing = True
             except OSError:
+                seeded_existing = False
+        elif isinstance(store, S3ObjectStore):
+            try:
+                seed_bytes = store.get_bytes("gold/trip_analytics.duckdb")
+                (tmp_gold_dir / "trip_analytics.duckdb").write_bytes(seed_bytes)
+                seeded_existing = True
+            except FileNotFoundError:
+                seeded_existing = False
+            except Exception as exc:
+                logger.warning("Best-effort S3 Gold DuckDB seed skipped: %s", exc)
                 seeded_existing = False
 
         silver_glob = str(silver_cache_dir / "*" / "*.parquet")

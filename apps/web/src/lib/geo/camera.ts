@@ -89,9 +89,87 @@ export function computeBearingDeg(
   return normalizeBearingDeg(theta);
 }
 
+const MIN_SPEED_MULTIPLIER = 0.25;
+const MAX_SPEED_MULTIPLIER = 4.0;
+
 function smoothstep01(t: number): number {
   const x = Math.min(1, Math.max(0, Number.isFinite(t) ? t : 0));
   return x * x * (3 - 2 * x);
+}
+
+function clampSpeedMultiplier(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 1.0;
+  }
+  return Math.min(MAX_SPEED_MULTIPLIER, Math.max(MIN_SPEED_MULTIPLIER, value));
+}
+
+function sortKeyframes(keyframes: readonly CameraKeyframe[]): readonly CameraKeyframe[] {
+  let isSorted = true;
+  for (let i = 1; i < keyframes.length; i++) {
+    const prev = Number.isFinite(keyframes[i - 1]!.progress) ? keyframes[i - 1]!.progress : 0;
+    const curr = Number.isFinite(keyframes[i]!.progress) ? keyframes[i]!.progress : 0;
+    if (prev > curr) {
+      isSorted = false;
+      break;
+    }
+  }
+  if (isSorted) {
+    return keyframes;
+  }
+  return [...keyframes].sort(
+    (a, b) =>
+      (Number.isFinite(a.progress) ? a.progress : 0) -
+      (Number.isFinite(b.progress) ? b.progress : 0),
+  );
+}
+
+function resolveKeyframeSegment(
+  sorted: readonly CameraKeyframe[],
+  progress: number,
+): { a: CameraKeyframe; b: CameraKeyframe; u: number } {
+  const p = Math.min(1, Math.max(0, Number.isFinite(progress) ? progress : 0));
+
+  if (sorted.length === 1 || p <= sorted[0]!.progress) {
+    const first = sorted[0]!;
+    return { a: first, b: first, u: 0 };
+  }
+
+  const last = sorted[sorted.length - 1]!;
+  if (p >= last.progress) {
+    return { a: last, b: last, u: 0 };
+  }
+
+  let idx = 0;
+  for (let i = 0; i < sorted.length - 1; i++) {
+    if (p >= sorted[i]!.progress && p <= sorted[i + 1]!.progress) {
+      idx = i;
+      break;
+    }
+  }
+  const a = sorted[idx]!;
+  const b = sorted[idx + 1]!;
+  const span = b.progress - a.progress;
+  const u = span > 1e-9 ? smoothstep01((p - a.progress) / span) : 0;
+  return { a, b, u };
+}
+
+/**
+ * Smoothstep-samples the keyframe speed multiplier in [0.25, 4.0] at route `progress` in [0, 1].
+ * Returns 1.0 when `keyframes` is empty.
+ */
+export function sampleKeyframeSpeedMultiplier(
+  keyframes: readonly CameraKeyframe[],
+  progress: number,
+): number {
+  if (!keyframes || keyframes.length === 0) {
+    return 1.0;
+  }
+  const sorted = sortKeyframes(keyframes);
+  const { a, b, u } = resolveKeyframeSegment(sorted, progress);
+  const sa = clampSpeedMultiplier(a.speed_multiplier);
+  const sb = clampSpeedMultiplier(b.speed_multiplier);
+  return clampSpeedMultiplier(sa + (sb - sa) * u);
 }
 
 /**
@@ -115,63 +193,43 @@ export function interpolateCameraKeyframes(
     };
   }
 
-  const sorted = [...keyframes].sort((a, b) => a.progress - b.progress);
-  const p = Math.min(1, Math.max(0, Number.isFinite(progress) ? progress : 0));
+  const sorted = sortKeyframes(keyframes);
+  const { a, b, u } = resolveKeyframeSegment(sorted, progress);
 
-  if (sorted.length === 1 || p <= sorted[0]!.progress) {
-    const k = sorted[0]!;
+  if (a === b) {
     return {
-      cameraMode: k.camera_mode,
-      cameraPreset: k.camera_preset,
-      pitchDeg: k.pitch_deg,
-      bearingOffsetDeg: k.bearing_offset_deg,
-      zoomOffset: k.zoom_offset,
-      speedMultiplier: k.speed_multiplier,
-      activeLabel: k.label,
+      cameraMode: a.camera_mode,
+      cameraPreset: a.camera_preset,
+      pitchDeg: Math.min(60, Math.max(0, Number.isFinite(a.pitch_deg) ? a.pitch_deg : 0)),
+      bearingOffsetDeg: Number.isFinite(a.bearing_offset_deg) ? a.bearing_offset_deg : 0,
+      zoomOffset: Math.min(3, Math.max(-3, Number.isFinite(a.zoom_offset) ? a.zoom_offset : 0)),
+      speedMultiplier: clampSpeedMultiplier(a.speed_multiplier),
+      activeLabel: a.label,
     };
   }
 
-  const last = sorted[sorted.length - 1]!;
-  if (p >= last.progress) {
-    return {
-      cameraMode: last.camera_mode,
-      cameraPreset: last.camera_preset,
-      pitchDeg: last.pitch_deg,
-      bearingOffsetDeg: last.bearing_offset_deg,
-      zoomOffset: last.zoom_offset,
-      speedMultiplier: last.speed_multiplier,
-      activeLabel: last.label,
-    };
-  }
-
-  let idx = 0;
-  for (let i = 0; i < sorted.length - 1; i++) {
-    if (p >= sorted[i]!.progress && p <= sorted[i + 1]!.progress) {
-      idx = i;
-      break;
-    }
-  }
-  const a = sorted[idx]!;
-  const b = sorted[idx + 1]!;
-  const span = b.progress - a.progress;
-  const u = span > 1e-9 ? smoothstep01((p - a.progress) / span) : 0;
+  const aPitch = Number.isFinite(a.pitch_deg) ? a.pitch_deg : 0;
+  const bPitch = Number.isFinite(b.pitch_deg) ? b.pitch_deg : 0;
+  const aBearing = Number.isFinite(a.bearing_offset_deg) ? a.bearing_offset_deg : 0;
+  const bBearing = Number.isFinite(b.bearing_offset_deg) ? b.bearing_offset_deg : 0;
+  const aZoom = Number.isFinite(a.zoom_offset) ? a.zoom_offset : 0;
+  const bZoom = Number.isFinite(b.zoom_offset) ? b.zoom_offset : 0;
 
   // Shortest-angle interpolation for bearing_offset_deg
-  let deltaBearing = b.bearing_offset_deg - a.bearing_offset_deg;
+  let deltaBearing = bBearing - aBearing;
   if (deltaBearing > 180) deltaBearing -= 360;
   if (deltaBearing < -180) deltaBearing += 360;
 
   const anchor = u < 0.5 ? a : b;
+  const sa = clampSpeedMultiplier(a.speed_multiplier);
+  const sb = clampSpeedMultiplier(b.speed_multiplier);
   return {
     cameraMode: anchor.camera_mode,
     cameraPreset: anchor.camera_preset,
-    pitchDeg: Math.min(60, Math.max(0, a.pitch_deg + (b.pitch_deg - a.pitch_deg) * u)),
-    bearingOffsetDeg: a.bearing_offset_deg + deltaBearing * u,
-    zoomOffset: Math.min(3, Math.max(-3, a.zoom_offset + (b.zoom_offset - a.zoom_offset) * u)),
-    speedMultiplier: Math.min(
-      4,
-      Math.max(0.25, a.speed_multiplier + (b.speed_multiplier - a.speed_multiplier) * u),
-    ),
+    pitchDeg: Math.min(60, Math.max(0, aPitch + (bPitch - aPitch) * u)),
+    bearingOffsetDeg: aBearing + deltaBearing * u,
+    zoomOffset: Math.min(3, Math.max(-3, aZoom + (bZoom - aZoom) * u)),
+    speedMultiplier: clampSpeedMultiplier(sa + (sb - sa) * u),
     activeLabel: anchor.label,
   };
 }

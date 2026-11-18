@@ -16,11 +16,12 @@ WITH pts_with_year AS (
 )
 SELECT
     trip_id,
+    stage_id,
     year,
     'hex_' || CAST(q_idx AS VARCHAR) || '_' || CAST(r_idx AS VARCHAR) AS h3_index,
-    ROUND(AVG(lat), 5)::DOUBLE AS lat,
-    ROUND(AVG(lon), 5)::DOUBLE AS lon,
+    ROUND(AVG(lat), 5)::DOUBLE AS center_lat,
+    ROUND(AVG(lon), 5)::DOUBLE AS center_lon,
     COUNT(*)::BIGINT AS point_count,
-    COUNT(DISTINCT stage_id)::INTEGER AS stage_count
+    1::INTEGER AS stage_count
 FROM pts_with_year
-GROUP BY trip_id, year, q_idx, r_idx
+GROUP BY trip_id, stage_id, year, q_idx, r_idx

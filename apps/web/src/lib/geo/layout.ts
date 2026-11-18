@@ -1167,23 +1167,37 @@ export function solveStageLayout(input: SolveStageLayoutInput): StageLayoutSolut
   // Place climb callout pills near their summit screen positions without collisions
   const resolvedClimbCallouts: ClimbCalloutSlot[] = [];
   const calloutTargets: { id: string; screenX: number; screenY: number }[] = [];
-  if (input.climbCalloutTargets && input.climbCalloutTargets.length > 0) {
-    calloutTargets.push(...input.climbCalloutTargets);
-  } else if (spec.show_climb_callouts !== false && input.climbMarkers && followCamera) {
-    for (const c of input.climbMarkers) {
-      if (!c.reached) continue;
-      const scr = projectLngLatToScreen(
-        c.summitPosition,
-        followCamera.center,
-        followCamera.zoom,
-        followCamera.pitch,
-        followCamera.bearing,
-        safeW,
-        safeH,
-        followPadding,
-      );
-      if (scr.visible) {
-        calloutTargets.push({ id: c.id, screenX: scr.x, screenY: scr.y });
+  const isCalloutAnchorOnScreen = (screenX: number, screenY: number) =>
+    Number.isFinite(screenX) &&
+    Number.isFinite(screenY) &&
+    screenX >= -24 &&
+    screenX <= safeW + 24 &&
+    screenY >= -24 &&
+    screenY <= safeH + 24;
+
+  if (spec.show_climb_callouts !== false) {
+    if (input.climbCalloutTargets && input.climbCalloutTargets.length > 0) {
+      for (const target of input.climbCalloutTargets) {
+        if (isCalloutAnchorOnScreen(target.screenX, target.screenY)) {
+          calloutTargets.push(target);
+        }
+      }
+    } else if (input.climbMarkers && followCamera) {
+      for (const c of input.climbMarkers) {
+        if (!c.reached) continue;
+        const scr = projectLngLatToScreen(
+          c.summitPosition,
+          followCamera.center,
+          followCamera.zoom,
+          followCamera.pitch,
+          followCamera.bearing,
+          safeW,
+          safeH,
+          followPadding,
+        );
+        if (scr.visible && isCalloutAnchorOnScreen(scr.x, scr.y)) {
+          calloutTargets.push({ id: c.id, screenX: scr.x, screenY: scr.y });
+        }
       }
     }
   }

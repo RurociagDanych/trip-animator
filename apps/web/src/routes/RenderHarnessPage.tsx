@@ -169,7 +169,8 @@ export function RenderHarnessPage() {
         const cameraChanged =
           changed &&
           (manifest.spec.camera_mode === "follow-marker" ||
-            manifest.spec.camera_preset !== "flat");
+            manifest.spec.camera_preset !== "flat" ||
+            (manifest.spec.camera_keyframes?.length ?? 0) > 0);
         if (canvasControllerRef.current) {
           await canvasControllerRef.current.waitForFrameSettle(cameraChanged);
         }
@@ -179,7 +180,12 @@ export function RenderHarnessPage() {
     return () => {
       delete window.__TRIP_RENDERER__;
     };
-  }, [totalFrames, manifest.spec.camera_mode, manifest.spec.camera_preset]);
+  }, [
+    totalFrames,
+    manifest.spec.camera_mode,
+    manifest.spec.camera_preset,
+    manifest.spec.camera_keyframes?.length,
+  ]);
 
   const totalStats = useMemo(
     () => ({

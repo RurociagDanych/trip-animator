@@ -1,4 +1,5 @@
 import type {
+  CameraKeyframe,
   ManifestPhoto,
   PhotoCardStyle,
   PhotoMatchMethod,
@@ -6,6 +7,7 @@ import type {
   PublicPhotoOut,
   RenderSpecV2,
 } from "../api/types";
+import { sampleKeyframeSpeedMultiplier } from "./camera";
 import { clamp01, haversineMeters, type TimelinePoint, type TimelineStage } from "./timeline";
 
 export type PhotoInput = ProjectPhotoOut | PublicPhotoOut | ManifestPhoto;
@@ -409,10 +411,123 @@ function computeDisplayEnvelope(
   return { opacity, scale, kenBurnsScale };
 }
 
+const SPEED_LUT_STEPS = 512;
+
+interface SpeedCurveLut {
+  cumTime: Float64Array;
+  dp: number;
+}
+
+interface CachedSpeedLutEntry {
+  sig: string;
+  lut: SpeedCurveLut | null;
+}
+
+const SPEED_LUT_CACHE = new WeakMap<readonly CameraKeyframe[], CachedSpeedLutEntry>();
+
+function computeKeyframesSig(keyframes: readonly CameraKeyframe[]): string {
+  return keyframes.map((kf) => `${kf.progress}:${kf.speed_multiplier}`).join("|");
+}
+
+function getSpeedCurveLut(keyframes: readonly CameraKeyframe[] | undefined): SpeedCurveLut | null {
+  if (!keyframes || keyframes.length === 0) {
+    return null;
+  }
+  const sig = computeKeyframesSig(keyframes);
+  const cached = SPEED_LUT_CACHE.get(keyframes);
+  if (cached && cached.sig === sig) {
+    return cached.lut;
+  }
+
+  const sorted = [...keyframes].sort(
+    (a, b) =>
+      (Number.isFinite(a.progress) ? a.progress : 0) -
+      (Number.isFinite(b.progress) ? b.progress : 0),
+  );
+  let minSpeed = Infinity;
+  let maxSpeed = -Infinity;
+  const speeds = new Float64Array(SPEED_LUT_STEPS + 1);
+  for (let i = 0; i <= SPEED_LUT_STEPS; i++) {
+    const s = sampleKeyframeSpeedMultiplier(sorted, i / SPEED_LUT_STEPS);
+    speeds[i] = s;
+    if (s < minSpeed) minSpeed = s;
+    if (s > maxSpeed) maxSpeed = s;
+  }
+
+  if (maxSpeed - minSpeed < 1e-6) {
+    SPEED_LUT_CACHE.set(keyframes, { sig, lut: null });
+    return null;
+  }
+
+  const cumTime = new Float64Array(SPEED_LUT_STEPS + 1);
+  const dp = 1 / SPEED_LUT_STEPS;
+  cumTime[0] = 0;
+  let prevPace = 1 / speeds[0]!;
+  for (let i = 1; i <= SPEED_LUT_STEPS; i++) {
+    const pace = 1 / speeds[i]!;
+    cumTime[i] = cumTime[i - 1]! + 0.5 * (prevPace + pace) * dp;
+    prevPace = pace;
+  }
+
+  const total = cumTime[SPEED_LUT_STEPS]!;
+  if (!(total > 0) || !Number.isFinite(total)) {
+    SPEED_LUT_CACHE.set(keyframes, { sig, lut: null });
+    return null;
+  }
+  for (let i = 1; i < SPEED_LUT_STEPS; i++) {
+    cumTime[i] = cumTime[i]! / total;
+  }
+  cumTime[SPEED_LUT_STEPS] = 1;
+
+  const lut: SpeedCurveLut = { cumTime, dp };
+  SPEED_LUT_CACHE.set(keyframes, { sig, lut });
+  return lut;
+}
+
+function progressToTravelFraction(lut: SpeedCurveLut | null, progress: number): number {
+  const p = clamp01(progress);
+  if (!lut) {
+    return p;
+  }
+  if (p <= 0) return 0;
+  if (p >= 1) return 1;
+  const pos = p / lut.dp;
+  const idx = Math.min(SPEED_LUT_STEPS - 1, Math.floor(pos));
+  const frac = pos - idx;
+  const t0 = lut.cumTime[idx]!;
+  const t1 = lut.cumTime[idx + 1]!;
+  return clamp01(t0 + (t1 - t0) * frac);
+}
+
+function travelFractionToProgress(lut: SpeedCurveLut | null, tau: number): number {
+  const t = clamp01(tau);
+  if (!lut) {
+    return t;
+  }
+  if (t <= 0) return 0;
+  if (t >= 1) return 1;
+
+  let lo = 0;
+  let hi = SPEED_LUT_STEPS;
+  while (lo + 1 < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (lut.cumTime[mid]! <= t) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  const t0 = lut.cumTime[lo]!;
+  const t1 = lut.cumTime[hi]!;
+  const denom = t1 - t0;
+  const frac = denom > 1e-12 ? (t - t0) / denom : 0;
+  return clamp01((lo + frac) * lut.dp);
+}
+
 /**
  * Deterministic timeline scheduler shared by editor playback, share playback,
  * and /render/$jobId MP4 frames. Handles intro/outro holds, photo_display_seconds,
- * and capped pause_on_photo timeline warping with preview holdScale parity.
+ * speed_multiplier timeline warping, and capped pause_on_photo timeline warping with preview holdScale parity.
  */
 export function evaluateTimelineSchedule(
   _stages: readonly TimelineStage[],
@@ -438,8 +553,9 @@ export function evaluateTimelineSchedule(
     : [];
 
   const desiredDisplayS = Math.max(0.2, (spec.photo_display_seconds ?? 3.0) * holdScale);
+  const speedLut = getSpeedCurveLut(spec.camera_keyframes);
 
-  // Linear schedule when pause_on_photo is off or no matched photos exist
+  // Non-paused schedule when pause_on_photo is off or no matched photos exist
   if (!spec.pause_on_photo || stops.length === 0) {
     let progressRatio = 0;
     if (clampedTimeS <= introHold) {
@@ -447,13 +563,15 @@ export function evaluateTimelineSchedule(
     } else if (clampedTimeS >= safeDurationS - outroHold) {
       progressRatio = 1;
     } else {
-      progressRatio = clamp01((clampedTimeS - introHold) / activeDuration);
+      const tau = clamp01((clampedTimeS - introHold) / activeDuration);
+      progressRatio = travelFractionToProgress(speedLut, tau);
     }
 
     let activePhoto: ActivePhotoDisplay | null = null;
     for (let i = 0; i < stops.length; i++) {
       const stop = stops[i]!;
-      const triggerTimeS = introHold + stop.matchedProgress * activeDuration;
+      const triggerTimeS =
+        introHold + progressToTravelFraction(speedLut, stop.matchedProgress) * activeDuration;
       const elapsed = clampedTimeS - triggerTimeS;
       if (elapsed >= 0 && elapsed <= desiredDisplayS) {
         const env = computeDisplayEnvelope(elapsed, desiredDisplayS, spec.photo_card_style);
@@ -480,7 +598,7 @@ export function evaluateTimelineSchedule(
     };
   }
 
-  // Piecewise-linear stop schedule when pause_on_photo is enabled
+  // Piecewise stop schedule when pause_on_photo is enabled (warped by keyframe speed curve)
   const maxTotalPauseS = activeDuration * 0.65;
   const rawTotalPauseS = stops.length * desiredDisplayS;
   const pauseScale = rawTotalPauseS > maxTotalPauseS ? maxTotalPauseS / rawTotalPauseS : 1;
@@ -504,12 +622,17 @@ export function evaluateTimelineSchedule(
     for (let i = 0; i < stops.length; i++) {
       const stop = stops[i]!;
       const targetProgress = clamp01(stop.matchedProgress);
-      const segProgressSpan = Math.max(0, targetProgress - prevProgress);
-      const segTravelS = segProgressSpan * travelDurationS;
+      const tauStart = progressToTravelFraction(speedLut, prevProgress);
+      const tauEnd = progressToTravelFraction(speedLut, targetProgress);
+      const segTravelS = Math.max(0, tauEnd - tauStart) * travelDurationS;
 
       if (activeT <= cursorTime + segTravelS) {
         const localFrac = segTravelS > 1e-9 ? clamp01((activeT - cursorTime) / segTravelS) : 1;
-        progressRatio = prevProgress + segProgressSpan * localFrac;
+        const tau = tauStart + localFrac * Math.max(0, tauEnd - tauStart);
+        progressRatio =
+          segTravelS <= 1e-9 && localFrac >= 1
+            ? targetProgress
+            : travelFractionToProgress(speedLut, tau);
         resolved = true;
         break;
       }
@@ -535,10 +658,12 @@ export function evaluateTimelineSchedule(
     }
 
     if (!resolved) {
-      const tailSpan = Math.max(0, 1 - prevProgress);
-      const tailTravelS = Math.max(1e-9, tailSpan * travelDurationS);
+      const tauPrev = progressToTravelFraction(speedLut, prevProgress);
+      const tailTauSpan = Math.max(0, 1 - tauPrev);
+      const tailTravelS = Math.max(1e-9, tailTauSpan * travelDurationS);
       const localFrac = clamp01((activeT - cursorTime) / tailTravelS);
-      progressRatio = prevProgress + tailSpan * localFrac;
+      const tau = tauPrev + tailTauSpan * localFrac;
+      progressRatio = travelFractionToProgress(speedLut, tau);
     }
   }
 
@@ -557,7 +682,7 @@ export function evaluateTimelineSchedule(
 /**
  * Inverse of evaluateTimelineSchedule on travel segments: maps a route progress ratio [0, 1]
  * back to master timeline time ratio [0, 1] so seeking the scrubber/chart lands at the exact
- * requested route position even when pause_on_photo warps the timeline.
+ * requested route position even when pause_on_photo or keyframe speed warps the timeline.
  */
 export function progressRatioToTimeRatio(
   matchedPhotos: readonly MatchedPhoto[],
@@ -583,8 +708,12 @@ export function progressRatioToTimeRatio(
     ? matchedPhotos.filter((p): p is MatchedPhoto & { matchedProgress: number } => p.matchedProgress !== null)
     : [];
 
+  const speedLut = getSpeedCurveLut(spec.camera_keyframes);
+
   if (!spec.pause_on_photo || stops.length === 0) {
-    return clamp01((introHold + target * activeDuration) / safeDurationS);
+    return clamp01(
+      (introHold + progressToTravelFraction(speedLut, target) * activeDuration) / safeDurationS,
+    );
   }
 
   const desiredDisplayS = Math.max(0.2, (spec.photo_display_seconds ?? 3.0) * holdScale);
@@ -596,18 +725,21 @@ export function progressRatioToTimeRatio(
   const travelDurationS = Math.max(0.05, activeDuration - totalPauseS);
 
   let cursorTime = 0;
-  let prevProgress = 0;
+  let tauPrev = 0;
   for (let i = 0; i < stops.length; i++) {
     const stopProgress = clamp01(stops[i]!.matchedProgress);
-    const segSpan = Math.max(0, stopProgress - prevProgress);
+    const tauStop = progressToTravelFraction(speedLut, stopProgress);
+    const segTauSpan = Math.max(0, tauStop - tauPrev);
     if (target <= stopProgress) {
-      const segTime = (target - prevProgress) * travelDurationS;
+      const tauTarget = progressToTravelFraction(speedLut, target);
+      const segTime = Math.max(0, tauTarget - tauPrev) * travelDurationS;
       return clamp01((introHold + cursorTime + segTime) / safeDurationS);
     }
-    cursorTime += segSpan * travelDurationS + perPauseS;
-    prevProgress = stopProgress;
+    cursorTime += segTauSpan * travelDurationS + perPauseS;
+    tauPrev = tauStop;
   }
 
-  const tailTime = Math.max(0, target - prevProgress) * travelDurationS;
+  const tauTarget = progressToTravelFraction(speedLut, target);
+  const tailTime = Math.max(0, tauTarget - tauPrev) * travelDurationS;
   return clamp01((introHold + cursorTime + tailTime) / safeDurationS);
 }

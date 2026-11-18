@@ -291,4 +291,47 @@ describe("Geo layout & collision solver (layout.ts)", () => {
       }
     }
   });
+
+  it("suppresses climbCalloutTargets when show_climb_callouts is false and filters off-screen summit anchors", () => {
+    const stage = makeLinearStage([
+      makePoint(0.4512, 0.2173, 0, 0),
+      makePoint(0.7113, 0.3552, 15_000, 1500),
+    ]);
+    const spec = createDefaultRenderSpecV2();
+    spec.camera_mode = "fit-track";
+    const evaluated = evaluateTimeline([stage], spec, 0.5);
+
+    const disabledSpec = { ...spec, show_climb_callouts: false };
+    const disabledLayout = solveStageLayout({
+      stages: [stage],
+      spec: disabledSpec,
+      evaluated,
+      viewportW: 1280,
+      viewportH: 720,
+      compact: false,
+      isPreview: false,
+      hasActivePhoto: false,
+      climbCalloutTargets: [{ id: "c-hidden", screenX: 600, screenY: 360 }],
+    });
+    expect(disabledLayout.climbCallouts).toEqual([]);
+
+    const filteredLayout = solveStageLayout({
+      stages: [stage],
+      spec: { ...spec, show_climb_callouts: true },
+      evaluated,
+      viewportW: 1280,
+      viewportH: 720,
+      compact: false,
+      isPreview: false,
+      hasActivePhoto: false,
+      climbCalloutTargets: [
+        { id: "c-off-left", screenX: -120, screenY: 360 },
+        { id: "c-off-right", screenX: 1400, screenY: 360 },
+        { id: "c-off-top", screenX: 640, screenY: -80 },
+        { id: "c-off-bottom", screenX: 640, screenY: 820 },
+        { id: "c-on-screen", screenX: 640, screenY: 360 },
+      ],
+    });
+    expect(filteredLayout.climbCallouts.map((c) => c.id)).toEqual(["c-on-screen"]);
+  });
 });

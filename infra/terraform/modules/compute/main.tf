@@ -8,7 +8,7 @@ data "aws_vpc" "main" {
 
 locals {
   ecr_services = toset(["api", "worker", "airflow"])
-  log_services = toset(["api", "worker", "migrate", "reap", "dbt"])
+  log_services = toset(["api", "worker", "migrate", "reap", "dbt", "ingest"])
 
   objects_bucket_arn  = "arn:aws:s3:::${var.objects_bucket_name}"
   s3_endpoint_url     = "https://s3.${data.aws_region.current.name}.amazonaws.com"
@@ -772,6 +772,8 @@ resource "aws_ecs_task_definition" "api" {
         { name = "S3_ENDPOINT_URL", value = local.s3_endpoint_url },
         { name = "S3_BUCKET", value = var.objects_bucket_name },
         { name = "S3_REGION", value = data.aws_region.current.name },
+        { name = "GOLD_OUTPUT_DIR", value = "/tmp/gold" },
+        { name = "GOLD_SYNC_INTERVAL_S", value = "60" },
         { name = "MAP_TILE_ALLOWLIST", value = var.map_tile_allowlist },
         { name = "RENDER_RETENTION_DAYS", value = tostring(var.render_retention_days) },
         { name = "FORWARDED_ALLOW_IPS", value = data.aws_vpc.main.cidr_block },
@@ -1121,6 +1123,87 @@ resource "aws_ecs_task_definition" "dbt" {
   })
 }
 
+resource "aws_ecs_task_definition" "ingest" {
+  family                   = "${var.name_prefix}-ingest"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "256"
+  memory                   = "512"
+  execution_role_arn       = aws_iam_role.execution.arn
+  task_role_arn            = aws_iam_role.api_task.arn
+
+  runtime_platform {
+    operating_system_family = "LINUX"
+    cpu_architecture        = var.cpu_architecture
+  }
+
+  volume {
+    name = "tmp"
+  }
+
+  container_definitions = jsonencode([
+    {
+      name                   = "ingest"
+      image                  = "${aws_ecr_repository.services["api"].repository_url}:${var.image_tag}"
+      essential              = true
+      user                   = "10001:10001"
+      readonlyRootFilesystem = true
+      command                = ["python", "-m", "trip_api.cli", "process-ingest-jobs", "--json"]
+
+      linuxParameters = {
+        capabilities = {
+          drop = ["ALL"]
+        }
+      }
+
+      mountPoints = [
+        {
+          sourceVolume  = "tmp"
+          containerPath = "/tmp"
+          readOnly      = false
+        }
+      ]
+
+      environment = concat([
+        { name = "APP_ENV", value = "production" },
+        { name = "LOG_LEVEL", value = var.log_level },
+        { name = "DEV_AUTH_ENABLED", value = "false" },
+        { name = "OBJECT_STORE_BACKEND", value = "s3" },
+        { name = "S3_ENDPOINT_URL", value = local.s3_endpoint_url },
+        { name = "S3_BUCKET", value = var.objects_bucket_name },
+        { name = "S3_REGION", value = data.aws_region.current.name },
+        ], local.has_custom_domain ? [
+        { name = "ALLOWED_ORIGINS", value = local.public_base_url },
+        { name = "STRAVA_REDIRECT_URI", value = local.strava_redirect_uri },
+      ] : [])
+
+      secrets = concat([
+        { name = "DATABASE_URL", valueFrom = "${var.db_secret_arn}:database_url::" },
+        { name = "SESSION_SECRET", valueFrom = "${aws_secretsmanager_secret.app.arn}:SESSION_SECRET::" },
+        { name = "TOKEN_ENCRYPTION_KEY", valueFrom = "${aws_secretsmanager_secret.app.arn}:TOKEN_ENCRYPTION_KEY::" },
+        { name = "STRAVA_CLIENT_ID", valueFrom = "${aws_secretsmanager_secret.app.arn}:STRAVA_CLIENT_ID::" },
+        { name = "STRAVA_CLIENT_SECRET", valueFrom = "${aws_secretsmanager_secret.app.arn}:STRAVA_CLIENT_SECRET::" },
+        ], local.has_custom_domain ? [] : [
+        { name = "ALLOWED_ORIGINS", valueFrom = local.public_base_url_ssm_arn },
+        { name = "STRAVA_REDIRECT_URI", valueFrom = local.strava_redirect_uri_ssm_arn },
+      ])
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.ecs["ingest"].name
+          awslogs-region        = data.aws_region.current.name
+          awslogs-stream-prefix = "ingest"
+        }
+      }
+    }
+  ])
+
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-ingest-td"
+  })
+}
+
 # -----------------------------------------------------------------------------
 # ECS Services & Application Auto Scaling
 # -----------------------------------------------------------------------------
@@ -1373,6 +1456,7 @@ data "aws_iam_policy_document" "scheduler_ecs" {
     resources = compact([
       aws_ecs_task_definition.reap.arn,
       var.enable_dbt_schedule ? aws_ecs_task_definition.dbt.arn : "",
+      var.enable_ingest_schedule ? aws_ecs_task_definition.ingest.arn : "",
     ])
 
     condition {
@@ -1390,6 +1474,7 @@ data "aws_iam_policy_document" "scheduler_ecs" {
       aws_iam_role.execution.arn,
       aws_iam_role.reap_task.arn,
       var.enable_dbt_schedule ? aws_iam_role.dbt_task.arn : "",
+      var.enable_ingest_schedule ? aws_iam_role.api_task.arn : "",
     ])
   }
 }
@@ -1450,6 +1535,40 @@ resource "aws_scheduler_schedule" "dbt" {
 
     ecs_parameters {
       task_definition_arn = aws_ecs_task_definition.dbt.arn
+      task_count          = 1
+
+      capacity_provider_strategy {
+        capacity_provider = "FARGATE_SPOT"
+        weight            = 100
+      }
+
+      network_configuration {
+        subnets          = local.ecs_task_subnets
+        security_groups  = [var.api_security_group_id]
+        assign_public_ip = local.ecs_assign_public_ip
+      }
+    }
+  }
+}
+
+resource "aws_scheduler_schedule" "ingest" {
+  count = var.enable_ingest_schedule ? 1 : 0
+
+  name       = "${var.name_prefix}-ingest-jobs"
+  group_name = "default"
+
+  flexible_time_window {
+    mode = "OFF"
+  }
+
+  schedule_expression = var.ingest_schedule_expression
+
+  target {
+    arn      = aws_ecs_cluster.main.arn
+    role_arn = aws_iam_role.scheduler.arn
+
+    ecs_parameters {
+      task_definition_arn = aws_ecs_task_definition.ingest.arn
       task_count          = 1
 
       capacity_provider_strategy {

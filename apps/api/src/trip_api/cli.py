@@ -3,28 +3,26 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import getpass
 import hashlib
 import json
 import logging
+import signal
 import sys
 import tempfile
+import threading
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
 
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import select
 from trip_telemetry import (
     ParsedTrack,
     build_lod_cache_payload,
     build_silver_dataframe,
     build_stage_events_parquet,
-    infer_activity_type_from_strava,
     parse_strava_streams,
     parse_track_with_timeout,
     write_silver_parquet,
@@ -32,21 +30,17 @@ from trip_telemetry import (
 
 from trip_api.config import Settings, get_settings
 from trip_api.db import (
-    IngestJob,
-    OAuthConnection,
-    Project,
     Stage,
     User,
     create_db_engine,
     create_session_factory,
 )
-from trip_api.deps import ensure_utc
+from trip_api.ingest import count_pending_ingest_jobs, process_pending_ingest_jobs
 from trip_api.reaper import build_object_store, run_reap
-from trip_api.security import decrypt_secret, encrypt_secret, hash_password
+from trip_api.security import hash_password
 from trip_api.services import (
     build_stage_chart_cache_bytes,
     current_etl_version,
-    ingest_parsed_track,
     stage_chart_cache_key,
     stage_events_cache_key,
     stage_lod_cache_key,
@@ -75,6 +69,7 @@ class IngestProcessReport:
     ignored_jobs: int
     failed_jobs: int
     dry_run: bool = False
+    deferred_jobs: int = 0
 
 
 def create_user(
@@ -253,265 +248,161 @@ def run_replay_silver(
         engine.dispose()
 
 
-def _respect_strava_rate_limit(resp: httpx.Response) -> bool:
-    """Return True if Strava 15m/daily usage header indicates we should pause further calls."""
-    usage = resp.headers.get("X-RateLimit-Usage", "")
-    limit = resp.headers.get("X-RateLimit-Limit", "")
-    try:
-        u15, uday = (int(x.strip()) for x in usage.split(",", 1))
-        l15, lday = (int(x.strip()) for x in limit.split(",", 1))
-        return u15 >= max(l15 - 2, 1) or uday >= max(lday - 5, 1)
-    except Exception:
-        return resp.status_code == 429
-
-
-async def _fetch_strava_activity_and_streams(
-    cfg: Settings,
-    db: Any,
-    conn: OAuthConnection,
-    activity_id: int,
-) -> tuple[dict[str, Any], dict[str, Any], bool]:
-    key = cfg.decoded_encryption_key
-    aad = f"oauth:{conn.user_id}:strava".encode()
-    base = cfg.strava_api_base_url.rstrip("/")
-
-    async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
-        if ensure_utc(conn.expires_at) <= datetime.now(UTC) + timedelta(seconds=60):
-            ref = decrypt_secret(conn.refresh_token_enc, key, aad=aad)
-            tok_resp = await client.post(
-                f"{base}/oauth/token",
-                data={
-                    "client_id": cfg.strava_client_id,
-                    "client_secret": cfg.strava_client_secret,
-                    "grant_type": "refresh_token",
-                    "refresh_token": ref,
-                },
-            )
-            tok_resp.raise_for_status()
-            tp = tok_resp.json()
-            conn.access_token_enc = encrypt_secret(str(tp["access_token"]), key, aad=aad)
-            conn.refresh_token_enc = encrypt_secret(
-                str(tp.get("refresh_token") or ref), key, aad=aad
-            )
-            conn.expires_at = datetime.fromtimestamp(int(tp["expires_at"]), tz=UTC)
-            db.commit()
-            access_token = str(tp["access_token"])
-        else:
-            access_token = decrypt_secret(conn.access_token_enc, key, aad=aad)
-
-        headers = {"Authorization": f"Bearer {access_token}"}
-        act_resp = await client.get(f"{base}/api/v3/activities/{activity_id}", headers=headers)
-        act_resp.raise_for_status()
-        str_resp = await client.get(
-            f"{base}/api/v3/activities/{activity_id}/streams",
-            params={
-                "keys": (
-                    "latlng,time,altitude,heartrate,cadence,watts,"
-                    "velocity_smooth,grade_smooth,moving,temp,distance"
-                ),
-                "key_by_type": "true",
-            },
-            headers=headers,
-        )
-        str_resp.raise_for_status()
-        rate_limited = _respect_strava_rate_limit(str_resp)
-        return act_resp.json(), str_resp.json(), rate_limited
-
-
 def run_process_ingest_jobs(
     settings: Settings | None = None,
     *,
     limit: int = 20,
     dry_run: bool = False,
     database_url: str | None = None,
+    max_attempts: int = 5,
+    http_client_factory: Callable[[], httpx.Client] | None = None,
 ) -> IngestProcessReport:
-    """Process queued Strava webhook IngestJobs using lease locking."""
+    """Process queued Strava webhook IngestJobs via canonical `trip_api.ingest`."""
+    if limit < 1:
+        raise ValueError("limit must be >= 1")
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be >= 1")
+
     cfg = settings or Settings()
     resolved_url = database_url or cfg.database_url
     engine = create_db_engine(resolved_url)
     sf = create_session_factory(engine)
     store = build_object_store(cfg)
 
-    succeeded = 0
-    ignored = 0
-    failed = 0
-    now = datetime.now(UTC)
-
     try:
         with sf() as db:
-            stmt = (
-                select(IngestJob)
-                .where(
-                    (IngestJob.status == "queued")
-                    | (
-                        (IngestJob.status == "running")
-                        & (IngestJob.lease_expires_at.is_not(None))
-                        & (IngestJob.lease_expires_at <= now)
-                    )
-                )
-                .order_by(IngestJob.created_at.asc())
-                .limit(limit)
-            )
-            if resolved_url.startswith("postgresql"):
-                stmt = stmt.with_for_update(skip_locked=True)
-            jobs = list(db.scalars(stmt).all())
             if dry_run:
+                matched = count_pending_ingest_jobs(
+                    db,
+                    batch_size=limit,
+                    max_attempts=max_attempts,
+                )
                 return IngestProcessReport(
-                    matched_jobs=len(jobs),
+                    matched_jobs=matched,
                     succeeded_jobs=0,
                     ignored_jobs=0,
                     failed_jobs=0,
                     dry_run=True,
+                    deferred_jobs=0,
                 )
 
-            for job in jobs:
-                job.status = "running"
-                job.attempt_count += 1
-                job.lease_expires_at = datetime.now(UTC) + timedelta(minutes=5)
-            db.commit()
-
-            for job in jobs:
-                try:
-                    conns = list(
-                        db.scalars(
-                            select(OAuthConnection).where(
-                                OAuthConnection.provider == job.provider,
-                                OAuthConnection.external_athlete_id == job.external_owner_id,
-                            )
-                        ).all()
-                    )
-                    if not conns:
-                        job.status = "ignored"
-                        job.lease_expires_at = None
-                        db.commit()
-                        ignored += 1
-                        continue
-
-                    if job.event_type == "delete":
-                        deleted_any = False
-                        for conn in conns:
-                            user_proj_ids = list(
-                                db.scalars(
-                                    select(Project.id).where(Project.owner_user_id == conn.user_id)
-                                ).all()
-                            )
-                            if not user_proj_ids:
-                                continue
-                            matching_stages = list(
-                                db.scalars(
-                                    select(Stage).where(
-                                        Stage.project_id.in_(user_proj_ids),
-                                        Stage.strava_activity_id == job.external_object_id,
-                                    )
-                                ).all()
-                            )
-                            for st in matching_stages:
-                                for k in (
-                                    st.bronze_object_key,
-                                    st.silver_object_key,
-                                    stage_lod_cache_key(st.project_id, st.id),
-                                    stage_chart_cache_key(st.project_id, st.id),
-                                    stage_events_cache_key(st.project_id, st.id),
-                                ):
-                                    try:
-                                        store.delete(k)
-                                    except Exception:
-                                        logger.debug("Cleanup skipped for key %s", k)
-                                db.delete(st)
-                                deleted_any = True
-                        job.status = "succeeded" if deleted_any else "ignored"
-                        job.lease_expires_at = None
-                        db.commit()
-                        if deleted_any:
-                            succeeded += 1
-                        else:
-                            ignored += 1
-                        continue
-
-                    pause_rate_limit = False
-                    for conn in conns:
-                        act_json, str_json, hit_limit = asyncio.run(
-                            _fetch_strava_activity_and_streams(
-                                cfg, db, conn, int(job.external_object_id)
-                            )
-                        )
-                        if hit_limit:
-                            pause_rate_limit = True
-                        proj = db.scalar(
-                            select(Project)
-                            .where(Project.owner_user_id == conn.user_id)
-                            .order_by(Project.updated_at.desc())
-                            .limit(1)
-                        )
-                        if proj is None:
-                            proj = Project(
-                                owner_user_id=conn.user_id,
-                                title="Strava Synced Trips",
-                                revision=1,
-                                settings_json={},
-                            )
-                            db.add(proj)
-                            db.flush()
-
-                        parsed = parse_strava_streams(
-                            str_json,
-                            start_date=act_json.get("start_date"),
-                            name=str(act_json.get("name") or "Strava Activity"),
-                        )
-                        raw_bronze = json.dumps(
-                            {"activity": act_json, "streams": str_json},
-                            separators=(",", ":"),
-                            sort_keys=True,
-                        ).encode("utf-8")
-                        raw_sport = act_json.get("sport_type") or act_json.get("type")
-                        act_type = infer_activity_type_from_strava(
-                            str(raw_sport) if raw_sport is not None else None,
-                            parsed.name,
-                        )
-                        max_day = db.scalar(
-                            select(func.coalesce(func.max(Stage.day_index), 1)).where(
-                                Stage.project_id == proj.id
-                            )
-                        )
-                        ingest_parsed_track(
-                            db=db,
-                            store=store,
-                            project=proj,
-                            parsed=parsed,
-                            raw_bronze_bytes=raw_bronze,
-                            bronze_ext="json",
-                            bronze_content_type="application/json",
-                            source_type="strava",
-                            source_format="strava",
-                            stage_name=parsed.name or f"Strava {job.external_object_id}",
-                            day_index=int(max_day or 1),
-                            activity_type=act_type,
-                            external_source_id=str(job.external_object_id),
-                            strava_activity_id=int(job.external_object_id),
-                        )
-                    job.status = "succeeded"
-                    job.lease_expires_at = None
-                    db.commit()
-                    succeeded += 1
-                    if pause_rate_limit:
-                        break
-                except Exception as exc:
-                    db.rollback()
-                    job.status = "failed"
-                    job.lease_expires_at = None
-                    job.error_message = str(exc)[:500]
-                    db.commit()
-                    failed += 1
-
+            res = process_pending_ingest_jobs(
+                db,
+                store,
+                cfg,
+                batch_size=limit,
+                max_attempts=max_attempts,
+                http_client_factory=http_client_factory,
+            )
             return IngestProcessReport(
-                matched_jobs=len(jobs),
-                succeeded_jobs=succeeded,
-                ignored_jobs=ignored,
-                failed_jobs=failed,
+                matched_jobs=int(res["claimed"]),
+                succeeded_jobs=int(res["succeeded"]),
+                ignored_jobs=int(res["ignored"]),
+                failed_jobs=int(res["failed"]),
                 dry_run=False,
+                deferred_jobs=int(res.get("deferred", 0)),
             )
     finally:
         engine.dispose()
+
+
+def run_ingest_worker_loop(
+    settings: Settings | None = None,
+    *,
+    limit: int = 20,
+    dry_run: bool = False,
+    database_url: str | None = None,
+    poll_interval_s: float = 5.0,
+    max_attempts: int = 5,
+    stop_event: threading.Event | None = None,
+    max_iterations: int | None = None,
+    http_client_factory: Callable[[], httpx.Client] | None = None,
+) -> IngestProcessReport:
+    """Continuously drain IngestJobs with SIGTERM/SIGINT graceful shutdown."""
+    if poll_interval_s <= 0.0:
+        raise ValueError("poll_interval_s must be > 0")
+    if limit < 1:
+        raise ValueError("limit must be >= 1")
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be >= 1")
+
+    cfg = settings or Settings()
+    resolved_url = database_url or cfg.database_url
+    engine = create_db_engine(resolved_url)
+    sf = create_session_factory(engine)
+    store = build_object_store(cfg)
+
+    shutdown_event = stop_event or threading.Event()
+    prev_sigterm: object = None
+    prev_sigint: object = None
+    in_main_thread = threading.current_thread() is threading.main_thread()
+
+    def _handle_signal(_signum: int, _frame: object) -> None:
+        shutdown_event.set()
+
+    if in_main_thread:
+        prev_sigterm = signal.getsignal(signal.SIGTERM)
+        prev_sigint = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGTERM, _handle_signal)
+        signal.signal(signal.SIGINT, _handle_signal)
+
+    total_matched = 0
+    total_succeeded = 0
+    total_ignored = 0
+    total_failed = 0
+    total_deferred = 0
+    iterations = 0
+
+    try:
+        while not shutdown_event.is_set():
+            with sf() as db:
+                if dry_run:
+                    matched = count_pending_ingest_jobs(
+                        db,
+                        batch_size=limit,
+                        max_attempts=max_attempts,
+                    )
+                    total_matched += matched
+                    claimed = 0
+                    deferred = 0
+                else:
+                    res = process_pending_ingest_jobs(
+                        db,
+                        store,
+                        cfg,
+                        batch_size=limit,
+                        max_attempts=max_attempts,
+                        http_client_factory=http_client_factory,
+                    )
+                    claimed = int(res["claimed"])
+                    deferred = int(res.get("deferred", 0))
+                    total_matched += claimed
+                    total_succeeded += int(res["succeeded"])
+                    total_ignored += int(res["ignored"])
+                    total_failed += int(res["failed"])
+                    total_deferred += deferred
+
+            iterations += 1
+            if max_iterations is not None and iterations >= max_iterations:
+                break
+            if dry_run or claimed < limit or deferred > 0:
+                shutdown_event.wait(timeout=poll_interval_s)
+    finally:
+        if in_main_thread:
+            if prev_sigterm is not None:
+                signal.signal(signal.SIGTERM, prev_sigterm)  # type: ignore[arg-type]
+            if prev_sigint is not None:
+                signal.signal(signal.SIGINT, prev_sigint)  # type: ignore[arg-type]
+        engine.dispose()
+
+    return IngestProcessReport(
+        matched_jobs=total_matched,
+        succeeded_jobs=total_succeeded,
+        ignored_jobs=total_ignored,
+        failed_jobs=total_failed,
+        dry_run=dry_run,
+        deferred_jobs=total_deferred,
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -581,6 +472,23 @@ def _build_parser() -> argparse.ArgumentParser:
     ing_p.add_argument("--limit", type=int, default=20, help="Maximum jobs per run")
     ing_p.add_argument("--dry-run", action="store_true", help="Count matching jobs only")
     ing_p.add_argument("--database-url", default=None, help="Optional database URL override")
+    ing_p.add_argument(
+        "--loop",
+        action="store_true",
+        help="Continuously poll and drain queued ingest jobs until SIGTERM/SIGINT",
+    )
+    ing_p.add_argument(
+        "--poll-interval-s",
+        type=float,
+        default=5.0,
+        help="Polling interval in seconds when --loop is enabled",
+    )
+    ing_p.add_argument(
+        "--max-attempts",
+        type=int,
+        default=5,
+        help="Maximum processing attempts before marking an ingest job failed",
+    )
     ing_p.add_argument("--json", action="store_true", dest="as_json", help="Emit JSON output")
     return parser
 
@@ -679,11 +587,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0 if rep.failed_stages == 0 else 1
 
     if args.command == "process-ingest-jobs":
-        rep_ing = run_process_ingest_jobs(
-            limit=args.limit,
-            dry_run=bool(args.dry_run),
-            database_url=args.database_url,
-        )
+        try:
+            if args.loop:
+                rep_ing = run_ingest_worker_loop(
+                    limit=args.limit,
+                    dry_run=bool(args.dry_run),
+                    database_url=args.database_url,
+                    poll_interval_s=args.poll_interval_s,
+                    max_attempts=args.max_attempts,
+                )
+            else:
+                rep_ing = run_process_ingest_jobs(
+                    limit=args.limit,
+                    dry_run=bool(args.dry_run),
+                    database_url=args.database_url,
+                    max_attempts=args.max_attempts,
+                )
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+
         if args.as_json:
             print(
                 json.dumps(
@@ -692,6 +615,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "succeeded_jobs": rep_ing.succeeded_jobs,
                         "ignored_jobs": rep_ing.ignored_jobs,
                         "failed_jobs": rep_ing.failed_jobs,
+                        "deferred_jobs": rep_ing.deferred_jobs,
                         "dry_run": rep_ing.dry_run,
                     }
                 )
@@ -700,9 +624,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(
                 f"Ingest jobs complete (dry_run={rep_ing.dry_run}): "
                 f"matched={rep_ing.matched_jobs} succeeded={rep_ing.succeeded_jobs} "
-                f"ignored={rep_ing.ignored_jobs} failed={rep_ing.failed_jobs}"
+                f"ignored={rep_ing.ignored_jobs} failed={rep_ing.failed_jobs} "
+                f"deferred={rep_ing.deferred_jobs}"
             )
-        return 0 if rep_ing.failed_jobs == 0 else 1
+        return 0 if getattr(args, "loop", False) else (0 if rep_ing.failed_jobs == 0 else 1)
 
     return 1
 

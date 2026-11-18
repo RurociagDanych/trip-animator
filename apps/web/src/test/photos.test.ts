@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   createDefaultRenderSpecV2,
+  type CameraKeyframe,
   type ManifestPhoto,
   type ProjectPhotoOut,
 } from "../lib/api/types";
+import { sampleKeyframeSpeedMultiplier } from "../lib/geo/camera";
 import {
   evaluateTimelineSchedule,
   matchPhotosToTimeline,
+  progressRatioToTimeRatio,
   resolvePhotoSrc,
 } from "../lib/geo/photos";
 import type { TimelinePoint, TimelineStage } from "../lib/geo/timeline";
@@ -214,5 +217,195 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
     const cornerSpec = { ...spec, photo_card_style: "corner" as const };
     const cornerRes = evaluateTimelineSchedule([stage], matched, cornerSpec, 6.0, 10, false);
     expect(cornerRes.activePhoto?.kenBurnsScale).toBe(1.0);
+  });
+
+  it("samples keyframe speed multipliers with clamping and unsorted/invalid edge cases", () => {
+    expect(sampleKeyframeSpeedMultiplier([], 0.5)).toBe(1.0);
+
+    const kfs: CameraKeyframe[] = [
+      {
+        progress: 0.8,
+        camera_mode: "follow-marker",
+        camera_preset: "flat",
+        pitch_deg: 0,
+        bearing_offset_deg: 0,
+        zoom_offset: 0,
+        speed_multiplier: 10, // clamped to 4.0
+        label: "Fast",
+      },
+      {
+        progress: 0.2,
+        camera_mode: "follow-marker",
+        camera_preset: "flat",
+        pitch_deg: 0,
+        bearing_offset_deg: 0,
+        zoom_offset: 0,
+        speed_multiplier: -1, // clamped to 0.25
+        label: "Slow",
+      },
+    ];
+    expect(sampleKeyframeSpeedMultiplier(kfs, 0)).toBe(0.25);
+    expect(sampleKeyframeSpeedMultiplier(kfs, 0.2)).toBe(0.25);
+    expect(sampleKeyframeSpeedMultiplier(kfs, 0.5)).toBeCloseTo(2.125, 4);
+    expect(sampleKeyframeSpeedMultiplier(kfs, 1.0)).toBe(4.0);
+
+    const invalidKf: CameraKeyframe[] = [
+      {
+        progress: 0.5,
+        camera_mode: "follow-marker",
+        camera_preset: "flat",
+        pitch_deg: 0,
+        bearing_offset_deg: 0,
+        zoom_offset: 0,
+        speed_multiplier: Number.NaN,
+        label: "NaN",
+      },
+      {
+        progress: 0.5,
+        camera_mode: "follow-marker",
+        camera_preset: "flat",
+        pitch_deg: 0,
+        bearing_offset_deg: 0,
+        zoom_offset: 0,
+        speed_multiplier: 0,
+        label: "Zero",
+      },
+    ];
+    expect(sampleKeyframeSpeedMultiplier(invalidKf, 0.5)).toBe(1.0);
+    expect(sampleKeyframeSpeedMultiplier(invalidKf, 0.9)).toBe(0.25);
+  });
+
+  it("warps travel time monotonically for valley (2.5x) vs climb (0.5x) keyframes, syncs photo triggers, and round-trips progressRatioToTimeRatio", () => {
+    const spec = createDefaultRenderSpecV2();
+    spec.duration_seconds = 20;
+    spec.intro_hold_seconds = 2;
+    spec.outro_hold_seconds = 2;
+    spec.pause_on_photo = false;
+    spec.show_photos = true;
+    spec.photo_display_seconds = 2;
+    spec.camera_keyframes = [
+      {
+        progress: 0.0,
+        camera_mode: "follow-marker",
+        camera_preset: "flat",
+        pitch_deg: 0,
+        bearing_offset_deg: 0,
+        zoom_offset: 0,
+        speed_multiplier: 2.5,
+        label: "Valley",
+      },
+      {
+        progress: 0.5,
+        camera_mode: "follow-marker",
+        camera_preset: "flat",
+        pitch_deg: 0,
+        bearing_offset_deg: 0,
+        zoom_offset: 0,
+        speed_multiplier: 2.5,
+        label: "Valley End",
+      },
+      {
+        progress: 0.55,
+        camera_mode: "follow-marker",
+        camera_preset: "dynamic-3d",
+        pitch_deg: 45,
+        bearing_offset_deg: 0,
+        zoom_offset: 1,
+        speed_multiplier: 0.5,
+        label: "Climb Start",
+      },
+      {
+        progress: 1.0,
+        camera_mode: "follow-marker",
+        camera_preset: "dynamic-3d",
+        pitch_deg: 45,
+        bearing_offset_deg: 0,
+        zoom_offset: 1,
+        speed_multiplier: 0.5,
+        label: "Summit",
+      },
+    ];
+
+    const stage = makeStage();
+    // Photo at midpoint p = 0.5 (end of 2.5x valley)
+    const photos = [
+      makePhoto({ id: "p-mid", taken_at_utc: "2040-04-12T08:08:20Z" }),
+    ];
+    const matched = matchPhotosToTimeline(photos, [stage], spec);
+
+    // Monotonicity across entire timeline
+    let prevProgress = -1;
+    for (let t = 0; t <= 20; t += 0.25) {
+      const res = evaluateTimelineSchedule([stage], matched, spec, t, 20, false);
+      expect(res.progressRatio).toBeGreaterThanOrEqual(prevProgress - 1e-9);
+      prevProgress = res.progressRatio;
+    }
+
+    // Halfway through activeDuration (t = 10s), marker is well past 0.5 because first half was 2.5x faster
+    const midTimeRes = evaluateTimelineSchedule([stage], matched, spec, 10, 20, false);
+    expect(midTimeRes.progressRatio).toBeGreaterThan(0.65);
+
+    // Non-paused photo trigger time matches when marker crosses matchedProgress = 0.5
+    const triggerTimeRatio = progressRatioToTimeRatio(matched, spec, 0.5, 20, false);
+    const triggerTimeS = triggerTimeRatio * 20;
+    const atTrigger = evaluateTimelineSchedule([stage], matched, spec, triggerTimeS, 20, false);
+    expect(atTrigger.progressRatio).toBeCloseTo(0.5, 4);
+    expect(atTrigger.activePhoto?.photo.id).toBe("p-mid");
+    const justBeforeTrigger = evaluateTimelineSchedule(
+      [stage],
+      matched,
+      spec,
+      triggerTimeS - 0.1,
+      20,
+      false,
+    );
+    expect(justBeforeTrigger.activePhoto).toBeNull();
+
+    // Round-trip progressRatioToTimeRatio -> evaluateTimelineSchedule (non-paused)
+    for (const target of [0.1, 0.25, 0.5, 0.72, 0.9]) {
+      const tr = progressRatioToTimeRatio(matched, spec, target, 20, false);
+      const ev = evaluateTimelineSchedule([stage], matched, spec, tr * 20, 20, false);
+      expect(ev.progressRatio).toBeCloseTo(target, 4);
+    }
+
+    // Uniform speed_multiplier (all 2.0x) normalizes to exact identity T(p) = p
+    const uniformSpec = {
+      ...spec,
+      camera_keyframes: spec.camera_keyframes.map((kf) => ({ ...kf, speed_multiplier: 2.0 })),
+    };
+    const uniformMid = evaluateTimelineSchedule([stage], matched, uniformSpec, 10, 20, false);
+    expect(uniformMid.progressRatio).toBeCloseTo(0.5, 6);
+
+    // In-place array mutation invalidates WeakMap cache signature
+    const mutableKfs = spec.camera_keyframes.map((kf) => ({ ...kf }));
+    const mutSpec = { ...spec, camera_keyframes: mutableKfs };
+    const beforeMut = evaluateTimelineSchedule([stage], matched, mutSpec, 10, 20, false);
+    expect(beforeMut.progressRatio).toBeGreaterThan(0.65);
+    mutableKfs.forEach((kf) => {
+      kf.speed_multiplier = 1.0;
+    });
+    const afterMut = evaluateTimelineSchedule([stage], matched, mutSpec, 10, 20, false);
+    expect(afterMut.progressRatio).toBeCloseTo(0.5, 6);
+
+    // pause_on_photo + speed curve preserves travelDurationS, pauses at photo, and round-trips
+    const pausedSpec = { ...spec, pause_on_photo: true, photo_display_seconds: 4 };
+    const pausedTimeRatio = progressRatioToTimeRatio(matched, pausedSpec, 0.5, 20, false);
+    const atPauseStart = evaluateTimelineSchedule(
+      [stage],
+      matched,
+      pausedSpec,
+      pausedTimeRatio * 20 + 0.5,
+      20,
+      false,
+    );
+    expect(atPauseStart.progressRatio).toBeCloseTo(0.5, 4);
+    expect(atPauseStart.activePhoto?.photo.id).toBe("p-mid");
+    expect(atPauseStart.travelDurationS).toBeCloseTo(12, 4);
+
+    for (const target of [0.15, 0.4, 0.65, 0.88]) {
+      const tr = progressRatioToTimeRatio(matched, pausedSpec, target, 20, false);
+      const ev = evaluateTimelineSchedule([stage], matched, pausedSpec, tr * 20, 20, false);
+      expect(ev.progressRatio).toBeCloseTo(target, 4);
+    }
   });
 });

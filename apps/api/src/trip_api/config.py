@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     object_store_backend: Literal["local", "s3"] = "local"
     local_object_store_dir: str = "./data/objects"
     gold_output_dir: str = "./data/gold"
+    gold_s3_key: str = "gold/trip_analytics.duckdb"
+    gold_sync_interval_s: float = Field(default=60.0, ge=0.0, le=3600.0)
     s3_endpoint_url: str = "http://localhost:9000"
     s3_access_key_id: str = ""
     s3_secret_access_key: str = ""

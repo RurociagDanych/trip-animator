@@ -382,6 +382,22 @@ def test_dbt_gold_build_on_live_silver_parquet(tmp_path: Path) -> None:
         assert daily[0][0] == "trip-gold"
         assert daily[0][1] == 1
         assert daily[1][3] == pytest.approx(60.0)
+
+        h3_rows = con.execute(
+            """
+            SELECT
+                trip_id, stage_id, year, h3_index,
+                center_lat, center_lon, point_count, stage_count
+            FROM mart_spatial_coverage_h3
+            ORDER BY stage_id, h3_index
+            """
+        ).fetchall()
+        assert len(h3_rows) >= 2
+        assert {r[1] for r in h3_rows} == {"stage-1", "stage-2"}
+        assert all(r[2] == 2001 for r in h3_rows)
+        assert all(r[4] is not None and r[5] is not None for r in h3_rows)
+        assert sum(int(r[6]) for r in h3_rows) == 5
+        assert all(int(r[7]) == 1 for r in h3_rows)
     finally:
         con.close()
 
