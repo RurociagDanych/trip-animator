@@ -587,6 +587,122 @@ describe("Login, Editor state, Stage reorder & Revision Conflict handling", () =
     });
   });
 
+  it("queues bulk import-all from StravaPickerModal with active date and GPS filters", async () => {
+    const project = makeProjectDetail();
+    let importAllBody: Record<string, unknown> | null = null;
+    let projectFetchCount = 0;
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
+      const method = init?.method ?? "GET";
+
+      if (url.endsWith("/api/v1/auth/me")) {
+        return jsonResponse({
+          user: { id: "u1", email: "dev@trip.local", display_name: "Dev", strava_connected: true },
+          csrf_token: "csrf-bulk",
+          dev_auth_enabled: true,
+        });
+      }
+      if (url.endsWith("/api/v1/projects/proj-1") && method === "GET") {
+        projectFetchCount += 1;
+        return jsonResponse(project);
+      }
+      if (url.includes("/stages/") && url.includes("/geometry")) {
+        return jsonResponse({
+          type: "Feature",
+          id: "stage-1",
+          geometry: { type: "MultiLineString", coordinates: [[[0.4512, 0.2173], [0.5897, 0.3128]]] },
+          properties: {
+            lod: "medium",
+            point_count: 2,
+            original_point_count: 10,
+            segment_count: 1,
+            bbox: [0.4512, 0.2173, 0.5897, 0.3128],
+            crosses_antimeridian: false,
+            stage_id: "stage-1",
+            name: "Stage",
+            day_index: 1,
+            stage_order: 0,
+            source_type: "gpx",
+            activity_type: "cycling",
+            distance_m: 20_000,
+            elevation_gain_m: 900,
+          },
+        });
+      }
+      if (url.includes("/api/v1/strava/activities")) {
+        return jsonResponse([
+          {
+            id: 1001,
+            name: "Fictional Crest Ride",
+            sport_type: "Ride",
+            start_date: "2001-06-16T08:00:00Z",
+            distance_m: 45_000,
+            elevation_gain_m: 1200,
+            moving_time_s: 5400,
+            has_gps: true,
+          },
+        ]);
+      }
+      if (url.includes("/api/v1/strava/import-all") && method === "POST") {
+        importAllBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        return jsonResponse({
+          queued_count: 3,
+          skipped_existing_count: 1,
+          skipped_no_gps_count: 0,
+          total_scanned: 4,
+          project_id: "proj-1",
+          project_title: "Fictional Meridian Loop",
+          queued_activity_ids: [1001, 1002, 1003],
+        });
+      }
+      if (url.includes("/telemetry/chart")) {
+        return jsonResponse({ project_id: "proj-1", total_distance_m: 42_000, points: [] });
+      }
+      if (url.endsWith("/kpis")) {
+        return jsonResponse({
+          project_id: "proj-1",
+          stage_count: 2,
+          total_distance_m: 42_000,
+          total_elevation_gain_m: 1300,
+          total_moving_seconds: 6600,
+          stages: [],
+        });
+      }
+      return jsonResponse([], 200);
+    });
+
+    const router = createAppRouter(
+      createMemoryHistory({ initialEntries: ["/projects/proj-1"] }),
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<App router={router} queryClient={queryClient} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /Import from Strava/i }));
+    expect(await screen.findByText("Fictional Crest Ride")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("From date"), { target: { value: "2001-06-01" } });
+    fireEvent.change(screen.getByLabelText("To date"), { target: { value: "2001-06-30" } });
+
+    const fetchCountBefore = projectFetchCount;
+    fireEvent.click(screen.getByTestId("strava-picker-import-all"));
+
+    const notice = await screen.findByTestId("strava-bulk-import-notice");
+    expect(notice).toHaveTextContent("Queued 3 activities");
+    expect(notice).toHaveTextContent("1 already imported");
+    expect(notice).toHaveTextContent("4 scanned");
+    expect(importAllBody).toEqual({
+      project_id: "proj-1",
+      max_activities: 200,
+      after: "2001-06-01",
+      before: "2001-06-30",
+      gps_only: true,
+    });
+    await waitFor(() => {
+      expect(projectFetchCount).toBeGreaterThan(fetchCountBefore);
+    });
+  });
+
   it("renders public share view (/share/:slug) and shows unavailable message on 404", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";

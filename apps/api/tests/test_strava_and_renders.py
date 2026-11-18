@@ -22,7 +22,16 @@ from hypothesis import settings as hypothesis_settings
 from hypothesis import strategies as st
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from trip_api.db import AuditEvent, OAuthConnection, OAuthState, RenderJob
+from trip_api.db import (
+    AuditEvent,
+    IngestJob,
+    OAuthConnection,
+    OAuthState,
+    Project,
+    RenderJob,
+    Stage,
+)
+from trip_api.ingest import _resolve_target_project_for_job, process_pending_ingest_jobs
 from trip_api.routers.strava import _parse_strava_epoch
 from trip_api.security import decrypt_secret, encrypt_secret
 from trip_api.storage import S3ObjectStore
@@ -1544,3 +1553,622 @@ def test_stream_render_events_offloads_snapshot_fetch(
         assert '"status": "succeeded"' in body
 
     assert renders_router._fetch_job_snapshot in offloaded_fns
+
+
+def test_strava_import_status_and_alias(make_harness: HarnessFactory) -> None:
+    h = make_harness()
+    user = h.create_user("status-user@example.com")
+    other = h.create_user("status-other@example.com")
+    client, csrf = h.login_client("status-user@example.com")
+
+    # Disconnected state works on both /import-status and /status alias
+    for path in ("/api/v1/strava/import-status", "/api/v1/strava/status"):
+        resp = client.get(path)
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "connected": False,
+            "athlete_id": None,
+            "scope": None,
+            "pending_jobs": 0,
+            "queued_jobs": 0,
+            "running_jobs": 0,
+            "succeeded_jobs": 0,
+            "failed_jobs": 0,
+            "ignored_jobs": 0,
+            "imported_stages_count": 0,
+            "last_error": None,
+        }
+
+    # Seed Strava connection, stages (Strava + non-Strava), and IngestJobs across statuses
+    _seed_strava_connection(h, user.id, athlete_id="77001")
+    _seed_strava_connection(h, other.id, athlete_id="88002")
+
+    proj_id = uuid.UUID(
+        client.post(
+            "/api/v1/projects",
+            json={"title": "Status Trip"},
+            headers={"X-CSRF-Token": csrf},
+        ).json()["id"]
+    )
+    now = datetime.now(UTC)
+    with h.session_factory() as db:
+        db.add_all(
+            [
+                Stage(
+                    project_id=proj_id,
+                    source_type="strava",
+                    source_format="strava",
+                    activity_type="cycling",
+                    external_source_id="1001",
+                    strava_activity_id=1001,
+                    name="Imported Ride 1",
+                    stage_order=0,
+                    day_index=1,
+                    bronze_object_key="bronze/1001.json",
+                    silver_object_key="silver/1001.parquet",
+                    point_count=10,
+                    distance_m=1000.0,
+                ),
+                Stage(
+                    project_id=proj_id,
+                    source_type="gpx",
+                    source_format="gpx",
+                    activity_type="cycling",
+                    name="Local GPX Stage",
+                    stage_order=1,
+                    day_index=1,
+                    bronze_object_key="bronze/local.gpx",
+                    silver_object_key="silver/local.parquet",
+                    point_count=10,
+                    distance_m=1000.0,
+                ),
+                IngestJob(
+                    provider="strava",
+                    event_type="create",
+                    external_owner_id="77001",
+                    external_object_id=2001,
+                    status="queued",
+                    payload_json={"source": "strava_bulk_import"},
+                ),
+                IngestJob(
+                    provider="strava",
+                    event_type="create",
+                    external_owner_id="77001",
+                    external_object_id=2002,
+                    status="queued",
+                    payload_json={"source": "strava_bulk_import"},
+                ),
+                IngestJob(
+                    provider="strava",
+                    event_type="create",
+                    external_owner_id="77001",
+                    external_object_id=2003,
+                    status="running",
+                    payload_json={"source": "strava_bulk_import"},
+                ),
+                IngestJob(
+                    provider="strava",
+                    event_type="create",
+                    external_owner_id="77001",
+                    external_object_id=2004,
+                    status="succeeded",
+                    payload_json={"source": "strava_bulk_import"},
+                ),
+                IngestJob(
+                    provider="strava",
+                    event_type="create",
+                    external_owner_id="77001",
+                    external_object_id=2005,
+                    status="ignored",
+                    payload_json={"source": "strava_bulk_import"},
+                ),
+                IngestJob(
+                    provider="strava",
+                    event_type="create",
+                    external_owner_id="77001",
+                    external_object_id=2006,
+                    status="failed",
+                    error_message="older failure",
+                    created_at=now - timedelta(minutes=10),
+                    updated_at=now - timedelta(minutes=10),
+                    payload_json={"source": "strava_bulk_import"},
+                ),
+                IngestJob(
+                    provider="strava",
+                    event_type="create",
+                    external_owner_id="77001",
+                    external_object_id=2007,
+                    status="failed",
+                    error_message="latest failure reason",
+                    created_at=now - timedelta(minutes=1),
+                    updated_at=now - timedelta(minutes=1),
+                    payload_json={"source": "strava_bulk_import"},
+                ),
+                # Another athlete's job must not be counted
+                IngestJob(
+                    provider="strava",
+                    event_type="create",
+                    external_owner_id="88002",
+                    external_object_id=9999,
+                    status="failed",
+                    error_message="other athlete error",
+                    payload_json={},
+                ),
+            ]
+        )
+        db.commit()
+
+    expected = {
+        "connected": True,
+        "athlete_id": "77001",
+        "scope": "read,activity:read_all",
+        "pending_jobs": 3,
+        "queued_jobs": 2,
+        "running_jobs": 1,
+        "succeeded_jobs": 1,
+        "failed_jobs": 2,
+        "ignored_jobs": 1,
+        "imported_stages_count": 1,
+        "last_error": "latest failure reason",
+    }
+    assert client.get("/api/v1/strava/import-status").json() == expected
+    assert client.get("/api/v1/strava/status").json() == expected
+
+
+def test_strava_import_all_pagination_dedup_gps_bola_and_autosync(
+    make_harness: HarnessFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_public_getaddrinfo)
+    h = make_harness(rate_limit_strava_import_max=50)
+    user = h.create_user("bulk-owner@example.com")
+    h.create_user("bulk-other@example.com")
+    client, csrf = h.login_client("bulk-owner@example.com")
+    other_client, other_csrf = h.login_client("bulk-other@example.com")
+
+    _seed_strava_connection(h, user.id, athlete_id="31415")
+
+    other_proj_id = other_client.post(
+        "/api/v1/projects",
+        json={"title": "Other Private Trip"},
+        headers={"X-CSRF-Token": other_csrf},
+    ).json()["id"]
+
+    # BOLA check: specifying another user's project_id returns 404 before calling Strava
+    upstream_calls: list[httpx.Request] = []
+    h.app.state.http_client_factory = lambda: httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda req: (upstream_calls.append(req), httpx.Response(200, json=[]))[1]
+        ),
+        follow_redirects=False,
+    )
+    bola_resp = client.post(
+        "/api/v1/strava/import-all",
+        json={"project_id": other_proj_id},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert bola_resp.status_code == 404
+    assert upstream_calls == []
+
+    # Invalid date range -> 422
+    bad_dates = client.post(
+        "/api/v1/strava/import-all",
+        json={"after": "2024-06-10", "before": "2024-06-01"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert bad_dates.status_code == 422
+
+    # Empty response without project_id must NOT create an empty Strava Auto-Sync project
+    empty_resp = client.post(
+        "/api/v1/strava/import-all",
+        json={},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert empty_resp.status_code == 200, empty_resp.text
+    assert empty_resp.json() == {
+        "queued_count": 0,
+        "skipped_existing_count": 0,
+        "skipped_no_gps_count": 0,
+        "total_scanned": 0,
+        "project_id": None,
+        "project_title": None,
+        "queued_activity_ids": [],
+    }
+    with h.session_factory() as db:
+        assert db.scalars(select(Project).where(Project.owner_user_id == user.id)).all() == []
+
+    # Seed an explicit project with an already-imported stage (activity 10001)
+    # plus a stage identified via numeric external_source_id (activity 10002)
+    # and an active running IngestJob (activity 10003)
+    own_proj_id = client.post(
+        "/api/v1/projects",
+        json={"title": "Alpine Tour"},
+        headers={"X-CSRF-Token": csrf},
+    ).json()["id"]
+    with h.session_factory() as db:
+        db.add_all(
+            [
+                Stage(
+                    project_id=uuid.UUID(own_proj_id),
+                    source_type="strava",
+                    source_format="strava",
+                    activity_type="cycling",
+                    external_source_id="10001",
+                    strava_activity_id=10001,
+                    name="Existing Strava Stage",
+                    stage_order=0,
+                    day_index=1,
+                    bronze_object_key="bronze/10001.json",
+                    silver_object_key="silver/10001.parquet",
+                    point_count=5,
+                    distance_m=500.0,
+                ),
+                Stage(
+                    project_id=uuid.UUID(own_proj_id),
+                    source_type="strava",
+                    source_format="strava",
+                    activity_type="cycling",
+                    external_source_id="10002",
+                    strava_activity_id=None,
+                    name="Legacy Strava Stage",
+                    stage_order=1,
+                    day_index=1,
+                    bronze_object_key="bronze/10002.json",
+                    silver_object_key="silver/10002.parquet",
+                    point_count=5,
+                    distance_m=500.0,
+                ),
+                IngestJob(
+                    provider="strava",
+                    event_type="create",
+                    external_owner_id="31415",
+                    external_object_id=10003,
+                    status="running",
+                    payload_json={"source": "strava_bulk_import"},
+                ),
+            ]
+        )
+        db.commit()
+
+    # Build 105 activities across two Strava pages (page 1 = 100, page 2 = 5)
+    # cap max_activities = 103 so page 2 requests per_page=3 and stops at 103 scanned.
+    page1_items = []
+    for idx in range(1, 101):
+        act_id = 10000 + idx
+        page1_items.append(
+            {
+                "id": act_id,
+                "name": f"Ride {act_id}",
+                "sport_type": "Ride",
+                "start_date": "2024-05-01T08:00:00Z",
+                # Make activity 10004 and 10005 indoor (no GPS)
+                "start_latlng": [] if act_id in (10004, 10005) else [46.0, 7.0],
+            }
+        )
+    page2_items = [
+        {
+            "id": 10101,
+            "name": "Ride 10101",
+            "sport_type": "Ride",
+            "start_date": "2024-05-02T08:00:00Z",
+            "start_latlng": [46.1, 7.1],
+        },
+        {
+            "id": 10102,
+            "name": "Indoor 10102",
+            "sport_type": "VirtualRide",
+            "start_date": "2024-05-02T09:00:00Z",
+            "start_latlng": None,
+        },
+        {
+            "id": 10103,
+            "name": "Ride 10103",
+            "sport_type": "Run",
+            "start_date": "2024-05-02T10:00:00Z",
+            "start_latlng": [46.2, 7.2],
+        },
+        {
+            "id": 10104,
+            "name": "Ride 10104 beyond cap",
+            "sport_type": "Ride",
+            "start_date": "2024-05-02T11:00:00Z",
+            "start_latlng": [46.3, 7.3],
+        },
+    ]
+
+    page_queries: list[dict[str, str]] = []
+
+    def multi_page_handler(req: httpx.Request) -> httpx.Response:
+        assert req.url.path == "/api/v3/athlete/activities"
+        params = dict(req.url.params)
+        page_queries.append(params)
+        page_num = int(params["page"])
+        if page_num == 1:
+            return httpx.Response(200, json=page1_items)
+        if page_num == 2:
+            return httpx.Response(200, json=page2_items[: int(params["per_page"])])
+        return httpx.Response(200, json=[])
+
+    h.app.state.http_client_factory = lambda: httpx.AsyncClient(
+        transport=httpx.MockTransport(multi_page_handler),
+        follow_redirects=False,
+    )
+
+    resp = client.post(
+        "/api/v1/strava/import-all",
+        json={
+            "max_activities": 103,
+            "after": "2024-05-01",
+            "before": "2024-05-31",
+            "gps_only": True,
+        },
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    # 103 scanned: 3 existing (10001, 10002, 10003), 3 no-gps (10004, 10005, 10102) -> 97 queued
+    assert data["total_scanned"] == 103
+    assert data["skipped_existing_count"] == 3
+    assert data["skipped_no_gps_count"] == 3
+    assert data["queued_count"] == 97
+    assert len(data["queued_activity_ids"]) == 97
+    assert 10103 in data["queued_activity_ids"]
+    assert 10104 not in data["queued_activity_ids"]
+    assert data["project_title"] == "Strava Auto-Sync"
+    assert data["project_id"] is not None
+
+    # Verify pagination params and after/before epochs
+    assert len(page_queries) == 2
+    assert page_queries[0]["page"] == "1"
+    assert page_queries[0]["per_page"] == "100"
+    assert page_queries[1]["page"] == "2"
+    assert page_queries[1]["per_page"] == "3"
+    assert int(page_queries[0]["after"]) < int(page_queries[0]["before"])
+
+    # Verify audit event was written
+    with h.session_factory() as db:
+        audit = db.scalar(
+            select(AuditEvent)
+            .where(
+                AuditEvent.user_id == user.id,
+                AuditEvent.event_type == "strava.bulk_import_queued",
+            )
+            .order_by(AuditEvent.id.desc())
+            .limit(1)
+        )
+        assert audit is not None
+        assert audit.metadata_json["queued_count"] == 97
+        assert audit.metadata_json["skipped_existing_count"] == 3
+        assert audit.metadata_json["skipped_no_gps_count"] == 3
+
+    # Re-running with same parameters is idempotent (all 97 newly queued are now skipped)
+    second = client.post(
+        "/api/v1/strava/import-all",
+        json={"max_activities": 103, "gps_only": True},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert second.status_code == 200
+    assert second.json()["queued_count"] == 0
+    assert second.json()["skipped_existing_count"] == 100
+    assert second.json()["skipped_no_gps_count"] == 3
+    assert second.json()["project_title"] == "Strava Auto-Sync"
+
+    # Running with gps_only=False and explicit project_id queues the 3 indoor activities
+    indoor_resp = client.post(
+        "/api/v1/strava/import-all",
+        json={"project_id": own_proj_id, "max_activities": 103, "gps_only": False},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert indoor_resp.status_code == 200
+    assert indoor_resp.json()["queued_count"] == 3
+    assert indoor_resp.json()["skipped_no_gps_count"] == 0
+    assert indoor_resp.json()["project_id"] == own_proj_id
+    assert indoor_resp.json()["project_title"] == "Alpine Tour"
+    assert set(indoor_resp.json()["queued_activity_ids"]) == {10004, 10005, 10102}
+
+
+def test_strava_import_all_rate_limit_and_ingest_processing(
+    make_harness: HarnessFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_public_getaddrinfo)
+    h = make_harness(rate_limit_strava_import_max=50)
+    user = h.create_user("bulk-worker@example.com")
+    other = h.create_user("bulk-worker-other@example.com")
+    client, csrf = h.login_client("bulk-worker@example.com")
+    _seed_strava_connection(h, user.id, athlete_id="51515")
+
+    explicit_proj_id = client.post(
+        "/api/v1/projects",
+        json={"title": "Dolomites Week"},
+        headers={"X-CSRF-Token": csrf},
+    ).json()["id"]
+
+    # Page 1 returning 429 -> 429 response
+    h.app.state.http_client_factory = lambda: httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _req: httpx.Response(429)),
+        follow_redirects=False,
+    )
+    rl_page1 = client.post(
+        "/api/v1/strava/import-all",
+        json={"project_id": explicit_proj_id},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert rl_page1.status_code == 429
+
+    # Page 1 succeeds with 100 items, Page 2 returns 429 -> returns 200 with page 1 items queued
+    page1_hundred = [
+        {
+            "id": 60000 + idx,
+            "name": f"Page1 Ride {idx}",
+            "sport_type": "Ride",
+            "start_date": "2024-06-01T07:00:00Z",
+            "start_latlng": [46.0, 11.0],
+        }
+        for idx in range(1, 101)
+    ]
+    seen_pages_429: list[int] = []
+
+    def page2_429_handler(req: httpx.Request) -> httpx.Response:
+        page_num = int(req.url.params["page"])
+        seen_pages_429.append(page_num)
+        if page_num == 1:
+            return httpx.Response(200, json=page1_hundred)
+        return httpx.Response(429)
+
+    h.app.state.http_client_factory = lambda: httpx.AsyncClient(
+        transport=httpx.MockTransport(page2_429_handler),
+        follow_redirects=False,
+    )
+    partial_429_resp = client.post(
+        "/api/v1/strava/import-all",
+        json={"project_id": explicit_proj_id, "max_activities": 150},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert partial_429_resp.status_code == 200, partial_429_resp.text
+    assert seen_pages_429 == [1, 2]
+    assert partial_429_resp.json()["total_scanned"] == 100
+    assert partial_429_resp.json()["queued_count"] == 100
+
+    # Clear those 100 queued jobs before testing rate-limit header stop + ingest worker
+    with h.session_factory() as db:
+        for row in db.scalars(select(IngestJob)).all():
+            db.delete(row)
+        db.commit()
+
+    # Rate-limit usage header >= 90% stops pagination cleanly after page 1
+    page1_two_items = [
+        {
+            "id": 70001,
+            "name": "Pass One",
+            "sport_type": "Ride",
+            "start_date": "2024-07-01T07:00:00Z",
+            "start_latlng": [46.5, 11.8],
+        },
+        {
+            "id": 70002,
+            "name": "Pass Two",
+            "sport_type": "Ride",
+            "start_date": "2024-07-02T07:00:00Z",
+            "start_latlng": [46.6, 11.9],
+        },
+    ]
+
+    def rl_header_handler(req: httpx.Request) -> httpx.Response:
+        page_num = int(req.url.params["page"])
+        if page_num == 1:
+            return httpx.Response(
+                200,
+                json=page1_two_items,
+                headers={"X-RateLimit-Usage": "95,100", "X-RateLimit-Limit": "100,1000"},
+            )
+        raise AssertionError("Should not request page 2 after rate-limit header backpressure")
+
+    h.app.state.http_client_factory = lambda: httpx.AsyncClient(
+        transport=httpx.MockTransport(rl_header_handler),
+        follow_redirects=False,
+    )
+    queued_resp = client.post(
+        "/api/v1/strava/import-all",
+        json={"project_id": explicit_proj_id, "max_activities": 2},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert queued_resp.status_code == 200, queued_resp.text
+    assert queued_resp.json()["queued_activity_ids"] == [70001, 70002]
+
+    # Pre-seed activity 70002 as already imported into another owned project to verify
+    # bulk import job skips upstream Strava HTTP completely for 70002
+    other_own_proj_id = client.post(
+        "/api/v1/projects",
+        json={"title": "Already Imported Trip"},
+        headers={"X-CSRF-Token": csrf},
+    ).json()["id"]
+    with h.session_factory() as db:
+        db.add(
+            Stage(
+                project_id=uuid.UUID(other_own_proj_id),
+                source_type="strava",
+                source_format="strava",
+                activity_type="cycling",
+                external_source_id="70002",
+                strava_activity_id=70002,
+                name="Pass Two Existing",
+                stage_order=0,
+                day_index=1,
+                bronze_object_key="bronze/70002.json",
+                silver_object_key="silver/70002.parquet",
+                point_count=3,
+                distance_m=1500.0,
+            )
+        )
+        db.commit()
+
+    fetched_paths: list[str] = []
+
+    def sync_worker_handler(req: httpx.Request) -> httpx.Response:
+        fetched_paths.append(req.url.path)
+        if req.url.path == "/api/v3/activities/70001":
+            return httpx.Response(
+                200,
+                json={
+                    "id": 70001,
+                    "name": "Pass One",
+                    "sport_type": "Ride",
+                    "start_date": "2024-07-01T07:00:00Z",
+                    "start_latlng": [46.5, 11.8],
+                },
+            )
+        if req.url.path == "/api/v3/activities/70001/streams":
+            return httpx.Response(
+                200,
+                json={
+                    "latlng": {"data": [[46.50, 11.80], [46.51, 11.81], [46.52, 11.82]]},
+                    "time": {"data": [0, 60, 120]},
+                    "altitude": {"data": [1600.0, 1650.0, 1710.0]},
+                },
+            )
+        raise AssertionError(f"Unexpected Strava upstream request: {req.url.path}")
+
+    with h.session_factory() as db:
+        stats = process_pending_ingest_jobs(
+            db,
+            h.store,
+            h.settings,
+            http_client_factory=lambda: httpx.Client(
+                transport=httpx.MockTransport(sync_worker_handler),
+                follow_redirects=False,
+            ),
+        )
+    assert stats["claimed"] == 2
+    assert stats["succeeded"] == 2
+    assert stats["failed"] == 0
+    # Activity 70002 must NOT have triggered any Strava HTTP requests
+    assert fetched_paths == ["/api/v3/activities/70001", "/api/v3/activities/70001/streams"]
+
+    # Verify activity 70001 landed in explicit_proj_id ("Dolomites Week")
+    with h.session_factory() as db:
+        stage_70001 = db.scalar(select(Stage).where(Stage.strava_activity_id == 70001))
+        assert stage_70001 is not None
+        assert str(stage_70001.project_id) == explicit_proj_id
+
+        # Verify _resolve_target_project_for_job rejects foreign project_id and invalid UUIDs
+        other_proj = Project(owner_user_id=other.id, title="Foreign Trip", settings_json={})
+        db.add(other_proj)
+        db.commit()
+        db.refresh(other_proj)
+
+        fallback_foreign = _resolve_target_project_for_job(
+            db, user.id, {"project_id": str(other_proj.id)}
+        )
+        assert fallback_foreign.title == "Strava Auto-Sync"
+        assert fallback_foreign.owner_user_id == user.id
+
+        fallback_bad_uuid = _resolve_target_project_for_job(
+            db, user.id, {"project_id": "not-a-uuid"}
+        )
+        assert fallback_bad_uuid.id == fallback_foreign.id
+
+        resolved_owned = _resolve_target_project_for_job(
+            db, user.id, {"project_id": explicit_proj_id}
+        )
+        assert str(resolved_owned.id) == explicit_proj_id

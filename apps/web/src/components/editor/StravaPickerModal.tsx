@@ -7,6 +7,7 @@ import type {
   StageOut,
   StravaActivityOut,
   StravaBatchImportItem,
+  StravaImportAllOut,
   UnitsMode,
 } from "../../lib/api/types";
 import { formatDistance, formatElapsedTime, formatElevation } from "../../lib/geo/format";
@@ -107,6 +108,7 @@ export function StravaPickerModal({
   const [gpsOnly, setGpsOnly] = useState(true);
   const [hideIndoorVirtual, setHideIndoorVirtual] = useState(true);
   const [clusterNotice, setClusterNotice] = useState<string | null>(null);
+  const [bulkImportNotice, setBulkImportNotice] = useState<StravaImportAllOut | null>(null);
   const [dayIndex, setDayIndex] = useState(defaultDayIndex);
   const [dayAssignMode, setDayAssignMode] = useState<DayAssignMode>("increment");
   const [selectedIds, setSelectedIds] = useState<Record<number, boolean>>({});
@@ -176,6 +178,30 @@ export function StravaPickerModal({
     },
     onSettled: () => {
       setImportingId(null);
+    },
+  });
+
+  const importAllMutation = useMutation({
+    mutationFn: () =>
+      stravaApi.importAll({
+        project_id: projectId,
+        max_activities: 200,
+        after: afterDate || undefined,
+        before: beforeDate || undefined,
+        gps_only: gpsOnly,
+      }),
+    onMutate: () => {
+      setImportError(null);
+      setBulkImportNotice(null);
+    },
+    onSuccess: (res) => {
+      setBulkImportNotice(res);
+      onImported();
+    },
+    onError: (err) => {
+      setImportError(
+        err instanceof ApiError ? err.message : "Failed to queue bulk Strava import.",
+      );
     },
   });
 
@@ -567,7 +593,7 @@ export function StravaPickerModal({
             {selectedActivities.length > 0 ? (
               <button
                 type="button"
-                disabled={batchProgress !== null}
+                disabled={batchProgress !== null || importAllMutation.isPending}
                 onClick={() => void handleBatchImport()}
                 className="inline-flex items-center gap-1.5 rounded-md bg-sky-accent px-2.5 py-1 text-[11px] font-semibold text-canvas hover:bg-sky-accent/90 disabled:opacity-50"
               >
@@ -583,6 +609,21 @@ export function StravaPickerModal({
                 </span>
               </button>
             ) : null}
+
+            <button
+              type="button"
+              data-testid="strava-picker-import-all"
+              disabled={importAllMutation.isPending || batchProgress !== null}
+              onClick={() => importAllMutation.mutate()}
+              className="inline-flex items-center gap-1 rounded border border-amber-accent/50 bg-amber-accent/15 px-2.5 py-0.5 text-[11px] font-medium text-amber-accent hover:bg-amber-accent/25 disabled:opacity-45"
+            >
+              {importAllMutation.isPending ? (
+                <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+              ) : (
+                <Zap className="h-3 w-3" aria-hidden="true" />
+              )}
+              <span>{importAllMutation.isPending ? "Queuing all…" : "Import all available"}</span>
+            </button>
           </div>
 
           <div className="flex items-center gap-2">
@@ -637,6 +678,32 @@ export function StravaPickerModal({
               onClick={() => setClusterNotice(null)}
               aria-label="Dismiss cluster notice"
               className="rounded p-0.5 hover:bg-teal-accent/20"
+            >
+              <X className="h-3 w-3" aria-hidden="true" />
+            </button>
+          </div>
+        ) : null}
+
+        {bulkImportNotice ? (
+          <div
+            data-testid="strava-bulk-import-notice"
+            className="mx-5 mt-3 flex items-center justify-between gap-2 rounded-md border border-sky-accent/40 bg-sky-accent/10 px-3 py-1.5 text-[11px] text-sky-accent"
+          >
+            <span>
+              Queued {bulkImportNotice.queued_count} activit
+              {bulkImportNotice.queued_count === 1 ? "y" : "ies"}
+              {bulkImportNotice.project_title ? ` into "${bulkImportNotice.project_title}"` : ""} (
+              {bulkImportNotice.skipped_existing_count} already imported
+              {bulkImportNotice.skipped_no_gps_count > 0
+                ? `, ${bulkImportNotice.skipped_no_gps_count} without GPS`
+                : ""}
+              , {bulkImportNotice.total_scanned} scanned).
+            </span>
+            <button
+              type="button"
+              onClick={() => setBulkImportNotice(null)}
+              aria-label="Dismiss bulk import notice"
+              className="rounded p-0.5 hover:bg-sky-accent/20"
             >
               <X className="h-3 w-3" aria-hidden="true" />
             </button>

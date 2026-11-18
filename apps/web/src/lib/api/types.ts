@@ -685,6 +685,38 @@ export interface StravaBatchImportOut {
   failed: StravaBatchImportFailure[];
 }
 
+export interface StravaImportAllRequest {
+  project_id?: string | null;
+  max_activities?: number;
+  after?: string | null;
+  before?: string | null;
+  gps_only?: boolean;
+}
+
+export interface StravaImportAllOut {
+  queued_count: number;
+  skipped_existing_count: number;
+  skipped_no_gps_count: number;
+  total_scanned: number;
+  project_id: string | null;
+  project_title: string | null;
+  queued_activity_ids: number[];
+}
+
+export interface StravaImportStatusOut {
+  connected: boolean;
+  athlete_id: string | null;
+  scope: string | null;
+  pending_jobs: number;
+  queued_jobs: number;
+  running_jobs: number;
+  succeeded_jobs: number;
+  failed_jobs: number;
+  ignored_jobs: number;
+  imported_stages_count: number;
+  last_error: string | null;
+}
+
 export interface RenderJobOut {
   id: string;
   project_id: string;

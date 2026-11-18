@@ -104,7 +104,7 @@ def _strava_sync_request(
     return resp
 
 
-def _resolve_or_create_autosync_project(db: Session, user_id: uuid.UUID) -> Project:
+def _find_existing_autosync_project(db: Session, user_id: uuid.UUID) -> Project | None:
     user_projects = list(
         db.scalars(
             select(Project)
@@ -121,6 +121,13 @@ def _resolve_or_create_autosync_project(db: Session, user_id: uuid.UUID) -> Proj
     for proj in user_projects:
         if proj.title == "Strava Auto-Sync":
             return proj
+    return None
+
+
+def _resolve_or_create_autosync_project(db: Session, user_id: uuid.UUID) -> Project:
+    existing = _find_existing_autosync_project(db, user_id)
+    if existing is not None:
+        return existing
 
     project = Project(
         owner_user_id=user_id,
@@ -131,6 +138,30 @@ def _resolve_or_create_autosync_project(db: Session, user_id: uuid.UUID) -> Proj
     db.commit()
     db.refresh(project)
     return project
+
+
+def _resolve_target_project_for_job(
+    db: Session,
+    user_id: uuid.UUID,
+    payload_json: dict[str, object] | None,
+) -> Project:
+    if isinstance(payload_json, dict):
+        raw_project_id = payload_json.get("project_id")
+        if isinstance(raw_project_id, str):
+            try:
+                parsed_project_id = uuid.UUID(raw_project_id)
+            except ValueError:
+                parsed_project_id = None
+            if parsed_project_id is not None:
+                owned_project = db.scalar(
+                    select(Project).where(
+                        Project.id == parsed_project_id,
+                        Project.owner_user_id == user_id,
+                    )
+                )
+                if owned_project is not None:
+                    return owned_project
+    return _resolve_or_create_autosync_project(db, user_id)
 
 
 def _refresh_access_token_if_needed(
@@ -449,6 +480,27 @@ def process_pending_ingest_jobs(
             succeeded += 1
             continue
 
+        if (
+            isinstance(job.payload_json, dict)
+            and job.payload_json.get("source") == "strava_bulk_import"
+        ):
+            existing_bulk_stage_id = db.scalar(
+                select(Stage.id)
+                .join(Project, Stage.project_id == Project.id)
+                .where(
+                    Project.owner_user_id == conn.user_id,
+                    Stage.strava_activity_id == job.external_object_id,
+                )
+                .limit(1)
+            )
+            if existing_bulk_stage_id is not None:
+                job.status = "succeeded"
+                job.error_message = None
+                job.lease_expires_at = None
+                db.commit()
+                succeeded += 1
+                continue
+
         try:
             access_token = _refresh_access_token_if_needed(
                 db=db,
@@ -577,7 +629,7 @@ def process_pending_ingest_jobs(
                 target_project_id = existing_stage.project_id
                 stage_id_val = existing_stage.id
             else:
-                target_project = _resolve_or_create_autosync_project(db, conn.user_id)
+                target_project = _resolve_target_project_for_job(db, conn.user_id, job.payload_json)
                 started_dt = _coerce_utc_datetime(activity_json.get("start_date"))
                 day_idx = cluster_activity_day_index(db, target_project.id, started_dt)
                 new_stage = ingest_parsed_track(

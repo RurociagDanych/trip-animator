@@ -44,7 +44,10 @@ import type {
   StravaCallbackOut,
   StravaConnectOut,
   StravaDisconnectOut,
+  StravaImportAllOut,
+  StravaImportAllRequest,
   StravaImportRequest,
+  StravaImportStatusOut,
   TelemetryChartOut,
   TelemetryGeometryFeature,
   TelemetryGeometryOut,
@@ -305,6 +308,15 @@ export const stravaApi = {
       `/api/v1/projects/${projectId}/import-strava/batch`,
       payload,
     );
+  },
+  status(signal?: AbortSignal): Promise<StravaImportStatusOut> {
+    return apiClient.get<StravaImportStatusOut>("/api/v1/strava/import-status", signal);
+  },
+  importStatus(signal?: AbortSignal): Promise<StravaImportStatusOut> {
+    return apiClient.get<StravaImportStatusOut>("/api/v1/strava/import-status", signal);
+  },
+  importAll(payload: StravaImportAllRequest = {}): Promise<StravaImportAllOut> {
+    return apiClient.post<StravaImportAllOut>("/api/v1/strava/import-all", payload);
   },
 };
 

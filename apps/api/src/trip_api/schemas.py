@@ -419,6 +419,38 @@ class StravaBatchImportOut(BaseModel):
     failed: list[StravaBatchImportFailure]
 
 
+class StravaImportAllRequest(BaseModel):
+    project_id: uuid.UUID | None = None
+    max_activities: int = Field(default=200, ge=1, le=500)
+    after: str | None = None
+    before: str | None = None
+    gps_only: bool = True
+
+
+class StravaImportAllOut(BaseModel):
+    queued_count: int
+    skipped_existing_count: int
+    skipped_no_gps_count: int
+    total_scanned: int
+    project_id: uuid.UUID | None = None
+    project_title: str | None = None
+    queued_activity_ids: list[int] = Field(default_factory=list)
+
+
+class StravaImportStatusOut(BaseModel):
+    connected: bool
+    athlete_id: str | None = None
+    scope: str | None = None
+    pending_jobs: int = 0
+    queued_jobs: int = 0
+    running_jobs: int = 0
+    succeeded_jobs: int = 0
+    failed_jobs: int = 0
+    ignored_jobs: int = 0
+    imported_stages_count: int = 0
+    last_error: str | None = None
+
+
 class RenderJobOut(BaseModel):
     id: uuid.UUID
     project_id: uuid.UUID

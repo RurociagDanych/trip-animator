@@ -13,7 +13,7 @@ from urllib.parse import urlencode
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 from trip_telemetry import ActivityType, infer_activity_type_from_strava, parse_strava_streams
@@ -29,6 +29,11 @@ from trip_api.deps import (
     ensure_utc,
     get_client_ip,
 )
+from trip_api.ingest import (
+    _find_existing_autosync_project,
+    _is_rate_limited,
+    _resolve_or_create_autosync_project,
+)
 from trip_api.rate_limit import check_rate_limit
 from trip_api.schemas import (
     StageOut,
@@ -39,7 +44,10 @@ from trip_api.schemas import (
     StravaCallbackOut,
     StravaConnectOut,
     StravaDisconnectOut,
+    StravaImportAllOut,
+    StravaImportAllRequest,
     StravaImportRequest,
+    StravaImportStatusOut,
 )
 from trip_api.security import (
     SsrfBlockedError,
@@ -375,6 +383,281 @@ async def strava_disconnect(
         db.commit()
 
     return StravaDisconnectOut(connected=False)
+
+
+@router.get("/api/v1/strava/import-status", response_model=StravaImportStatusOut)
+@router.get("/api/v1/strava/status", response_model=StravaImportStatusOut)
+def strava_import_status(
+    auth: CurrentAuth,
+    db: DbSession,
+) -> StravaImportStatusOut:
+    conn = db.scalar(
+        select(OAuthConnection).where(
+            OAuthConnection.user_id == auth.user.id,
+            OAuthConnection.provider == "strava",
+        )
+    )
+    imported_stages_count = int(
+        db.scalar(
+            select(func.count(Stage.id))
+            .join(Project, Stage.project_id == Project.id)
+            .where(
+                Project.owner_user_id == auth.user.id,
+                (Stage.source_type == "strava") | Stage.strava_activity_id.is_not(None),
+            )
+        )
+        or 0
+    )
+
+    if conn is None:
+        return StravaImportStatusOut(
+            connected=False,
+            imported_stages_count=imported_stages_count,
+        )
+
+    status_rows = db.execute(
+        select(IngestJob.status, func.count(IngestJob.id))
+        .where(
+            IngestJob.provider == "strava",
+            IngestJob.external_owner_id == conn.external_athlete_id,
+        )
+        .group_by(IngestJob.status)
+    ).all()
+    counts = {str(status): int(cnt) for status, cnt in status_rows}
+    queued_jobs = counts.get("queued", 0)
+    running_jobs = counts.get("running", 0)
+    succeeded_jobs = counts.get("succeeded", 0)
+    failed_jobs = counts.get("failed", 0)
+    ignored_jobs = counts.get("ignored", 0)
+
+    last_error = db.scalar(
+        select(IngestJob.error_message)
+        .where(
+            IngestJob.provider == "strava",
+            IngestJob.external_owner_id == conn.external_athlete_id,
+            IngestJob.status == "failed",
+            IngestJob.error_message.is_not(None),
+        )
+        .order_by(IngestJob.updated_at.desc(), IngestJob.created_at.desc())
+        .limit(1)
+    )
+
+    return StravaImportStatusOut(
+        connected=True,
+        athlete_id=conn.external_athlete_id,
+        scope=conn.scope,
+        pending_jobs=queued_jobs + running_jobs,
+        queued_jobs=queued_jobs,
+        running_jobs=running_jobs,
+        succeeded_jobs=succeeded_jobs,
+        failed_jobs=failed_jobs,
+        ignored_jobs=ignored_jobs,
+        imported_stages_count=imported_stages_count,
+        last_error=last_error,
+    )
+
+
+@router.post("/api/v1/strava/import-all", response_model=StravaImportAllOut)
+async def strava_import_all(
+    request: Request,
+    auth: CsrfAuth,
+    db: DbSession,
+    settings: AppSettings,
+    body: StravaImportAllRequest | None = None,
+) -> StravaImportAllOut:
+    req_body = body or StravaImportAllRequest()
+
+    after_epoch = (
+        _parse_strava_epoch(req_body.after, end_of_day=False)
+        if req_body.after is not None
+        else None
+    )
+    before_epoch = (
+        _parse_strava_epoch(req_body.before, end_of_day=True)
+        if req_body.before is not None
+        else None
+    )
+    if after_epoch is not None and before_epoch is not None and after_epoch > before_epoch:
+        raise HTTPException(status_code=422, detail="'after' filter must be <= 'before' filter")
+
+    explicit_project = (
+        get_owned_project(db, req_body.project_id, auth.user.id)
+        if req_body.project_id is not None
+        else None
+    )
+
+    check_rate_limit(
+        db,
+        bucket_key=f"strava_import:{auth.user.id}",
+        limit=settings.rate_limit_strava_import_max,
+        window_seconds=settings.rate_limit_strava_import_window_s,
+    )
+
+    client_factory = _get_http_client_factory(request)
+    access_token = await _get_valid_access_token(
+        db=db,
+        settings=settings,
+        user_id=auth.user.id,
+        client_factory=client_factory,
+    )
+    conn = db.scalar(
+        select(OAuthConnection).where(
+            OAuthConnection.user_id == auth.user.id,
+            OAuthConnection.provider == "strava",
+        )
+    )
+    if conn is None:
+        raise HTTPException(status_code=400, detail="Strava account is not connected")
+
+    existing_activity_ids: set[int] = set()
+    stage_rows = db.execute(
+        select(Stage.strava_activity_id, Stage.external_source_id, Stage.source_type)
+        .join(Project, Stage.project_id == Project.id)
+        .where(
+            Project.owner_user_id == auth.user.id,
+            Stage.strava_activity_id.is_not(None) | (Stage.source_type == "strava"),
+        )
+    ).all()
+    for strava_id, ext_id, source_type in stage_rows:
+        if strava_id is not None:
+            existing_activity_ids.add(int(strava_id))
+        if (
+            source_type == "strava"
+            and isinstance(ext_id, str)
+            and ext_id.isascii()
+            and ext_id.isdigit()
+        ):
+            existing_activity_ids.add(int(ext_id))
+
+    active_job_ids = db.scalars(
+        select(IngestJob.external_object_id).where(
+            IngestJob.provider == "strava",
+            IngestJob.external_owner_id == conn.external_athlete_id,
+            IngestJob.status.in_(("queued", "running")),
+        )
+    ).all()
+    for job_obj_id in active_job_ids:
+        existing_activity_ids.add(int(job_obj_id))
+
+    total_scanned = 0
+    skipped_existing_count = 0
+    skipped_no_gps_count = 0
+    to_queue: list[tuple[int, dict[str, Any]]] = []
+
+    page = 1
+    while total_scanned < req_body.max_activities:
+        per_page = min(100, req_body.max_activities - total_scanned)
+        params: dict[str, int] = {"page": page, "per_page": per_page}
+        if after_epoch is not None:
+            params["after"] = after_epoch
+        if before_epoch is not None:
+            params["before"] = before_epoch
+
+        resp = await _strava_request(
+            client_factory,
+            settings,
+            "GET",
+            "/api/v3/athlete/activities",
+            params=params,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        if resp.status_code == 429:
+            if page == 1:
+                raise HTTPException(
+                    status_code=429,
+                    detail="Strava upstream rate limit exceeded",
+                )
+            break
+        if resp.status_code != 200:
+            raise HTTPException(status_code=502, detail="Failed to fetch Strava activities")
+
+        items = resp.json()
+        if not isinstance(items, list):
+            raise HTTPException(status_code=502, detail="Failed to fetch Strava activities")
+
+        page_scanned = 0
+        for item in items:
+            if total_scanned >= req_body.max_activities:
+                break
+            if not isinstance(item, dict):
+                continue
+            raw_id = item.get("id")
+            if not isinstance(raw_id, int) or isinstance(raw_id, bool) or raw_id <= 0:
+                continue
+
+            total_scanned += 1
+            page_scanned += 1
+            act_id = int(raw_id)
+
+            if req_body.gps_only and not bool(item.get("start_latlng")):
+                skipped_no_gps_count += 1
+                continue
+            if act_id in existing_activity_ids:
+                skipped_existing_count += 1
+                continue
+
+            existing_activity_ids.add(act_id)
+            to_queue.append((act_id, item))
+
+        if len(items) < per_page or page_scanned == 0 or _is_rate_limited(resp.headers):
+            break
+        page += 1
+
+    target_project: Project | None
+    if explicit_project is not None:
+        target_project = explicit_project
+    elif to_queue:
+        target_project = _resolve_or_create_autosync_project(db, auth.user.id)
+    else:
+        target_project = _find_existing_autosync_project(db, auth.user.id)
+
+    queued_activity_ids: list[int] = []
+    if to_queue:
+        assert target_project is not None
+        for act_id, item in to_queue:
+            db.add(
+                IngestJob(
+                    provider="strava",
+                    event_type="create",
+                    external_owner_id=conn.external_athlete_id,
+                    external_object_id=act_id,
+                    status="queued",
+                    payload_json={
+                        "source": "strava_bulk_import",
+                        "user_id": str(auth.user.id),
+                        "project_id": str(target_project.id),
+                        "name": str(item.get("name") or f"Strava {act_id}")[:200],
+                        "sport_type": str(item.get("sport_type") or item.get("type") or "Workout"),
+                        "start_date": str(item.get("start_date") or ""),
+                    },
+                )
+            )
+            queued_activity_ids.append(act_id)
+
+    write_audit_event(
+        db,
+        user_id=auth.user.id,
+        project_id=target_project.id if target_project is not None else None,
+        event_type="strava.bulk_import_queued",
+        metadata={
+            "queued_count": len(queued_activity_ids),
+            "skipped_existing_count": skipped_existing_count,
+            "skipped_no_gps_count": skipped_no_gps_count,
+            "total_scanned": total_scanned,
+            "project_id": str(target_project.id) if target_project is not None else None,
+        },
+    )
+    db.commit()
+
+    return StravaImportAllOut(
+        queued_count=len(queued_activity_ids),
+        skipped_existing_count=skipped_existing_count,
+        skipped_no_gps_count=skipped_no_gps_count,
+        total_scanned=total_scanned,
+        project_id=target_project.id if target_project is not None else None,
+        project_title=target_project.title if target_project is not None else None,
+        queued_activity_ids=queued_activity_ids,
+    )
 
 
 @router.get("/api/v1/strava/webhook")
