@@ -1,0 +1,267 @@
+name: Deploy VPS
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git branch, tag, or commit SHA to deploy"
+        required: false
+        default: "main"
+        type: string
+      build_worker:
+        description: "Rebuild Playwright MP4 render worker image"
+        required: false
+        default: true
+        type: boolean
+      prune_builder_cache:
+        description: "Prune Docker BuildKit cache before/between builds to save VPS disk space"
+        required: false
+        default: true
+        type: boolean
+      with_airflow:
+        description: "Start optional Airflow profile"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to VPS
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Deploy over SSH
+        shell: bash
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_SSH_KNOWN_HOSTS: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+          VPS_HOST: ${{ secrets.VPS_HOST || vars.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER || vars.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT || vars.VPS_PORT || '22' }}
+          VPS_APP_DIR: ${{ vars.VPS_APP_DIR || '/opt/trip-animator' }}
+          VPS_HEALTH_URL: ${{ vars.VPS_HEALTH_URL || 'http://127.0.0.1:8080/health' }}
+          DEPLOY_REF: ${{ inputs.ref || 'main' }}
+          BUILD_WORKER: ${{ inputs.build_worker }}
+          PRUNE_BUILDER_CACHE: ${{ inputs.prune_builder_cache }}
+          WITH_AIRFLOW: ${{ inputs.with_airflow }}
+        run: |
+          set -Eeuo pipefail
+
+          # Validate required connection secrets and variables.
+          if [[ -z "$VPS_SSH_KEY" ]]; then
+            echo "::error::Missing required secret VPS_SSH_KEY."
+            exit 1
+          fi
+          if [[ -z "$VPS_HOST" ]]; then
+            echo "::error::Missing required VPS_HOST (configure in GitHub Secrets or Variables)."
+            exit 1
+          fi
+          if [[ -z "$VPS_USER" ]]; then
+            echo "::error::Missing required VPS_USER (configure in GitHub Secrets or Variables)."
+            exit 1
+          fi
+
+          # Validate formats strictly to prevent option or shell injection.
+          if [[ ! "$VPS_HOST" =~ ^[A-Za-z0-9._:-]+$ || "$VPS_HOST" == -* ]]; then
+            echo "::error::Invalid VPS_HOST format."
+            exit 1
+          fi
+          if [[ ! "$VPS_USER" =~ ^[A-Za-z0-9._-]+$ || "$VPS_USER" == -* ]]; then
+            echo "::error::Invalid VPS_USER format."
+            exit 1
+          fi
+          if [[ ! "$VPS_PORT" =~ ^[0-9]+$ ]] || (( 10#$VPS_PORT < 1 || 10#$VPS_PORT > 65535 )); then
+            echo "::error::Invalid VPS_PORT: must be an integer between 1 and 65535."
+            exit 1
+          fi
+          if [[ ! "$DEPLOY_REF" =~ ^[A-Za-z0-9._/-]+$ || "$DEPLOY_REF" == -* || "$DEPLOY_REF" == *".."* ]]; then
+            echo "::error::Invalid ref '$DEPLOY_REF': allowed characters are [A-Za-z0-9._/-] without leading '-' or '..'."
+            exit 1
+          fi
+          if [[ ! "$VPS_APP_DIR" =~ ^/[A-Za-z0-9._/@-]+$ || "$VPS_APP_DIR" == *".."* ]]; then
+            echo "::error::Invalid VPS_APP_DIR '$VPS_APP_DIR': must be an absolute path without '..'."
+            exit 1
+          fi
+          health_url_re='^https?://[A-Za-z0-9._:/?=&%-]+$'
+          if [[ ! "$VPS_HEALTH_URL" =~ $health_url_re ]]; then
+            echo "::error::Invalid VPS_HEALTH_URL '$VPS_HEALTH_URL': must be an http(s) URL."
+            exit 1
+          fi
+          for bool_name in BUILD_WORKER PRUNE_BUILDER_CACHE WITH_AIRFLOW; do
+            val="${!bool_name}"
+            if [[ "$val" != "true" && "$val" != "false" ]]; then
+              echo "::error::Invalid boolean value for ${bool_name}: '${val}'."
+              exit 1
+            fi
+          done
+
+          ssh_key_file="${RUNNER_TEMP}/vps_deploy_key"
+          known_hosts_file="${RUNNER_TEMP}/vps_known_hosts"
+          cleanup() {
+            rm -f -- "$ssh_key_file" "$known_hosts_file"
+          }
+          trap cleanup EXIT
+
+          (
+            umask 077
+            printf '%s\n' "${VPS_SSH_KEY//$'\r'/}" > "$ssh_key_file"
+            chmod 600 "$ssh_key_file"
+          )
+
+          ssh_opts=(
+            -i "$ssh_key_file"
+            -p "$VPS_PORT"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o ConnectTimeout=20
+            -o ServerAliveInterval=30
+            -o ServerAliveCountMax=20
+          )
+
+          if [[ -n "$VPS_SSH_KNOWN_HOSTS" ]]; then
+            (
+              umask 077
+              printf '%s\n' "${VPS_SSH_KNOWN_HOSTS//$'\r'/}" > "$known_hosts_file"
+              chmod 600 "$known_hosts_file"
+            )
+            ssh_opts+=(
+              -o StrictHostKeyChecking=yes
+              -o UserKnownHostsFile="$known_hosts_file"
+            )
+          else
+            echo "::warning::VPS_SSH_KNOWN_HOSTS is not set; using StrictHostKeyChecking=accept-new."
+            (
+              umask 077
+              : > "$known_hosts_file"
+              chmod 600 "$known_hosts_file"
+            )
+            ssh_opts+=(
+              -o StrictHostKeyChecking=accept-new
+              -o UserKnownHostsFile="$known_hosts_file"
+            )
+          fi
+
+          echo "Deploying ref '${DEPLOY_REF}' to ${VPS_USER}@${VPS_HOST}:${VPS_PORT} (${VPS_APP_DIR})"
+
+          {
+            printf 'VPS_APP_DIR=%q\n' "$VPS_APP_DIR"
+            printf 'DEPLOY_REF=%q\n' "$DEPLOY_REF"
+            printf 'BUILD_WORKER=%q\n' "$BUILD_WORKER"
+            printf 'PRUNE_BUILDER_CACHE=%q\n' "$PRUNE_BUILDER_CACHE"
+            printf 'WITH_AIRFLOW=%q\n' "$WITH_AIRFLOW"
+            printf 'VPS_HEALTH_URL=%q\n' "$VPS_HEALTH_URL"
+            cat <<'REMOTE_SCRIPT'
+          set -Eeuo pipefail
+
+          if [[ ! -d "$VPS_APP_DIR" ]]; then
+            echo "Error: VPS_APP_DIR '${VPS_APP_DIR}' does not exist on remote host." >&2
+            exit 1
+          fi
+          cd "$VPS_APP_DIR"
+
+          if [[ ! -d .git ]]; then
+            echo "Error: '${VPS_APP_DIR}' is not a Git repository." >&2
+            exit 1
+          fi
+          if [[ ! -f .env ]]; then
+            echo "Error: '${VPS_APP_DIR}/.env' is missing. Create it from .env.example before deploying." >&2
+            exit 1
+          fi
+          command -v docker >/dev/null 2>&1 || { echo "Error: docker is not installed on remote host." >&2; exit 1; }
+          command -v curl >/dev/null 2>&1 || { echo "Error: curl is not installed on remote host." >&2; exit 1; }
+
+          echo "==> Fetching origin and checking out '${DEPLOY_REF}'"
+          git fetch --prune --tags origin
+          if git show-ref --verify --quiet "refs/remotes/origin/${DEPLOY_REF}"; then
+            git checkout -f -B "$DEPLOY_REF" "refs/remotes/origin/${DEPLOY_REF}"
+            git reset --hard "refs/remotes/origin/${DEPLOY_REF}"
+          elif git show-ref --verify --quiet "refs/tags/${DEPLOY_REF}"; then
+            git checkout -f --detach "refs/tags/${DEPLOY_REF}^{commit}"
+          elif [[ "$DEPLOY_REF" =~ ^[0-9a-fA-F]{7,40}$ ]] && git rev-parse --verify --quiet "${DEPLOY_REF}^{commit}" >/dev/null; then
+            git checkout -f --detach "${DEPLOY_REF}^{commit}"
+          else
+            git fetch --no-tags origin "$DEPLOY_REF"
+            git checkout -f --detach FETCH_HEAD
+          fi
+          echo "Checked out commit: $(git rev-parse --short HEAD) ($(git log -1 --pretty=%s))"
+
+          compose_cmd=(docker compose --env-file .env -f infra/compose.yaml)
+          if [[ "$WITH_AIRFLOW" == "true" ]]; then
+            compose_cmd+=(--profile airflow)
+          fi
+
+          prune_cache() {
+            if [[ "$PRUNE_BUILDER_CACHE" == "true" ]]; then
+              echo "==> Pruning Docker BuildKit cache"
+              docker builder prune -f
+            fi
+          }
+
+          # Sequential image builds to keep peak RAM and disk usage low on small VPS hosts.
+          prune_cache
+          echo "==> Building api image (shared by api, ingest, migrate, minio-init)"
+          "${compose_cmd[@]}" build api
+
+          prune_cache
+          echo "==> Building web image"
+          "${compose_cmd[@]}" build web
+
+          if [[ "$BUILD_WORKER" == "true" ]]; then
+            prune_cache
+            echo "==> Building worker image"
+            "${compose_cmd[@]}" build worker
+          else
+            echo "==> Skipping worker image build (build_worker=false)"
+          fi
+
+          if [[ "$WITH_AIRFLOW" == "true" ]]; then
+            prune_cache
+            echo "==> Building airflow image (shared by airflow, airflow-init)"
+            "${compose_cmd[@]}" build airflow
+          fi
+
+          prune_cache
+
+          echo "==> Starting services"
+          if [[ "$BUILD_WORKER" == "true" ]] || docker image inspect trip-animator-v2-worker:local >/dev/null 2>&1; then
+            "${compose_cmd[@]}" up -d --no-build --remove-orphans
+          else
+            echo "Skipping worker service: build_worker=false and trip-animator-v2-worker:local is not present locally."
+            services=(postgres minio minio-init migrate api ingest web caddy)
+            if [[ "$WITH_AIRFLOW" == "true" ]]; then
+              services+=(airflow-init airflow)
+            fi
+            "${compose_cmd[@]}" up -d --no-build --remove-orphans "${services[@]}"
+          fi
+
+          echo "==> Verifying health endpoint: ${VPS_HEALTH_URL}"
+          health_ok=false
+          last_http_code="000"
+          for attempt in $(seq 1 30); do
+            http_code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "$VPS_HEALTH_URL" || true)"
+            last_http_code="${http_code:-000}"
+            if [[ "$last_http_code" == "200" ]]; then
+              health_ok=true
+              echo "Health check passed (HTTP 200) on attempt ${attempt}."
+              break
+            fi
+            sleep 3
+          done
+
+          echo "==> Compose service status"
+          "${compose_cmd[@]}" ps
+
+          if [[ "$health_ok" != "true" ]]; then
+            echo "Error: Health check failed after 30 attempts for ${VPS_HEALTH_URL} (last HTTP status: ${last_http_code})" >&2
+            "${compose_cmd[@]}" logs --tail=50 api caddy web || true
+            exit 1
+          fi
+          REMOTE_SCRIPT
+          } | ssh "${ssh_opts[@]}" -- "${VPS_USER}@${VPS_HOST}" 'bash -s'
