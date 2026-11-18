@@ -70,6 +70,25 @@ def _problem_response(
     )
 
 
+def _configure_package_logging(cfg: Settings) -> None:
+    """Ensure trip_api logs at the configured level under both uvicorn and pytest caplog."""
+    pkg_logger = logging.getLogger("trip_api")
+    resolved_level = logging.getLevelNamesMapping().get(cfg.log_level.upper(), logging.INFO)
+    pkg_logger.setLevel(resolved_level)
+    pkg_logger.propagate = True
+    if not pkg_logger.handlers and not logging.getLogger().handlers:
+        uvicorn_logger = logging.getLogger("uvicorn.error")
+        if uvicorn_logger.handlers:
+            for handler in uvicorn_logger.handlers:
+                pkg_logger.addHandler(handler)
+        else:
+            stream_handler = logging.StreamHandler()
+            stream_handler.setFormatter(
+                logging.Formatter("%(levelname)s:     %(name)s - %(message)s")
+            )
+            pkg_logger.addHandler(stream_handler)
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -78,6 +97,7 @@ def create_app(
     object_store: ObjectStore | None = None,
 ) -> FastAPI:
     cfg = settings or get_settings()
+    _configure_package_logging(cfg)
 
     db_engine = engine or create_db_engine(cfg.database_url, settings=cfg)
     db_session_factory = session_factory or create_session_factory(db_engine)

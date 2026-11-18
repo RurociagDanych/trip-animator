@@ -14,6 +14,7 @@ import threading
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -99,6 +100,7 @@ def create_user(
                 display_name=(display_name.strip() or normalized_email.split("@", 1)[0])[:120],
                 password_hash=pw_hash,
                 is_active=True,
+                email_verified_at=datetime.now(UTC),
             )
             db.add(user)
             db.commit()
@@ -538,6 +540,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "rate_limits_deleted": report.rate_limits_deleted,
                         "render_jobs_deleted": report.render_jobs_deleted,
                         "blobs_deleted": report.blobs_deleted,
+                        "verification_tokens_deleted": report.verification_tokens_deleted,
+                        "password_reset_tokens_deleted": report.password_reset_tokens_deleted,
                         "dry_run": report.dry_run,
                     }
                 )
@@ -549,7 +553,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"oauth_states={report.oauth_states_deleted} "
                 f"rate_limits={report.rate_limits_deleted} "
                 f"render_jobs={report.render_jobs_deleted} "
-                f"blobs={report.blobs_deleted}"
+                f"blobs={report.blobs_deleted} "
+                f"verification_tokens={report.verification_tokens_deleted} "
+                f"password_reset_tokens={report.password_reset_tokens_deleted}"
             )
         return 0
 

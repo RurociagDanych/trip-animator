@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { Compass, LogIn, LogOut, Zap } from "lucide-react";
+import { Compass, LogIn, LogOut, User, Zap } from "lucide-react";
 import type { ReactNode } from "react";
 import type { UserOut } from "../../lib/api/types";
 
@@ -43,9 +43,14 @@ export function AppHeader({ sectionLabel, user, onLogout, rightSlot }: AppHeader
               </span>
             ) : null}
 
-            <span className="hidden sm:inline-block max-w-[160px] truncate text-xs text-ink-muted">
-              {user.display_name || user.email}
-            </span>
+            <Link
+              to="/account"
+              aria-label={`Account: ${user.display_name || user.email || "Account"}`}
+              className="inline-flex max-w-[180px] items-center gap-1.5 rounded-md border border-border bg-elevated px-2.5 py-1 text-xs font-medium text-ink hover:border-sky-accent/60 hover:text-sky-accent transition-colors"
+            >
+              <User className="h-3.5 w-3.5 shrink-0 text-ink-muted" aria-hidden="true" />
+              <span className="truncate">{user.display_name || user.email || "Account"}</span>
+            </Link>
 
             {onLogout ? (
               <button

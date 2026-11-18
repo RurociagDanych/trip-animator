@@ -7,10 +7,14 @@ import {
   type RouterHistory,
 } from "@tanstack/react-router";
 import { RouteLoadingFallback } from "./components/layout/RouteLoadingFallback";
+import { AccountPage } from "./routes/AccountPage";
 import { DashboardPage } from "./routes/DashboardPage";
+import { ForgotPasswordPage } from "./routes/ForgotPasswordPage";
 import { LoginPage } from "./routes/LoginPage";
 import { NotFoundPage } from "./routes/NotFoundPage";
+import { ResetPasswordPage } from "./routes/ResetPasswordPage";
 import { StravaCallbackPage } from "./routes/StravaCallbackPage";
+import { VerifyEmailPage } from "./routes/VerifyEmailPage";
 
 const LazyEditorPage = lazyRouteComponent(
   () => import("./routes/EditorPage"),
@@ -47,6 +51,30 @@ const stravaCallbackRoute = createRoute({
   component: StravaCallbackPage,
 });
 
+const verifyEmailRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/verify-email",
+  component: VerifyEmailPage,
+});
+
+const forgotPasswordRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/forgot-password",
+  component: ForgotPasswordPage,
+});
+
+const resetPasswordRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/reset-password",
+  component: ResetPasswordPage,
+});
+
+const accountRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/account",
+  component: AccountPage,
+});
+
 const editorRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/projects/$projectId",
@@ -71,6 +99,10 @@ const routeTree = rootRoute.addChildren([
   dashboardRoute,
   loginRoute,
   stravaCallbackRoute,
+  verifyEmailRoute,
+  forgotPasswordRoute,
+  resetPasswordRoute,
+  accountRoute,
   editorRoute,
   renderHarnessRoute,
   shareViewRoute,

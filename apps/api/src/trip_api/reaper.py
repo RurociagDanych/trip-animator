@@ -14,7 +14,9 @@ from sqlalchemy.orm import Session
 
 from trip_api.config import Settings
 from trip_api.db import (
+    EmailVerificationToken,
     OAuthState,
+    PasswordResetToken,
     RateLimitRecord,
     RenderJob,
     RenderJobChunk,
@@ -40,6 +42,8 @@ class ReapReport:
     render_jobs_deleted: int
     blobs_deleted: int
     dry_run: bool = False
+    verification_tokens_deleted: int = 0
+    password_reset_tokens_deleted: int = 0
 
 
 def build_object_store(cfg: Settings) -> ObjectStore:
@@ -100,6 +104,12 @@ def reap_expired(
     expired_oauth_cond = (OAuthState.expires_at <= current_time) | (
         OAuthState.session_id.in_(expired_session_ids)
     )
+    expired_verification_cond = (EmailVerificationToken.expires_at <= current_time) | (
+        EmailVerificationToken.used_at.is_not(None)
+    )
+    expired_password_reset_cond = (PasswordResetToken.expires_at <= current_time) | (
+        PasswordResetToken.used_at.is_not(None)
+    )
     stale_rate_limit_cond = RateLimitRecord.updated_at <= rate_limit_cutoff
     expired_render_cond = RenderJob.status.in_(_TERMINAL_RENDER_STATUSES) & (
         ((RenderJob.expires_at.is_not(None)) & (RenderJob.expires_at <= current_time))
@@ -132,6 +142,22 @@ def reap_expired(
             )
             or 0
         )
+        verification_count = int(
+            db.scalar(
+                select(func.count())
+                .select_from(EmailVerificationToken)
+                .where(expired_verification_cond)
+            )
+            or 0
+        )
+        password_reset_count = int(
+            db.scalar(
+                select(func.count())
+                .select_from(PasswordResetToken)
+                .where(expired_password_reset_cond)
+            )
+            or 0
+        )
         blob_count = sum(
             int(bool(job.output_object_key))
             + int(bool(job.thumbnail_key))
@@ -145,9 +171,19 @@ def reap_expired(
             render_jobs_deleted=len(expired_jobs),
             blobs_deleted=blob_count,
             dry_run=True,
+            verification_tokens_deleted=verification_count,
+            password_reset_tokens_deleted=password_reset_count,
         )
 
     oauth_res = cast(CursorResult[Any], db.execute(delete(OAuthState).where(expired_oauth_cond)))
+    verification_res = cast(
+        CursorResult[Any],
+        db.execute(delete(EmailVerificationToken).where(expired_verification_cond)),
+    )
+    password_reset_res = cast(
+        CursorResult[Any],
+        db.execute(delete(PasswordResetToken).where(expired_password_reset_cond)),
+    )
     session_res = cast(
         CursorResult[Any], db.execute(delete(SessionRecord).where(expired_sessions_cond))
     )
@@ -196,6 +232,8 @@ def reap_expired(
         render_jobs_deleted=jobs_deleted,
         blobs_deleted=blobs_deleted,
         dry_run=False,
+        verification_tokens_deleted=max(0, int(verification_res.rowcount or 0)),
+        password_reset_tokens_deleted=max(0, int(password_reset_res.rowcount or 0)),
     )
 
 

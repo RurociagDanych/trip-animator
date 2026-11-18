@@ -15,7 +15,9 @@ from sqlalchemy import select
 from trip_api.cli import main as cli_main
 from trip_api.config import Settings
 from trip_api.db import (
+    EmailVerificationToken,
     OAuthState,
+    PasswordResetToken,
     Project,
     RateLimitRecord,
     RenderJob,
@@ -99,6 +101,38 @@ def test_reap_expired_prunes_only_expired_records_and_blobs(harness: AppHarness)
                     state_hash="s3" * 32,
                     code_verifier_enc="v1:enc",
                     expires_at=now + timedelta(minutes=10),
+                ),
+                EmailVerificationToken(
+                    user_id=user.id,
+                    token_hash="e1" * 32,
+                    expires_at=now - timedelta(minutes=5),
+                ),
+                EmailVerificationToken(
+                    user_id=user.id,
+                    token_hash="e2" * 32,
+                    expires_at=now + timedelta(hours=12),
+                    used_at=now - timedelta(minutes=2),
+                ),
+                EmailVerificationToken(
+                    user_id=user.id,
+                    token_hash="e3" * 32,
+                    expires_at=now + timedelta(hours=12),
+                ),
+                PasswordResetToken(
+                    user_id=user.id,
+                    token_hash="p1" * 32,
+                    expires_at=now - timedelta(minutes=5),
+                ),
+                PasswordResetToken(
+                    user_id=user.id,
+                    token_hash="p2" * 32,
+                    expires_at=now + timedelta(minutes=30),
+                    used_at=now - timedelta(minutes=1),
+                ),
+                PasswordResetToken(
+                    user_id=user.id,
+                    token_hash="p3" * 32,
+                    expires_at=now + timedelta(minutes=30),
                 ),
                 RateLimitRecord(
                     bucket_key="login:stale",
@@ -185,6 +219,8 @@ def test_reap_expired_prunes_only_expired_records_and_blobs(harness: AppHarness)
         assert dry.dry_run is True
         assert dry.sessions_deleted == 1
         assert dry.oauth_states_deleted == 2
+        assert dry.verification_tokens_deleted == 2
+        assert dry.password_reset_tokens_deleted == 2
         assert dry.rate_limits_deleted == 1
         assert dry.render_jobs_deleted == 2
         assert dry.blobs_deleted == 3
@@ -201,6 +237,8 @@ def test_reap_expired_prunes_only_expired_records_and_blobs(harness: AppHarness)
         assert res.dry_run is False
         assert res.sessions_deleted == 1
         assert res.oauth_states_deleted == 2
+        assert res.verification_tokens_deleted == 2
+        assert res.password_reset_tokens_deleted == 2
         assert res.rate_limits_deleted == 1
         assert res.render_jobs_deleted == 2
         assert res.blobs_deleted == 3
@@ -211,6 +249,12 @@ def test_reap_expired_prunes_only_expired_records_and_blobs(harness: AppHarness)
         remaining_states = db.scalars(select(OAuthState)).all()
         assert len(remaining_states) == 1
         assert remaining_states[0].state_hash == "s3" * 32
+
+        remaining_verifications = db.scalars(select(EmailVerificationToken)).all()
+        assert [v.token_hash for v in remaining_verifications] == ["e3" * 32]
+
+        remaining_resets = db.scalars(select(PasswordResetToken)).all()
+        assert [r.token_hash for r in remaining_resets] == ["p3" * 32]
 
         remaining_limits = db.scalars(select(RateLimitRecord)).all()
         assert [r.bucket_key for r in remaining_limits] == ["login:fresh"]
@@ -454,6 +498,20 @@ def test_cli_reap_dry_run_and_execute(
                 )
             )
             db.add(
+                EmailVerificationToken(
+                    user_id=user.id,
+                    token_hash="v" * 64,
+                    expires_at=now - timedelta(hours=1),
+                )
+            )
+            db.add(
+                PasswordResetToken(
+                    user_id=user.id,
+                    token_hash="r" * 64,
+                    expires_at=now - timedelta(minutes=15),
+                )
+            )
+            db.add(
                 RenderJob(
                     project_id=proj.id,
                     owner_user_id=user.id,
@@ -484,12 +542,15 @@ def test_cli_reap_dry_run_and_execute(
     text_out = capsys.readouterr().out
     assert "Reap complete (dry_run=True):" in text_out
     assert "render_jobs=1" in text_out
+    assert "password_reset_tokens=1" in text_out
 
     rc_dry = cli_main(["reap", "--dry-run", "--json", "--database-url", db_url])
     assert rc_dry == 0
     dry_out = json.loads(capsys.readouterr().out)
     assert dry_out["dry_run"] is True
     assert dry_out["sessions_deleted"] == 1
+    assert dry_out["verification_tokens_deleted"] == 1
+    assert dry_out["password_reset_tokens_deleted"] == 1
     assert dry_out["render_jobs_deleted"] == 1
     assert dry_out["blobs_deleted"] == 1
     assert store.get_bytes("outputs/cli-exp.mp4") == b"video-bytes"
@@ -499,6 +560,8 @@ def test_cli_reap_dry_run_and_execute(
     exec_out = json.loads(capsys.readouterr().out)
     assert exec_out["dry_run"] is False
     assert exec_out["sessions_deleted"] == 1
+    assert exec_out["verification_tokens_deleted"] == 1
+    assert exec_out["password_reset_tokens_deleted"] == 1
     assert exec_out["render_jobs_deleted"] == 1
     assert exec_out["blobs_deleted"] == 1
     with pytest.raises(FileNotFoundError):

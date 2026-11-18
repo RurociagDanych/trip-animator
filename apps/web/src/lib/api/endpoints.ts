@@ -3,9 +3,14 @@ import { apiClient, clearCsrfToken, generateIdempotencyKey } from "./client";
 import type {
   AnalyticsHeatmapOut,
   AuditEventOut,
+  AuthSessionOut,
   CareerAnalyticsOut,
+  ChangePasswordRequest,
+  ChangePasswordResponse,
+  ForgotPasswordResponse,
   HealthResponse,
   LodLevel,
+  LogoutAllResponse,
   PhotoPinRequest,
   PhotoShiftClockOut,
   PhotoShiftClockRequest,
@@ -21,8 +26,12 @@ import type {
   PublicConfigOut,
   PublicProjectOut,
   RegisterRequest,
+  RegisterResponse,
   RenderJobOut,
   RenderSpecV2,
+  ResendVerificationResponse,
+  ResetPasswordRequest,
+  ResetPasswordResponse,
   SessionInfoOut,
   StageAutoOrganizeOut,
   StageAutoOrganizeRequest,
@@ -57,14 +66,42 @@ export const authApi = {
   login(email: string, password: string): Promise<SessionInfoOut> {
     return apiClient.post<SessionInfoOut>("/api/v1/auth/login", { email, password });
   },
-  register(payload: RegisterRequest): Promise<SessionInfoOut> {
-    return apiClient.post<SessionInfoOut>("/api/v1/auth/register", payload);
+  register(payload: RegisterRequest): Promise<RegisterResponse> {
+    return apiClient.post<RegisterResponse>("/api/v1/auth/register", payload);
+  },
+  verifyEmail(token: string): Promise<SessionInfoOut> {
+    return apiClient.post<SessionInfoOut>("/api/v1/auth/verify-email", { token });
+  },
+  resendVerification(email: string): Promise<ResendVerificationResponse> {
+    return apiClient.post<ResendVerificationResponse>("/api/v1/auth/resend-verification", { email });
+  },
+  forgotPassword(email: string): Promise<ForgotPasswordResponse> {
+    return apiClient.post<ForgotPasswordResponse>("/api/v1/auth/forgot-password", { email });
+  },
+  resetPassword(payload: ResetPasswordRequest): Promise<ResetPasswordResponse> {
+    return apiClient.post<ResetPasswordResponse>("/api/v1/auth/reset-password", payload);
+  },
+  changePassword(payload: ChangePasswordRequest): Promise<ChangePasswordResponse> {
+    return apiClient.post<ChangePasswordResponse>("/api/v1/auth/change-password", payload);
+  },
+  listSessions(signal?: AbortSignal): Promise<AuthSessionOut[]> {
+    return apiClient.get<AuthSessionOut[]>("/api/v1/auth/sessions", signal);
+  },
+  revokeSession(sessionId: string): Promise<{ ok: boolean }> {
+    return apiClient.delete<{ ok: boolean }>(
+      `/api/v1/auth/sessions/${encodeURIComponent(sessionId)}`,
+    );
   },
   devLogin(): Promise<SessionInfoOut> {
     return apiClient.post<SessionInfoOut>("/api/v1/auth/dev-login");
   },
   async logout(): Promise<{ ok: boolean }> {
     const res = await apiClient.post<{ ok: boolean }>("/api/v1/auth/logout");
+    clearCsrfToken();
+    return res;
+  },
+  async logoutAll(): Promise<LogoutAllResponse> {
+    const res = await apiClient.post<LogoutAllResponse>("/api/v1/auth/logout-all");
     clearCsrfToken();
     return res;
   },

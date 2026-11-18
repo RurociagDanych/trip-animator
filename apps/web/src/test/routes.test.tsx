@@ -2,6 +2,7 @@
 import { QueryClient } from "@tanstack/react-query";
 import { createMemoryHistory } from "@tanstack/react-router";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../App";
 import { clearCsrfToken } from "../lib/api/client";
@@ -15,17 +16,18 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function renderAtRoute(initialPath: string) {
+function renderAtRoute(initialPath: string, options?: { strict?: boolean }) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   const history = createMemoryHistory({ initialEntries: [initialPath] });
   const router = createAppRouter(history);
-  render(<App router={router} queryClient={queryClient} />);
+  const app = <App router={router} queryClient={queryClient} />;
+  render(options?.strict ? <StrictMode>{app}</StrictMode> : app);
   return { router, queryClient, history };
 }
 
-describe("Route tests: DashboardPage, LoginPage, ShareViewPage, StravaCallbackPage", () => {
+describe("Route tests: DashboardPage, LoginPage, ForgotPasswordPage, ResetPasswordPage, AccountPage, ShareViewPage, StravaCallbackPage, VerifyEmailPage", () => {
   beforeEach(() => {
     clearCsrfToken();
     window.history.replaceState({}, "", "/");
@@ -114,6 +116,10 @@ describe("Route tests: DashboardPage, LoginPage, ShareViewPage, StravaCallbackPa
 
       const { router } = renderAtRoute("/");
       expect(await screen.findByText(/No trip projects yet/i)).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /Account: Developer/i })).toHaveAttribute(
+        "href",
+        "/account",
+      );
 
       // Submitting empty title shows validation alert
       fireEvent.click(screen.getByRole("button", { name: /Create trip/i }));
@@ -382,17 +388,22 @@ describe("Route tests: DashboardPage, LoginPage, ShareViewPage, StravaCallbackPa
       expect(screen.queryByRole("tablist", { name: /Authentication mode/i })).not.toBeInTheDocument();
       expect(screen.queryByRole("tab", { name: /Create account/i })).not.toBeInTheDocument();
 
-      const passwordInput = screen.getByLabelText(/Password/i);
+      const passwordInput = screen.getByLabelText(/^Password$/i);
       expect(passwordInput).toHaveAttribute("type", "password");
+      expect(screen.getByRole("link", { name: /Forgot password\?/i })).toHaveAttribute(
+        "href",
+        "/forgot-password",
+      );
       fireEvent.click(screen.getByRole("button", { name: /^Show$/i }));
       expect(passwordInput).toHaveAttribute("type", "text");
       fireEvent.click(screen.getByRole("button", { name: /^Hide$/i }));
       expect(passwordInput).toHaveAttribute("type", "password");
     });
 
-    it("validates registration fields, surfaces API errors, and redirects after successful registration", async () => {
+    it("validates registration fields, surfaces API errors, and shows Check your email confirmation after successful registration", async () => {
       let registered = false;
       let capturedPayload: Record<string, unknown> | null = null;
+      let resendPayload: Record<string, unknown> | null = null;
 
       vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
         const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
@@ -418,35 +429,26 @@ describe("Route tests: DashboardPage, LoginPage, ShareViewPage, StravaCallbackPa
           registered = true;
           return jsonResponse(
             {
-              user: {
-                id: "u-new",
-                email: body.email ?? "alpine@example.com",
-                display_name: body.display_name ?? "Alpine Explorer",
-                strava_connected: false,
-              },
-              csrf_token: "csrf-register",
-              dev_auth_enabled: false,
+              status: "verification_required",
+              email: body.email ?? "alpine@example.com",
+              message: "Please check your email to verify your account before signing in.",
             },
             201,
           );
         }
-        if (url.includes("/api/v1/auth/me")) {
-          if (!registered) {
-            return jsonResponse({ detail: "Not authenticated" }, 401);
-          }
-          return jsonResponse({
-            user: {
-              id: "u-new",
-              email: "alpine@example.com",
-              display_name: "Alpine Explorer",
-              strava_connected: false,
+        if (url.includes("/api/v1/auth/resend-verification") && method === "POST") {
+          resendPayload = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+          return jsonResponse(
+            {
+              status: "accepted",
+              message:
+                "If an unverified account exists for that email address, a new verification link has been sent.",
             },
-            csrf_token: "csrf-register",
-            dev_auth_enabled: false,
-          });
+            202,
+          );
         }
-        if (url.endsWith("/api/v1/projects")) {
-          return jsonResponse([]);
+        if (url.includes("/api/v1/auth/me")) {
+          return jsonResponse({ detail: "Not authenticated" }, 401);
         }
         return jsonResponse({});
       });
@@ -512,22 +514,89 @@ describe("Route tests: DashboardPage, LoginPage, ShareViewPage, StravaCallbackPa
         /Invalid registration invite code/i,
       );
 
-      // Valid invite code registers and redirects to dashboard
+      // Valid invite code transitions to Check your email screen
       fireEvent.change(screen.getByLabelText(/Invite code/i), {
         target: { value: "alpine-2026" },
       });
       fireEvent.click(screen.getByRole("button", { name: /^Create account$/i }));
 
-      await waitFor(() => {
-        expect(registered).toBe(true);
-        expect(capturedPayload).toEqual({
-          email: "alpine@example.com",
-          display_name: "Alpine Explorer",
-          password: "secure-alpine-pass",
-          invite_code: "alpine-2026",
-        });
-        expect(router.state.location.pathname).toBe("/");
+      expect(await screen.findByRole("heading", { name: /Check your email/i })).toBeInTheDocument();
+      expect(registered).toBe(true);
+      expect(capturedPayload).toEqual({
+        email: "alpine@example.com",
+        display_name: "Alpine Explorer",
+        password: "secure-alpine-pass",
+        invite_code: "alpine-2026",
       });
+      expect(screen.getByText("alpine@example.com")).toBeInTheDocument();
+      expect(router.state.location.pathname).toBe("/login");
+
+      // Supports resending verification email
+      fireEvent.click(screen.getByRole("button", { name: /Resend verification email/i }));
+      expect(await screen.findByRole("status")).toHaveTextContent(
+        /a new verification link has been sent/i,
+      );
+      expect(resendPayload).toEqual({ email: "alpine@example.com" });
+
+      // Supports returning to sign in view
+      fireEvent.click(screen.getByRole("button", { name: /Back to sign in/i }));
+      expect(
+        await screen.findByRole("heading", { name: /Sign in to workspace/i }),
+      ).toBeInTheDocument();
+    });
+
+    it("surfaces resend verification action on 403 unverified email login error", async () => {
+      let resendPayload: Record<string, unknown> | null = null;
+
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
+        const method = init?.method ?? "GET";
+        if (url.includes("/api/v1/public-config")) {
+          return jsonResponse({ dev_auth_enabled: false, strava_configured: false });
+        }
+        if (url.includes("/api/v1/auth/login") && method === "POST") {
+          return jsonResponse(
+            {
+              detail:
+                "Email address is not verified. Please check your inbox or request a new verification link.",
+            },
+            403,
+          );
+        }
+        if (url.includes("/api/v1/auth/resend-verification") && method === "POST") {
+          resendPayload = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+          return jsonResponse(
+            {
+              status: "accepted",
+              message:
+                "If an unverified account exists for that email address, a new verification link has been sent.",
+            },
+            202,
+          );
+        }
+        return jsonResponse({});
+      });
+
+      renderAtRoute("/login");
+      expect(await screen.findByRole("heading", { name: /Sign in to workspace/i })).toBeInTheDocument();
+
+      fireEvent.change(screen.getByLabelText(/Email address/i), {
+        target: { value: "rider@example.com" },
+      });
+      fireEvent.change(screen.getByLabelText(/Password/i), {
+        target: { value: "correct-password" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /^Sign in$/i }));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        /Email address is not verified/i,
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: /Resend verification email/i }));
+      expect(await screen.findByRole("status")).toHaveTextContent(
+        /a new verification link has been sent/i,
+      );
+      expect(resendPayload).toEqual({ email: "rider@example.com" });
     });
   });
 
@@ -777,6 +846,459 @@ describe("Route tests: DashboardPage, LoginPage, ShareViewPage, StravaCallbackPa
 
       await vi.advanceTimersByTimeAsync(750);
       expect(router.state.location.pathname).toBe("/");
+    });
+  });
+
+  describe("VerifyEmailPage", () => {
+    it("exchanges token once under StrictMode, invalidates auth query, and redirects to workspace", async () => {
+      vi.useFakeTimers();
+      window.history.replaceState({}, "", "/verify-email?token=valid-tok");
+
+      let verifyCalls = 0;
+      let capturedToken: string | undefined;
+
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
+        const method = init?.method ?? "GET";
+        if (url.includes("/api/v1/auth/verify-email") && method === "POST") {
+          verifyCalls += 1;
+          const body = JSON.parse(String(init?.body ?? "{}")) as { token?: string };
+          capturedToken = body.token;
+          return jsonResponse({
+            user: {
+              id: "u-verified",
+              email: "alpine@example.com",
+              display_name: "Alpine Explorer",
+              strava_connected: false,
+            },
+            csrf_token: "csrf-verified",
+            dev_auth_enabled: false,
+          });
+        }
+        if (url.includes("/api/v1/public-config")) {
+          return jsonResponse({ dev_auth_enabled: false, strava_configured: false });
+        }
+        if (url.includes("/api/v1/auth/me")) {
+          return jsonResponse({
+            user: {
+              id: "u-verified",
+              email: "alpine@example.com",
+              display_name: "Alpine Explorer",
+              strava_connected: false,
+            },
+            csrf_token: "csrf-verified",
+            dev_auth_enabled: false,
+          });
+        }
+        if (url.endsWith("/api/v1/projects")) {
+          return jsonResponse([]);
+        }
+        return jsonResponse({});
+      });
+
+      const { router, queryClient } = renderAtRoute("/verify-email", { strict: true });
+      const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+      await vi.waitFor(() => {
+        expect(
+          screen.getByText(/Email verified! Redirecting to workspace\.\.\./i),
+        ).toBeInTheDocument();
+      });
+
+      expect(verifyCalls).toBe(1);
+      expect(capturedToken).toBe("valid-tok");
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["auth", "me"] });
+      expect(screen.getByRole("button", { name: /Continue to workspace/i })).toBeInTheDocument();
+
+      await vi.advanceTimersByTimeAsync(750);
+      expect(router.state.location.pathname).toBe("/");
+    });
+
+    it("renders error view and allows resending verification email on invalid or expired token", async () => {
+      window.history.replaceState({}, "", "/verify-email?token=tok-expired");
+      let resendPayload: Record<string, unknown> | null = null;
+
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
+        const method = init?.method ?? "GET";
+        if (url.includes("/api/v1/auth/verify-email") && method === "POST") {
+          return jsonResponse({ detail: "Invalid or expired email verification link" }, 400);
+        }
+        if (url.includes("/api/v1/auth/resend-verification") && method === "POST") {
+          resendPayload = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+          return jsonResponse(
+            {
+              status: "accepted",
+              message:
+                "If an unverified account exists for that email address, a new verification link has been sent.",
+            },
+            202,
+          );
+        }
+        return jsonResponse({});
+      });
+
+      renderAtRoute("/verify-email");
+
+      expect(
+        await screen.findByText(/Invalid or expired email verification link/i),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /Back to sign in/i })).toHaveAttribute(
+        "href",
+        "/login",
+      );
+
+      fireEvent.change(screen.getByLabelText(/Email address/i), {
+        target: { value: "alpine@example.com" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /Resend verification email/i }));
+
+      expect(await screen.findByRole("status")).toHaveTextContent(
+        /a new verification link has been sent/i,
+      );
+      expect(resendPayload).toEqual({ email: "alpine@example.com" });
+    });
+
+    it("renders error view without calling verify-email when token is missing and allows resending", async () => {
+      window.history.replaceState({}, "", "/verify-email");
+      let verifyCalls = 0;
+      let resendPayload: Record<string, unknown> | null = null;
+
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
+        const method = init?.method ?? "GET";
+        if (url.includes("/api/v1/auth/verify-email")) {
+          verifyCalls += 1;
+          return jsonResponse({}, 400);
+        }
+        if (url.includes("/api/v1/auth/resend-verification") && method === "POST") {
+          resendPayload = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+          return jsonResponse(
+            {
+              status: "accepted",
+              message:
+                "If an unverified account exists for that email address, a new verification link has been sent.",
+            },
+            202,
+          );
+        }
+        return jsonResponse({});
+      });
+
+      renderAtRoute("/verify-email");
+
+      expect(await screen.findByText(/Missing email verification token\./i)).toBeInTheDocument();
+      expect(verifyCalls).toBe(0);
+      expect(screen.getByRole("link", { name: /Back to sign in/i })).toHaveAttribute(
+        "href",
+        "/login",
+      );
+
+      fireEvent.change(screen.getByLabelText(/Email address/i), {
+        target: { value: "missing-token@example.com" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /Resend verification email/i }));
+
+      expect(await screen.findByRole("status")).toHaveTextContent(
+        /a new verification link has been sent/i,
+      );
+      expect(resendPayload).toEqual({ email: "missing-token@example.com" });
+    });
+  });
+
+  describe("ForgotPasswordPage", () => {
+    it("submits trimmed email, shows Check your email confirmation, and allows sending another link", async () => {
+      let capturedPayload: Record<string, unknown> | null = null;
+      let failFirst = true;
+
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
+        const method = init?.method ?? "GET";
+        if (url.includes("/api/v1/auth/forgot-password") && method === "POST") {
+          capturedPayload = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+          if (failFirst) {
+            failFirst = false;
+            return jsonResponse({ detail: "Too many reset requests" }, 429);
+          }
+          return jsonResponse(
+            {
+              status: "accepted",
+              message:
+                "If an active account exists for that email address, a password reset link has been sent.",
+            },
+            202,
+          );
+        }
+        return jsonResponse({});
+      });
+
+      renderAtRoute("/forgot-password");
+      expect(
+        await screen.findByRole("heading", { name: /Reset your password/i }),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /Back to sign in/i })).toHaveAttribute(
+        "href",
+        "/login",
+      );
+
+      fireEvent.change(screen.getByLabelText(/Email address/i), {
+        target: { value: "  rider@example.com  " },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /Send reset link/i }));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(/Too many reset requests/i);
+      expect(capturedPayload).toEqual({ email: "rider@example.com" });
+
+      fireEvent.click(screen.getByRole("button", { name: /Send reset link/i }));
+      expect(await screen.findByRole("heading", { name: /Check your email/i })).toBeInTheDocument();
+      expect(screen.getByText("rider@example.com")).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /Back to sign in/i })).toHaveAttribute(
+        "href",
+        "/login",
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: /Send another link/i }));
+      expect(
+        await screen.findByRole("heading", { name: /Reset your password/i }),
+      ).toBeInTheDocument();
+    });
+  });
+
+  describe("ResetPasswordPage", () => {
+    it("renders missing token error without calling reset-password when token is absent", async () => {
+      window.history.replaceState({}, "", "/reset-password");
+      let resetCalls = 0;
+
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
+        if (url.includes("/api/v1/auth/reset-password")) {
+          resetCalls += 1;
+        }
+        return jsonResponse({});
+      });
+
+      renderAtRoute("/reset-password");
+      expect(await screen.findByText(/Missing password reset token\./i)).toBeInTheDocument();
+      expect(resetCalls).toBe(0);
+      expect(screen.getByRole("link", { name: /Request a new reset link/i })).toHaveAttribute(
+        "href",
+        "/forgot-password",
+      );
+    });
+
+    it("validates password criteria, toggles visibility, handles errors, and completes reset", async () => {
+      window.history.replaceState({}, "", "/reset-password?token=reset-tok");
+      let capturedPayload: Record<string, unknown> | null = null;
+      let failOnce = true;
+
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
+        const method = init?.method ?? "GET";
+        if (url.includes("/api/v1/auth/reset-password") && method === "POST") {
+          capturedPayload = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+          if (failOnce) {
+            failOnce = false;
+            return jsonResponse({ detail: "Invalid or expired password reset link" }, 400);
+          }
+          return jsonResponse({
+            ok: true,
+            message: "Password has been reset. Please sign in again.",
+          });
+        }
+        return jsonResponse({});
+      });
+
+      renderAtRoute("/reset-password");
+      expect(await screen.findByRole("heading", { name: /Set a new password/i })).toBeInTheDocument();
+
+      const newPasswordInput = screen.getByLabelText(/^New password$/i);
+      const confirmInput = screen.getByLabelText(/^Confirm new password$/i);
+
+      expect(newPasswordInput).toHaveAttribute("type", "password");
+      fireEvent.click(screen.getByRole("button", { name: /^Show$/i }));
+      expect(newPasswordInput).toHaveAttribute("type", "text");
+      expect(confirmInput).toHaveAttribute("type", "text");
+      fireEvent.click(screen.getByRole("button", { name: /^Hide$/i }));
+      expect(newPasswordInput).toHaveAttribute("type", "password");
+
+      expect(screen.getByText(/12\+ characters required/i)).toBeInTheDocument();
+
+      fireEvent.change(newPasswordInput, { target: { value: "short" } });
+      fireEvent.change(confirmInput, { target: { value: "short" } });
+      fireEvent.click(screen.getByRole("button", { name: /Reset password/i }));
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        /Password must be at least 12 characters long\./i,
+      );
+      expect(capturedPayload).toBeNull();
+
+      fireEvent.change(newPasswordInput, { target: { value: "new-alpine-password-12" } });
+      fireEvent.change(confirmInput, { target: { value: "mismatch-password-12" } });
+      expect(screen.getByText(/Passwords do not match/i)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: /Reset password/i }));
+      expect(await screen.findByRole("alert")).toHaveTextContent(/Passwords do not match\./i);
+      expect(capturedPayload).toBeNull();
+
+      fireEvent.change(confirmInput, { target: { value: "new-alpine-password-12" } });
+      expect(screen.getByText(/Passwords match/i)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: /Reset password/i }));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        /Invalid or expired password reset link/i,
+      );
+      expect(capturedPayload).toEqual({
+        token: "reset-tok",
+        new_password: "new-alpine-password-12",
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: /Reset password/i }));
+      expect(
+        await screen.findByRole("heading", { name: /Password reset complete/i }),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /Sign in with new password/i })).toHaveAttribute(
+        "href",
+        "/login",
+      );
+    });
+  });
+
+  describe("AccountPage", () => {
+    it("redirects to /login when unauthenticated", async () => {
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
+        if (url.includes("/api/v1/auth/me")) {
+          return jsonResponse({ detail: "Not authenticated" }, 401);
+        }
+        if (url.includes("/api/v1/public-config")) {
+          return jsonResponse({ dev_auth_enabled: false, strava_configured: false });
+        }
+        return jsonResponse({});
+      });
+
+      const { router } = renderAtRoute("/account");
+      await waitFor(() => {
+        expect(router.state.location.pathname).toBe("/login");
+      });
+    });
+
+    it("changes password, refreshes sessions, revokes another session, and signs out all devices", async () => {
+      let sessions = [
+        {
+          id: "sess-current-1111",
+          created_at: "2026-11-18T10:00:00Z",
+          expires_at: "2026-11-25T10:00:00Z",
+          is_current: true,
+        },
+        {
+          id: "sess-other-2222",
+          created_at: "2026-11-17T09:00:00Z",
+          expires_at: "2026-11-24T09:00:00Z",
+          is_current: false,
+        },
+        {
+          id: "sess-other-3333",
+          created_at: "2026-11-16T08:00:00Z",
+          expires_at: "2026-11-23T08:00:00Z",
+          is_current: false,
+        },
+      ];
+      let changePasswordPayload: Record<string, unknown> | null = null;
+      let revokedSessionId: string | null = null;
+      let logoutAllCalls = 0;
+
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
+        const method = init?.method ?? "GET";
+        if (url.includes("/api/v1/public-config")) {
+          return jsonResponse({ dev_auth_enabled: false, strava_configured: false });
+        }
+        if (url.includes("/api/v1/auth/me")) {
+          return jsonResponse({
+            user: {
+              id: "u-1",
+              email: "rider@example.com",
+              display_name: "Rider",
+              strava_connected: false,
+            },
+            csrf_token: "csrf-acct",
+            dev_auth_enabled: false,
+          });
+        }
+        if (url.endsWith("/api/v1/auth/sessions") && method === "GET") {
+          return jsonResponse(sessions);
+        }
+        if (url.includes("/api/v1/auth/change-password") && method === "POST") {
+          changePasswordPayload = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+          sessions = sessions.filter((item) => item.id !== "sess-other-3333");
+          return jsonResponse({ ok: true, revoked_sessions_count: 1 });
+        }
+        if (url.includes("/api/v1/auth/sessions/sess-other-2222") && method === "DELETE") {
+          revokedSessionId = "sess-other-2222";
+          sessions = sessions.filter((item) => item.id !== "sess-other-2222");
+          return jsonResponse({ ok: true });
+        }
+        if (url.includes("/api/v1/auth/logout-all") && method === "POST") {
+          logoutAllCalls += 1;
+          return jsonResponse({ ok: true, revoked_sessions_count: sessions.length });
+        }
+        return jsonResponse({});
+      });
+
+      const { router, queryClient } = renderAtRoute("/account");
+      const clearSpy = vi.spyOn(queryClient, "clear");
+
+      expect(await screen.findByRole("heading", { name: /Account security/i })).toBeInTheDocument();
+      expect(await screen.findByText("Current session")).toBeInTheDocument();
+      expect(screen.getAllByRole("button", { name: /^Revoke$/i })).toHaveLength(2);
+
+      fireEvent.click(screen.getByRole("button", { name: /^Show$/i }));
+      expect(screen.getByLabelText(/^New password$/i)).toHaveAttribute("type", "text");
+      fireEvent.click(screen.getByRole("button", { name: /^Hide$/i }));
+      expect(screen.getByLabelText(/^New password$/i)).toHaveAttribute("type", "password");
+
+      fireEvent.change(screen.getByLabelText(/^Current password$/i), {
+        target: { value: "old-alpine-password" },
+      });
+      fireEvent.change(screen.getByLabelText(/^New password$/i), {
+        target: { value: "new-alpine-password-12" },
+      });
+      fireEvent.change(screen.getByLabelText(/^Confirm new password$/i), {
+        target: { value: "different-password-12" },
+      });
+      expect(screen.getByText(/Passwords do not match/i)).toBeInTheDocument();
+
+      fireEvent.change(screen.getByLabelText(/^Confirm new password$/i), {
+        target: { value: "new-alpine-password-12" },
+      });
+      expect(screen.getByText(/Passwords match/i)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: /Update password/i }));
+
+      expect(await screen.findByRole("status")).toHaveTextContent(/Password updated\./i);
+      expect(changePasswordPayload).toEqual({
+        current_password: "old-alpine-password",
+        new_password: "new-alpine-password-12",
+      });
+
+      await waitFor(() => {
+        expect(screen.getAllByRole("button", { name: /^Revoke$/i })).toHaveLength(1);
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: /^Revoke$/i }));
+      await waitFor(() => {
+        expect(revokedSessionId).toBe("sess-other-2222");
+        expect(screen.queryByRole("button", { name: /^Revoke$/i })).not.toBeInTheDocument();
+      });
+      expect(
+        screen
+          .getAllByRole("status")
+          .some((node) => /Session revoked\./i.test(node.textContent ?? "")),
+      ).toBe(true);
+
+      fireEvent.click(screen.getByRole("button", { name: /Sign out all devices/i }));
+      await waitFor(() => {
+        expect(logoutAllCalls).toBe(1);
+        expect(clearSpy).toHaveBeenCalled();
+        expect(router.state.location.pathname).toBe("/login");
+      });
     });
   });
 });

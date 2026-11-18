@@ -83,6 +83,54 @@ export interface RegisterRequest {
   invite_code: string;
 }
 
+export interface RegisterResponse {
+  status: "verification_required";
+  email: string;
+  message: string;
+}
+
+export interface ResendVerificationResponse {
+  status: "accepted";
+  message: string;
+}
+
+export interface ForgotPasswordResponse {
+  status: "accepted";
+  message: string;
+}
+
+export interface ResetPasswordRequest {
+  token: string;
+  new_password: string;
+}
+
+export interface ResetPasswordResponse {
+  ok: boolean;
+  message: string;
+}
+
+export interface ChangePasswordRequest {
+  current_password: string;
+  new_password: string;
+}
+
+export interface ChangePasswordResponse {
+  ok: boolean;
+  revoked_sessions_count: number;
+}
+
+export interface AuthSessionOut {
+  id: string;
+  created_at: string;
+  expires_at: string;
+  is_current: boolean;
+}
+
+export interface LogoutAllResponse {
+  ok: boolean;
+  revoked_sessions_count: number;
+}
+
 export interface UserOut {
   id: string;
   email: string;

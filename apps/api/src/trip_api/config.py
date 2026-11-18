@@ -37,6 +37,16 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     dev_auth_enabled: bool = True
     registration_invite_code: str = ""
+    public_base_url: str = "http://localhost:5173"
+
+    smtp_host: str = ""
+    smtp_port: int = Field(default=587, ge=1, le=65535)
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = "noreply@trip-animator.local"
+    smtp_use_tls: bool = True
+    email_verification_ttl_hours: int = Field(default=24, ge=1, le=168)
+    password_reset_ttl_minutes: int = Field(default=60, ge=5, le=1440)
 
     database_url: str = (
         "postgresql+psycopg://trip_app:dev-postgres-password-change-me@localhost:5432/trip_animator"
@@ -87,6 +97,16 @@ class Settings(BaseSettings):
     rate_limit_register_max: int = 10
     rate_limit_register_account_max: int = 5
     rate_limit_register_window_s: int = 60
+    rate_limit_verify_email_max: int = 20
+    rate_limit_verify_email_window_s: int = 60
+    rate_limit_resend_verification_max: int = 5
+    rate_limit_resend_verification_account_max: int = 3
+    rate_limit_resend_verification_window_s: int = 60
+    rate_limit_forgot_password_max: int = 5
+    rate_limit_forgot_password_account_max: int = 3
+    rate_limit_forgot_password_window_s: int = 60
+    rate_limit_reset_password_max: int = 10
+    rate_limit_reset_password_window_s: int = 60
     rate_limit_gpx_max: int = 20
     rate_limit_gpx_window_s: int = 60
     rate_limit_photo_max: int = 60

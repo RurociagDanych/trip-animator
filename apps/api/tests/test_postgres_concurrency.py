@@ -170,13 +170,20 @@ def pg_app_factory(
         eng.dispose()
 
 
-def _create_pg_user(sf: sessionmaker[Session], email: str, password: str = _DEFAULT_PW) -> User:
+def _create_pg_user(
+    sf: sessionmaker[Session],
+    email: str,
+    password: str = _DEFAULT_PW,
+    *,
+    verified: bool = True,
+) -> User:
     with sf() as db:
         user = User(
             email=email.lower(),
             display_name=email.split("@", 1)[0],
             password_hash=hash_password(password),
             is_active=True,
+            email_verified_at=datetime.now(UTC) if verified else None,
         )
         db.add(user)
         db.commit()
@@ -198,6 +205,8 @@ def test_postgres_alembic_upgrade_downgrade_upgrade_roundtrip(pg_temp_db_url: st
     expected_tables = {
         "users",
         "sessions",
+        "email_verification_tokens",
+        "password_reset_tokens",
         "oauth_states",
         "oauth_connections",
         "projects",
@@ -247,7 +256,7 @@ def test_postgres_alembic_upgrade_downgrade_upgrade_roundtrip(pg_temp_db_url: st
         assert expected_tables <= set(inspect(engine_reup).get_table_names())
         with engine_reup.connect() as conn:
             ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-            assert ver == "0004_etl_chunks_ingest"
+            assert ver == "0006_password_reset_tokens"
     finally:
         engine_reup.dispose()
 

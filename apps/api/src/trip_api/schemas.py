@@ -38,6 +38,66 @@ class RegisterRequest(BaseModel):
     invite_code: str = Field(min_length=1, max_length=256)
 
 
+class RegisterResponse(BaseModel):
+    status: Literal["verification_required"] = "verification_required"
+    email: str
+    message: str
+
+
+class VerifyEmailRequest(BaseModel):
+    token: str = Field(min_length=1, max_length=256)
+
+
+class ResendVerificationRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+
+
+class ResendVerificationResponse(BaseModel):
+    status: Literal["accepted"] = "accepted"
+    message: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+
+
+class ForgotPasswordResponse(BaseModel):
+    status: Literal["accepted"] = "accepted"
+    message: str
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=12, max_length=256)
+
+
+class ResetPasswordResponse(BaseModel):
+    ok: bool = True
+    message: str
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=12, max_length=256)
+
+
+class ChangePasswordResponse(BaseModel):
+    ok: bool = True
+    revoked_sessions_count: int = 0
+
+
+class AuthSessionOut(BaseModel):
+    id: uuid.UUID
+    created_at: datetime
+    expires_at: datetime
+    is_current: bool
+
+
+class LogoutAllResponse(BaseModel):
+    ok: bool = True
+    revoked_sessions_count: int = 0
+
+
 class UserOut(BaseModel):
     id: uuid.UUID
     email: str

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -60,7 +61,9 @@ class AppHarness:
     store: LocalObjectStore
     db_path: Path
 
-    def create_user(self, email: str, password: str | None = None) -> User:
+    def create_user(
+        self, email: str, password: str | None = None, *, verified: bool = True
+    ) -> User:
         pw = password or _DEFAULT_PW
         with self.session_factory() as db:
             user = User(
@@ -68,6 +71,7 @@ class AppHarness:
                 display_name=email.split("@", 1)[0],
                 password_hash=hash_password(pw),
                 is_active=True,
+                email_verified_at=datetime.now(UTC) if verified else None,
             )
             db.add(user)
             db.commit()
