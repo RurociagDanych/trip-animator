@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     app_env: Literal["development", "test", "production"] = "development"
     log_level: str = "INFO"
     dev_auth_enabled: bool = True
+    registration_invite_code: str = ""
 
     database_url: str = (
         "postgresql+psycopg://trip_app:dev-postgres-password-change-me@localhost:5432/trip_animator"
@@ -83,6 +84,9 @@ class Settings(BaseSettings):
     rate_limit_login_max: int = 10
     rate_limit_login_account_max: int = 10
     rate_limit_login_window_s: int = 60
+    rate_limit_register_max: int = 10
+    rate_limit_register_account_max: int = 5
+    rate_limit_register_window_s: int = 60
     rate_limit_gpx_max: int = 20
     rate_limit_gpx_window_s: int = 60
     rate_limit_photo_max: int = 60
@@ -107,6 +111,16 @@ class Settings(BaseSettings):
         default="https://tiles.openfreemap.org",
         alias="MAP_TILE_ALLOWLIST",
     )
+
+    @property
+    def registration_invite_codes(self) -> tuple[str, ...]:
+        return tuple(
+            code.strip() for code in self.registration_invite_code.split(",") if code.strip()
+        )
+
+    @property
+    def registration_enabled(self) -> bool:
+        return len(self.registration_invite_codes) > 0
 
     @property
     def allowed_origins(self) -> list[str]:

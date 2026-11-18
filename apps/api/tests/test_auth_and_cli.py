@@ -19,7 +19,15 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, inspect, select
 from starlette.requests import Request
 from trip_api.cli import main as cli_main
-from trip_api.db import OAuthConnection, RenderJob, SessionRecord, User, create_db_engine
+from trip_api.db import (
+    AuditEvent,
+    OAuthConnection,
+    RateLimitRecord,
+    RenderJob,
+    SessionRecord,
+    User,
+    create_db_engine,
+)
 from trip_api.deps import get_client_ip
 from trip_api.main import create_app
 from trip_api.security import hash_password, hash_session_token, verify_password
@@ -1010,3 +1018,235 @@ async def test_login_dual_ip_and_normalized_account_rate_limit(
     assert f"login:acct:{expected_hash}" in keys
     assert any(k.startswith("login:ip:") for k in keys)
     assert all("target.user@example.com" not in k for k in keys)
+
+
+def test_public_config_registration_enabled_flag(make_harness: HarnessFactory) -> None:
+    default_h = make_harness()
+    default_client = TestClient(default_h.app)
+    default_cfg = default_client.get("/api/v1/public-config")
+    assert default_cfg.status_code == 200
+    assert default_cfg.json()["registration_enabled"] is False
+
+    blank_h = make_harness(registration_invite_code=" ,  , ")
+    blank_cfg = TestClient(blank_h.app).get("/api/v1/public-config")
+    assert blank_cfg.status_code == 200
+    assert blank_cfg.json()["registration_enabled"] is False
+
+    enabled_h = make_harness(registration_invite_code="alpine-2026, summit-99")
+    enabled_cfg = TestClient(enabled_h.app).get("/api/v1/public-config")
+    assert enabled_cfg.status_code == 200
+    assert enabled_cfg.json()["registration_enabled"] is True
+
+
+def test_register_invite_code_lifecycle_validation_and_conflicts(
+    make_harness: HarnessFactory,
+) -> None:
+    # 1. Registration disabled by default -> 403
+    disabled_h = make_harness()
+    disabled_client = TestClient(disabled_h.app)
+    disabled_resp = disabled_client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "new@example.com",
+            "display_name": "New Rider",
+            "password": "valid-password-1234",
+            "invite_code": "any-code",
+        },
+    )
+    assert disabled_resp.status_code == 403
+    assert disabled_resp.json()["detail"] == "Account registration is disabled"
+
+    # 2. Single invite code: wrong code -> 403, short password -> 422, bad email -> 422
+    single_h = make_harness(registration_invite_code="alpine-2026")
+    single_client = TestClient(single_h.app)
+
+    wrong_code = single_client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "rider1@example.com",
+            "display_name": "Rider One",
+            "password": "valid-password-1234",
+            "invite_code": "wrong-code",
+        },
+    )
+    assert wrong_code.status_code == 403
+    assert wrong_code.json()["detail"] == "Invalid registration invite code"
+
+    short_pw = single_client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "rider1@example.com",
+            "display_name": "Rider One",
+            "password": "short-pw",
+            "invite_code": "alpine-2026",
+        },
+    )
+    assert short_pw.status_code == 422
+
+    for bad_email in ("not-an-email", "@example.com", "rider@"):
+        invalid_email_resp = single_client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": bad_email,
+                "display_name": "Rider One",
+                "password": "valid-password-1234",
+                "invite_code": "alpine-2026",
+            },
+        )
+        assert invalid_email_resp.status_code == 422
+
+    # Valid registration with single invite code -> 201 + cookie + CSRF + /me + audit event
+    ok_resp = single_client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "  Rider.One@Example.COM  ",
+            "display_name": "  Alpine Explorer  ",
+            "password": "alpine-secret-password-123",
+            "invite_code": "alpine-2026",
+        },
+    )
+    assert ok_resp.status_code == 201, ok_resp.text
+    body = ok_resp.json()
+    assert body["user"]["email"] == "rider.one@example.com"
+    assert body["user"]["display_name"] == "Alpine Explorer"
+    assert "trip_session" in single_client.cookies
+    csrf_header = ok_resp.headers.get("x-csrf-token")
+    assert csrf_header is not None
+    assert csrf_header == body["csrf_token"]
+
+    me_resp = single_client.get("/api/v1/auth/me")
+    assert me_resp.status_code == 200
+    assert me_resp.json()["user"]["email"] == "rider.one@example.com"
+
+    with single_h.session_factory() as db:
+        audit_events = db.scalars(
+            select(AuditEvent).where(AuditEvent.event_type == "auth.register")
+        ).all()
+        assert len(audit_events) == 1
+        assert str(audit_events[0].user_id) == body["user"]["id"]
+
+    # Duplicate email (normalized) -> 409
+    dup_resp = TestClient(single_h.app).post(
+        "/api/v1/auth/register",
+        json={
+            "email": "rider.one@example.com",
+            "display_name": "Duplicate",
+            "password": "another-valid-password-123",
+            "invite_code": "alpine-2026",
+        },
+    )
+    assert dup_resp.status_code == 409
+    assert dup_resp.json()["detail"] == "An account with this email already exists"
+
+    # 3. Comma-separated invite codes accept any listed code
+    multi_h = make_harness(registration_invite_code="first-code, second-code , third-code")
+    for idx, code in enumerate(("first-code", "second-code", "third-code"), start=1):
+        c = TestClient(multi_h.app)
+        resp = c.post(
+            "/api/v1/auth/register",
+            json={
+                "email": f"multi{idx}@example.com",
+                "display_name": f"Multi {idx}",
+                "password": "multi-code-password-123",
+                "invite_code": code,
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        assert c.get("/api/v1/auth/me").status_code == 200
+
+
+async def test_register_ip_and_account_rate_limiting(
+    make_harness: HarnessFactory,
+) -> None:
+    import hashlib
+
+    # 1. Per-IP rate limit
+    ip_h = make_harness(
+        registration_invite_code="alpine-2026",
+        rate_limit_register_max=2,
+        rate_limit_register_account_max=10,
+        rate_limit_register_window_s=60,
+    )
+    ip_client = TestClient(ip_h.app)
+    for idx in range(2):
+        res = ip_client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": f"ip-limit-{idx}@example.com",
+                "display_name": "IP Test",
+                "password": "valid-password-1234",
+                "invite_code": "wrong-code",
+            },
+        )
+        assert res.status_code == 403
+
+    ip_blocked = ip_client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "ip-limit-2@example.com",
+            "display_name": "IP Test",
+            "password": "valid-password-1234",
+            "invite_code": "alpine-2026",
+        },
+    )
+    assert ip_blocked.status_code == 429
+    assert "retry-after" in ip_blocked.headers
+
+    # 2. Per-account normalized rate limit across distinct IPs
+    acct_h = make_harness(
+        registration_invite_code="alpine-2026",
+        rate_limit_register_max=20,
+        rate_limit_register_account_max=2,
+        rate_limit_register_window_s=60,
+    )
+    proxied_app: Any = ProxyHeadersMiddleware(cast(Any, acct_h.app), trusted_hosts=["127.0.0.1"])
+    transport = httpx.ASGITransport(app=proxied_app, client=("127.0.0.1", 54321))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        for idx, email_variant in enumerate(("  TARGET@Example.COM ", "target@example.com")):
+            r = await client.post(
+                "/api/v1/auth/register",
+                json={
+                    "email": email_variant,
+                    "display_name": "Target",
+                    "password": "valid-password-1234",
+                    "invite_code": "wrong-code",
+                },
+                headers={"X-Forwarded-For": f"198.51.100.{idx + 1}"},
+            )
+            assert r.status_code == 403
+
+        acct_blocked = await client.post(
+            "/api/v1/auth/register",
+            json={
+                "email": "target@example.com",
+                "display_name": "Target",
+                "password": "valid-password-1234",
+                "invite_code": "alpine-2026",
+            },
+            headers={"X-Forwarded-For": "198.51.100.99"},
+        )
+        assert acct_blocked.status_code == 429
+        assert "retry-after" in acct_blocked.headers
+
+    expected_hash = hashlib.sha256(b"target@example.com").hexdigest()[:32]
+    with acct_h.session_factory() as db:
+        keys = [r.bucket_key for r in db.scalars(select(RateLimitRecord)).all()]
+    assert f"register:acct:{expected_hash}" in keys
+    assert any(k.startswith("register:ip:") for k in keys)
+
+
+def test_compose_and_env_example_expose_invite_and_caddy_variables() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    compose_text = (repo_root / "infra" / "compose.yaml").read_text(encoding="utf-8")
+    env_example_text = (repo_root / ".env.example").read_text(encoding="utf-8")
+
+    expected_vars = (
+        "REGISTRATION_INVITE_CODE",
+        "CADDY_HTTP_PUBLISH",
+        "CADDY_HTTPS_PUBLISH",
+        "DOMAIN",
+        "COMPOSE_ALLOWED_ORIGINS",
+    )
+    for var_name in expected_vars:
+        assert var_name in compose_text, f"{var_name} missing from infra/compose.yaml"
+        assert var_name in env_example_text, f"{var_name} missing from .env.example"

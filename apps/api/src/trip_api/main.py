@@ -273,6 +273,7 @@ def create_app(
     async def public_config() -> dict[str, object]:
         return {
             "dev_auth_enabled": cfg.dev_auth_enabled and cfg.app_env != "production",
+            "registration_enabled": cfg.registration_enabled,
             "strava_configured": bool(cfg.strava_client_id),
             "google_photos_configured": bool(cfg.google_client_id and cfg.google_client_secret),
         }

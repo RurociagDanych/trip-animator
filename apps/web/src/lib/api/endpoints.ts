@@ -20,6 +20,7 @@ import type {
   ProjectUpdateRequest,
   PublicConfigOut,
   PublicProjectOut,
+  RegisterRequest,
   RenderJobOut,
   RenderSpecV2,
   SessionInfoOut,
@@ -55,6 +56,9 @@ export const authApi = {
   },
   login(email: string, password: string): Promise<SessionInfoOut> {
     return apiClient.post<SessionInfoOut>("/api/v1/auth/login", { email, password });
+  },
+  register(payload: RegisterRequest): Promise<SessionInfoOut> {
+    return apiClient.post<SessionInfoOut>("/api/v1/auth/register", payload);
   },
   devLogin(): Promise<SessionInfoOut> {
     return apiClient.post<SessionInfoOut>("/api/v1/auth/dev-login");

@@ -335,6 +335,11 @@ describe("Route tests: DashboardPage, LoginPage, ShareViewPage, StravaCallbackPa
 
       const { router } = renderAtRoute("/login");
       expect(await screen.findByRole("heading", { name: /Sign in to workspace/i })).toBeInTheDocument();
+      expect(
+        screen.queryByText(/Same-origin session cookies protected by CSRF verification\./i),
+      ).not.toBeInTheDocument();
+      expect(screen.getByText(/Access your multi-day GPX and Strava route projects\./i)).toBeInTheDocument();
+      expect(screen.queryByRole("tab", { name: /Create account/i })).not.toBeInTheDocument();
 
       fireEvent.change(screen.getByLabelText(/Email address/i), {
         target: { value: "rider@example.com" },
@@ -352,6 +357,175 @@ describe("Route tests: DashboardPage, LoginPage, ShareViewPage, StravaCallbackPa
       fireEvent.click(screen.getByRole("button", { name: /^Sign in$/i }));
 
       await waitFor(() => {
+        expect(router.state.location.pathname).toBe("/");
+      });
+    });
+
+    it("hides Create account tab when registration_enabled is false and supports password visibility toggle", async () => {
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
+        if (url.includes("/api/v1/public-config")) {
+          return jsonResponse({
+            dev_auth_enabled: false,
+            registration_enabled: false,
+            strava_configured: false,
+          });
+        }
+        return jsonResponse({}, 401);
+      });
+
+      renderAtRoute("/login");
+      expect(await screen.findByRole("heading", { name: /Sign in to workspace/i })).toBeInTheDocument();
+      expect(
+        screen.queryByText(/Same-origin session cookies protected by CSRF verification\./i),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByRole("tablist", { name: /Authentication mode/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole("tab", { name: /Create account/i })).not.toBeInTheDocument();
+
+      const passwordInput = screen.getByLabelText(/Password/i);
+      expect(passwordInput).toHaveAttribute("type", "password");
+      fireEvent.click(screen.getByRole("button", { name: /^Show$/i }));
+      expect(passwordInput).toHaveAttribute("type", "text");
+      fireEvent.click(screen.getByRole("button", { name: /^Hide$/i }));
+      expect(passwordInput).toHaveAttribute("type", "password");
+    });
+
+    it("validates registration fields, surfaces API errors, and redirects after successful registration", async () => {
+      let registered = false;
+      let capturedPayload: Record<string, unknown> | null = null;
+
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
+        const method = init?.method ?? "GET";
+        if (url.includes("/api/v1/public-config")) {
+          return jsonResponse({
+            dev_auth_enabled: false,
+            registration_enabled: true,
+            strava_configured: false,
+          });
+        }
+        if (url.includes("/api/v1/auth/register") && method === "POST") {
+          const body = JSON.parse(String(init?.body ?? "{}")) as {
+            email?: string;
+            display_name?: string;
+            password?: string;
+            invite_code?: string;
+          };
+          capturedPayload = body;
+          if (body.invite_code === "wrong-code") {
+            return jsonResponse({ detail: "Invalid registration invite code" }, 403);
+          }
+          registered = true;
+          return jsonResponse(
+            {
+              user: {
+                id: "u-new",
+                email: body.email ?? "alpine@example.com",
+                display_name: body.display_name ?? "Alpine Explorer",
+                strava_connected: false,
+              },
+              csrf_token: "csrf-register",
+              dev_auth_enabled: false,
+            },
+            201,
+          );
+        }
+        if (url.includes("/api/v1/auth/me")) {
+          if (!registered) {
+            return jsonResponse({ detail: "Not authenticated" }, 401);
+          }
+          return jsonResponse({
+            user: {
+              id: "u-new",
+              email: "alpine@example.com",
+              display_name: "Alpine Explorer",
+              strava_connected: false,
+            },
+            csrf_token: "csrf-register",
+            dev_auth_enabled: false,
+          });
+        }
+        if (url.endsWith("/api/v1/projects")) {
+          return jsonResponse([]);
+        }
+        return jsonResponse({});
+      });
+
+      const { router } = renderAtRoute("/login");
+      const createTab = await screen.findByRole("tab", { name: /Create account/i });
+      expect(screen.getByRole("tablist", { name: /Authentication mode/i })).toBeInTheDocument();
+      fireEvent.click(createTab);
+
+      expect(await screen.findByRole("heading", { name: /Create your account/i })).toBeInTheDocument();
+      expect(
+        screen.getByText(/Enter your invite code to set up your personal workspace\./i),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByText(/Same-origin session cookies protected by CSRF verification\./i),
+      ).not.toBeInTheDocument();
+
+      fireEvent.change(screen.getByLabelText(/Email address/i), {
+        target: { value: "alpine@example.com" },
+      });
+      fireEvent.change(screen.getByLabelText(/Display name/i), {
+        target: { value: "Alpine Explorer" },
+      });
+      fireEvent.change(screen.getByLabelText(/^Password$/i), {
+        target: { value: "too-short" },
+      });
+      fireEvent.change(screen.getByLabelText(/Confirm password/i), {
+        target: { value: "too-short" },
+      });
+      fireEvent.change(screen.getByLabelText(/Invite code/i), {
+        target: { value: "alpine-2026" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /^Create account$/i }));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        /Password must be at least 12 characters long\./i,
+      );
+      expect(capturedPayload).toBeNull();
+
+      // Mismatched passwords show inline feedback and block submission
+      fireEvent.change(screen.getByLabelText(/^Password$/i), {
+        target: { value: "secure-alpine-pass" },
+      });
+      fireEvent.change(screen.getByLabelText(/Confirm password/i), {
+        target: { value: "different-alpine-pass" },
+      });
+      expect(screen.getByText(/Passwords do not match/i)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: /^Create account$/i }));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(/Passwords do not match\./i);
+      expect(capturedPayload).toBeNull();
+
+      // Invalid invite code surfaces API 403 error
+      fireEvent.change(screen.getByLabelText(/Confirm password/i), {
+        target: { value: "secure-alpine-pass" },
+      });
+      fireEvent.change(screen.getByLabelText(/Invite code/i), {
+        target: { value: "wrong-code" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /^Create account$/i }));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        /Invalid registration invite code/i,
+      );
+
+      // Valid invite code registers and redirects to dashboard
+      fireEvent.change(screen.getByLabelText(/Invite code/i), {
+        target: { value: "alpine-2026" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /^Create account$/i }));
+
+      await waitFor(() => {
+        expect(registered).toBe(true);
+        expect(capturedPayload).toEqual({
+          email: "alpine@example.com",
+          display_name: "Alpine Explorer",
+          password: "secure-alpine-pass",
+          invite_code: "alpine-2026",
+        });
         expect(router.state.location.pathname).toBe("/");
       });
     });

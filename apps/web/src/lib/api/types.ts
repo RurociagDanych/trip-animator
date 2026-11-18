@@ -71,8 +71,16 @@ export interface HealthResponse {
 
 export interface PublicConfigOut {
   dev_auth_enabled: boolean;
+  registration_enabled?: boolean;
   strava_configured: boolean;
   google_photos_configured?: boolean;
+}
+
+export interface RegisterRequest {
+  email: string;
+  display_name: string;
+  password: string;
+  invite_code: string;
 }
 
 export interface UserOut {

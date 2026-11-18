@@ -1,8 +1,9 @@
-"""Authentication, session cookie, CSRF, and dev-login endpoints."""
+"""Authentication, invite-code registration, session cookie, CSRF, and dev-login endpoints."""
 
 from __future__ import annotations
 
 import hashlib
+import hmac
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -20,7 +21,7 @@ from trip_api.deps import (
     get_client_ip,
 )
 from trip_api.rate_limit import check_rate_limit
-from trip_api.schemas import LoginRequest, SessionInfoOut
+from trip_api.schemas import LoginRequest, RegisterRequest, SessionInfoOut
 from trip_api.security import (
     generate_opaque_token,
     hash_password,
@@ -33,6 +34,16 @@ router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
 # Precomputed valid Argon2id hash used for constant-time fallback when user is unknown.
 _DUMMY_ARGON2_HASH = hash_password("dummy-timing-guard-password-never-used")
+
+
+def _verify_invite_code(provided_code: str, valid_codes: tuple[str, ...]) -> bool:
+    """Compare an invite code against all configured codes in constant time."""
+    provided_bytes = provided_code.strip().encode("utf-8")
+    matched = False
+    for valid_code in valid_codes:
+        if hmac.compare_digest(provided_bytes, valid_code.encode("utf-8")):
+            matched = True
+    return matched
 
 
 def _issue_session(
@@ -106,6 +117,67 @@ def login(
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     db.add(AuditEvent(user_id=user.id, event_type="auth.login", metadata_json={}))
+    return _issue_session(db=db, response=response, settings=settings, user=user)
+
+
+@router.post("/register", response_model=SessionInfoOut, status_code=201)
+def register(
+    body: RegisterRequest,
+    request: Request,
+    response: Response,
+    db: DbSession,
+    settings: AppSettings,
+) -> SessionInfoOut:
+    client_ip = get_client_ip(request)
+    email = body.email.strip().lower()
+    email_hash = hashlib.sha256(email.encode("utf-8")).hexdigest()[:32]
+
+    check_rate_limit(
+        db,
+        bucket_key=f"register:ip:{client_ip}",
+        limit=settings.rate_limit_register_max,
+        window_seconds=settings.rate_limit_register_window_s,
+    )
+    check_rate_limit(
+        db,
+        bucket_key=f"register:acct:{email_hash}",
+        limit=settings.rate_limit_register_account_max,
+        window_seconds=settings.rate_limit_register_window_s,
+    )
+
+    if not settings.registration_enabled:
+        raise HTTPException(status_code=403, detail="Account registration is disabled")
+
+    if not _verify_invite_code(body.invite_code, settings.registration_invite_codes):
+        raise HTTPException(status_code=403, detail="Invalid registration invite code")
+
+    if "@" not in email or email.startswith("@") or email.endswith("@"):
+        raise HTTPException(status_code=422, detail="Invalid email address")
+
+    existing = db.scalar(select(User).where(User.email == email))
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="An account with this email already exists",
+        )
+
+    user = User(
+        email=email,
+        display_name=body.display_name.strip()[:120],
+        password_hash=hash_password(body.password),
+        is_active=True,
+    )
+    db.add(user)
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="An account with this email already exists",
+        ) from exc
+
+    db.add(AuditEvent(user_id=user.id, event_type="auth.register", metadata_json={}))
     return _issue_session(db=db, response=response, settings=settings, user=user)
 
 

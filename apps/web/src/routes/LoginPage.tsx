@@ -1,16 +1,26 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { AlertCircle, Compass, KeyRound, Lock } from "lucide-react";
-import { useState } from "react";
+import { AlertCircle, Check, Compass, Eye, EyeOff, KeyRound, Lock, UserPlus } from "lucide-react";
+import { useId, useState } from "react";
 import { ApiError } from "../lib/api/client";
 import { authApi, systemApi } from "../lib/api/endpoints";
 import type { PublicConfigOut } from "../lib/api/types";
 
+type AuthMode = "signin" | "register";
+
 export function LoginPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const passwordInputId = useId();
+  const confirmPasswordInputId = useId();
+
+  const [mode, setMode] = useState<AuthMode>("signin");
   const [email, setEmail] = useState("");
+  const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [inviteCode, setInviteCode] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [pending, setPending] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -21,14 +31,53 @@ export function LoginPage() {
   });
 
   const devAuthEnabled = publicConfigQuery.data?.dev_auth_enabled === true;
+  const registrationEnabled = publicConfigQuery.data?.registration_enabled === true;
+  const activeMode: AuthMode = registrationEnabled ? mode : "signin";
+  const passwordMeetsLength = password.length >= 12;
+  const passwordsMatch = confirmPassword.length > 0 && password === confirmPassword;
+  const passwordsMismatch = confirmPassword.length > 0 && password !== confirmPassword;
+
+  function switchMode(nextMode: AuthMode) {
+    setMode(nextMode);
+    setErrorMessage(null);
+  }
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setPending(true);
     setErrorMessage(null);
 
+    if (activeMode === "register") {
+      if (displayName.trim().length === 0) {
+        setErrorMessage("Display name is required.");
+        return;
+      }
+      if (password.length < 12) {
+        setErrorMessage("Password must be at least 12 characters long.");
+        return;
+      }
+      if (password !== confirmPassword) {
+        setErrorMessage("Passwords do not match.");
+        return;
+      }
+      if (inviteCode.trim().length === 0) {
+        setErrorMessage("Invite code is required.");
+        return;
+      }
+    }
+
+    setPending(true);
+
     try {
-      await authApi.login(email.trim(), password);
+      if (activeMode === "register") {
+        await authApi.register({
+          email: email.trim(),
+          display_name: displayName.trim(),
+          password,
+          invite_code: inviteCode.trim(),
+        });
+      } else {
+        await authApi.login(email.trim(), password);
+      }
       await queryClient.invalidateQueries({ queryKey: ["auth", "me"] });
       await navigate({ to: "/" });
     } catch (error) {
@@ -101,10 +150,49 @@ export function LoginPage() {
 
       <section className="flex items-center justify-center p-6 sm:p-10 lg:col-span-6">
         <div className="w-full max-w-sm space-y-6">
+          {registrationEnabled ? (
+            <div
+              role="tablist"
+              aria-label="Authentication mode"
+              className="grid grid-cols-2 gap-1 rounded-lg border border-border bg-surface p-1"
+            >
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeMode === "signin"}
+                onClick={() => switchMode("signin")}
+                className={
+                  activeMode === "signin"
+                    ? "rounded-md bg-elevated px-3 py-1.5 text-xs font-medium text-ink shadow-sm transition-colors"
+                    : "rounded-md px-3 py-1.5 text-xs font-medium text-ink-muted hover:text-ink transition-colors"
+                }
+              >
+                Sign in
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeMode === "register"}
+                onClick={() => switchMode("register")}
+                className={
+                  activeMode === "register"
+                    ? "rounded-md bg-elevated px-3 py-1.5 text-xs font-medium text-ink shadow-sm transition-colors"
+                    : "rounded-md px-3 py-1.5 text-xs font-medium text-ink-muted hover:text-ink transition-colors"
+                }
+              >
+                Create account
+              </button>
+            </div>
+          ) : null}
+
           <div className="space-y-1.5">
-            <h2 className="text-xl font-semibold tracking-tight text-ink">Sign in to workspace</h2>
+            <h2 className="text-xl font-semibold tracking-tight text-ink">
+              {activeMode === "register" ? "Create your account" : "Sign in to workspace"}
+            </h2>
             <p className="text-sm text-ink-muted">
-              Same-origin session cookies protected by CSRF verification.
+              {activeMode === "register"
+                ? "Enter your invite code to set up your personal workspace."
+                : "Access your multi-day GPX and Strava route projects."}
             </p>
           </div>
 
@@ -133,27 +221,127 @@ export function LoginPage() {
               />
             </label>
 
-            <label className="block space-y-1.5">
-              <span className="block text-xs font-medium text-ink-muted">Password</span>
-              <input
-                type="password"
-                name="password"
-                autoComplete="current-password"
-                required
-                value={password}
-                onChange={(event) => setPassword(event.currentTarget.value)}
-                placeholder="Enter your password"
-                className="w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-ink placeholder:text-ink-muted/60 focus:border-sky-accent focus:outline-none"
-              />
-            </label>
+            {activeMode === "register" ? (
+              <label className="block space-y-1.5">
+                <span className="block text-xs font-medium text-ink-muted">Display name</span>
+                <input
+                  type="text"
+                  name="display_name"
+                  autoComplete="name"
+                  required
+                  maxLength={120}
+                  value={displayName}
+                  onChange={(event) => setDisplayName(event.currentTarget.value)}
+                  placeholder="Alpine Explorer"
+                  className="w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-ink placeholder:text-ink-muted/60 focus:border-sky-accent focus:outline-none"
+                />
+              </label>
+            ) : null}
+
+            <div className="space-y-1.5">
+              <label htmlFor={passwordInputId} className="block text-xs font-medium text-ink-muted">
+                Password
+              </label>
+              <div className="relative">
+                <input
+                  id={passwordInputId}
+                  type={showPassword ? "text" : "password"}
+                  name="password"
+                  autoComplete={activeMode === "register" ? "new-password" : "current-password"}
+                  required
+                  minLength={activeMode === "register" ? 12 : undefined}
+                  value={password}
+                  onChange={(event) => setPassword(event.currentTarget.value)}
+                  placeholder={activeMode === "register" ? "Minimum 12 characters" : "Enter your password"}
+                  className="w-full rounded-md border border-border bg-surface py-2 pl-3 pr-10 text-sm text-ink placeholder:text-ink-muted/60 focus:border-sky-accent focus:outline-none"
+                />
+                <button
+                  type="button"
+                  aria-label={showPassword ? "Hide" : "Show"}
+                  onClick={() => setShowPassword((prev) => !prev)}
+                  className="absolute inset-y-0 right-0 flex items-center px-3 text-ink-muted hover:text-ink transition-colors"
+                >
+                  {showPassword ? (
+                    <EyeOff className="h-4 w-4" aria-hidden="true" />
+                  ) : (
+                    <Eye className="h-4 w-4" aria-hidden="true" />
+                  )}
+                </button>
+              </div>
+              {activeMode === "register" ? (
+                <p
+                  className={`flex items-center gap-1.5 text-xs ${
+                    passwordMeetsLength ? "text-teal-accent" : "text-ink-muted"
+                  }`}
+                >
+                  <Check
+                    className={`h-3.5 w-3.5 ${passwordMeetsLength ? "opacity-100" : "opacity-40"}`}
+                    aria-hidden="true"
+                  />
+                  <span>12+ characters required</span>
+                </p>
+              ) : null}
+            </div>
+
+            {activeMode === "register" ? (
+              <>
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor={confirmPasswordInputId}
+                    className="block text-xs font-medium text-ink-muted"
+                  >
+                    Confirm password
+                  </label>
+                  <input
+                    id={confirmPasswordInputId}
+                    type={showPassword ? "text" : "password"}
+                    name="confirm_password"
+                    autoComplete="new-password"
+                    required
+                    value={confirmPassword}
+                    onChange={(event) => setConfirmPassword(event.currentTarget.value)}
+                    placeholder="Re-enter your password"
+                    className="w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-ink placeholder:text-ink-muted/60 focus:border-sky-accent focus:outline-none"
+                  />
+                  {passwordsMismatch ? (
+                    <p className="text-xs text-amber-accent">Passwords do not match</p>
+                  ) : passwordsMatch ? (
+                    <p className="text-xs text-teal-accent">Passwords match</p>
+                  ) : null}
+                </div>
+
+                <label className="block space-y-1.5">
+                  <span className="block text-xs font-medium text-ink-muted">Invite code</span>
+                  <input
+                    type="text"
+                    name="invite_code"
+                    autoComplete="off"
+                    required
+                    value={inviteCode}
+                    onChange={(event) => setInviteCode(event.currentTarget.value)}
+                    placeholder="Enter invite code"
+                    className="w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-ink placeholder:text-ink-muted/60 focus:border-sky-accent focus:outline-none"
+                  />
+                </label>
+              </>
+            ) : null}
 
             <button
               type="submit"
               disabled={pending}
               className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-sky-accent px-4 py-2 text-sm font-medium text-canvas hover:bg-sky-accent/90 disabled:opacity-60 transition-colors"
             >
-              <Lock className="h-4 w-4" aria-hidden="true" />
-              <span>{pending ? "Signing in..." : "Sign in"}</span>
+              {activeMode === "register" ? (
+                <>
+                  <UserPlus className="h-4 w-4" aria-hidden="true" />
+                  <span>{pending ? "Creating account..." : "Create account"}</span>
+                </>
+              ) : (
+                <>
+                  <Lock className="h-4 w-4" aria-hidden="true" />
+                  <span>{pending ? "Signing in..." : "Sign in"}</span>
+                </>
+              )}
             </button>
           </form>
 

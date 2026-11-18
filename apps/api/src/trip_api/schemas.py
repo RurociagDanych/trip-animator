@@ -16,6 +16,9 @@ ProjectTitleStr = Annotated[
 StageNameStr = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)
 ]
+DisplayNameStr = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)
+]
 StageFormat = Literal["gpx", "fit", "tcx", "strava"]
 PhotoSourceType = Literal["upload", "google_photos"]
 PhotoMatchMethod = Literal["timestamp", "gps", "manual", "unmatched"]
@@ -26,6 +29,13 @@ ClimbCategory = Literal["HC", "Cat 1", "Cat 2", "Cat 3", "Cat 4"]
 class LoginRequest(BaseModel):
     email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=1, max_length=256)
+
+
+class RegisterRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    display_name: DisplayNameStr
+    password: str = Field(min_length=12, max_length=256)
+    invite_code: str = Field(min_length=1, max_length=256)
 
 
 class UserOut(BaseModel):
