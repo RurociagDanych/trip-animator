@@ -35,7 +35,6 @@ COPY apps/api ./apps/api
 COPY dbt ./dbt
 COPY airflow/src ./airflow/src
 COPY airflow/dags ./airflow/dags
-COPY data/ref ./data/ref
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ -f airflow/uv.lock ]; then \

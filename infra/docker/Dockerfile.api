@@ -30,7 +30,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY packages/telemetry ./packages/telemetry
 COPY apps/api ./apps/api
 COPY dbt ./dbt
-COPY data/ref ./data/ref
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ -f uv.lock ]; then \
