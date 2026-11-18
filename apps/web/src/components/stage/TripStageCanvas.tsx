@@ -42,10 +42,12 @@ import {
   clampFitTrackPadding,
   projectLngLatToScreen,
   solveStageLayout,
+  type ViewportPadding,
 } from "../../lib/geo/layout";
 import {
   TERRAIN_SOURCE_ID,
   buildDeckOverlayProps,
+  buildElevationCurtainData,
   buildMapLibreInitOptions,
   buildTerrariumDemSourceSpec,
   resolveMapStyleUrl,
@@ -598,6 +600,67 @@ interface ProjectedPoint {
   y: number;
 }
 
+interface ProjectedCameraSnapshot {
+  center: [number, number];
+  zoom: number;
+  pitch: number;
+  bearing: number;
+  padding?: ViewportPadding;
+}
+
+interface ManualCameraState {
+  boundsKey: string;
+  progressRatio: number;
+  camera: ProjectedCameraSnapshot;
+}
+
+function readMapCameraSnapshot(map: MapLibreMap): ProjectedCameraSnapshot | null {
+  const rawCenter =
+    typeof map.getCenter === "function"
+      ? (map.getCenter() as unknown as { lng?: number; lat?: number } | [number, number] | null)
+      : null;
+  const center: [number, number] | null = Array.isArray(rawCenter)
+    ? rawCenter.length >= 2 && Number.isFinite(rawCenter[0]) && Number.isFinite(rawCenter[1])
+      ? [rawCenter[0], rawCenter[1]]
+      : null
+    : rawCenter &&
+        typeof rawCenter === "object" &&
+        typeof rawCenter.lng === "number" &&
+        typeof rawCenter.lat === "number" &&
+        Number.isFinite(rawCenter.lng) &&
+        Number.isFinite(rawCenter.lat)
+      ? [rawCenter.lng, rawCenter.lat]
+      : null;
+  const zoom = typeof map.getZoom === "function" ? map.getZoom() : null;
+  const pitch = typeof map.getPitch === "function" ? map.getPitch() : 0;
+  const bearing = typeof map.getBearing === "function" ? map.getBearing() : 0;
+  const rawPadding = typeof map.getPadding === "function" ? map.getPadding() : undefined;
+  const padding: ViewportPadding | undefined =
+    rawPadding &&
+    typeof rawPadding === "object" &&
+    Number.isFinite(rawPadding.top) &&
+    Number.isFinite(rawPadding.bottom) &&
+    Number.isFinite(rawPadding.left) &&
+    Number.isFinite(rawPadding.right)
+      ? {
+          top: rawPadding.top ?? 0,
+          bottom: rawPadding.bottom ?? 0,
+          left: rawPadding.left ?? 0,
+          right: rawPadding.right ?? 0,
+        }
+      : undefined;
+  if (!center || typeof zoom !== "number" || !Number.isFinite(zoom)) {
+    return null;
+  }
+  return {
+    center,
+    zoom,
+    pitch: typeof pitch === "number" && Number.isFinite(pitch) ? pitch : 0,
+    bearing: typeof bearing === "number" && Number.isFinite(bearing) ? bearing : 0,
+    padding,
+  };
+}
+
 async function preloadAndDecodeImages(urls: readonly string[]): Promise<void> {
   const uniqueUrls = Array.from(new Set(urls.filter((u) => u.length > 0)));
   if (
@@ -659,11 +722,11 @@ export function TripStageCanvas({
   const loadedStyleRef = useRef<string | null>(null);
   const mapReadyPromiseRef = useRef<Promise<void>>(Promise.resolve());
   const fitAppliedBoundsRef = useRef<string | null>(null);
+  const suppressMoveEventRef = useRef(false);
+  const latestViewRef = useRef({ boundsKey: "", progressRatio: 0 });
   const [webglAvailable] = useState<boolean>(() => isWebGlSupported());
-  const [projectedStops, setProjectedStops] = useState<ProjectedStop[]>([]);
-  const [projectedPhotos, setProjectedPhotos] = useState<ProjectedPhoto[]>([]);
   const [fitCamera, setFitCamera] = useState<FitCameraSnapshot | null>(null);
-  const [projectedMarker, setProjectedMarker] = useState<ProjectedPoint | null>(null);
+  const [manualCamera, setManualCamera] = useState<ManualCameraState | null>(null);
   const [measuredHudSize, setMeasuredHudSize] = useState<{ width: number; height: number } | null>(
     null,
   );
@@ -868,6 +931,180 @@ export function TripStageCanvas({
     );
   }, [spec.show_photos, spec.visibility_mode, matchedPhotos, evaluated.progressRatio]);
 
+  const padKey = `${layout.fitPadding.top},${layout.fitPadding.bottom},${layout.fitPadding.left},${layout.fitPadding.right}`;
+  const boundsKey = `${evaluated.bounds.join(",")}|${spec.camera_mode}|${spec.camera_preset}|${cameraFrame.pitch.toFixed(2)}|${cameraFrame.bearing.toFixed(2)}|${keyframeZoomOffset.toFixed(2)}|${viewportSize.width}x${viewportSize.height}|${padKey}`;
+
+  const fullCurtainData = useMemo(
+    () =>
+      spec.elevation_curtain && spec.visibility_mode === "full" && stages.length > 0
+        ? buildElevationCurtainData(stages, spec.terrain_exaggeration)
+        : null,
+    [spec.elevation_curtain, spec.visibility_mode, stages, spec.terrain_exaggeration],
+  );
+
+  const activeManualCamera = useMemo<ProjectedCameraSnapshot | null>(() => {
+    if (!manualCamera || manualCamera.boundsKey !== boundsKey) {
+      return null;
+    }
+    if (
+      spec.camera_mode === "follow-marker" &&
+      manualCamera.progressRatio !== evaluated.progressRatio
+    ) {
+      return null;
+    }
+    return manualCamera.camera;
+  }, [manualCamera, boundsKey, spec.camera_mode, evaluated.progressRatio]);
+
+  const activeFitCamera = useMemo<ProjectedCameraSnapshot | null>(() => {
+    if (spec.camera_mode !== "fit-track" || !fitCamera || fitCamera.boundsKey !== boundsKey) {
+      return null;
+    }
+    return {
+      center: fitCamera.center,
+      zoom: fitCamera.zoom,
+      pitch: fitCamera.pitch,
+      bearing: fitCamera.bearing,
+    };
+  }, [spec.camera_mode, fitCamera, boundsKey]);
+
+  const activeFollowCamera = useMemo<ProjectedCameraSnapshot | null>(() => {
+    if (spec.camera_mode !== "follow-marker") {
+      return null;
+    }
+    const center = adaptiveFollow?.center ?? evaluated.markerPosition;
+    if (
+      !Array.isArray(center) ||
+      center.length < 2 ||
+      !Number.isFinite(center[0]) ||
+      !Number.isFinite(center[1]) ||
+      Math.abs(center[1]) > 90
+    ) {
+      return null;
+    }
+    const zoom = effectiveFollowZoom ?? 11.5;
+    if (!Number.isFinite(zoom)) {
+      return null;
+    }
+    return {
+      center,
+      zoom,
+      pitch: cameraFrame.pitch,
+      bearing: cameraFrame.bearing,
+      padding: layout.followPadding,
+    };
+  }, [
+    spec.camera_mode,
+    adaptiveFollow,
+    evaluated.markerPosition,
+    effectiveFollowZoom,
+    cameraFrame.pitch,
+    cameraFrame.bearing,
+    layout.followPadding,
+  ]);
+
+  const projectionCamera = activeManualCamera ?? activeFollowCamera ?? activeFitCamera;
+
+  const projectedStops = useMemo<ProjectedStop[]>(() => {
+    if (!webglAvailable || !projectionCamera) return [];
+    const reached = evaluated.overnightStops.filter(
+      (s) =>
+        s.reached &&
+        Number.isFinite(s.position[0]) &&
+        Number.isFinite(s.position[1]) &&
+        Math.abs(s.position[1]) <= 90,
+    );
+    if (reached.length === 0) return [];
+    const result: ProjectedStop[] = [];
+    for (const stop of reached) {
+      const scr = projectLngLatToScreen(
+        stop.position,
+        projectionCamera.center,
+        projectionCamera.zoom,
+        projectionCamera.pitch,
+        projectionCamera.bearing,
+        viewportSize.width,
+        viewportSize.height,
+        projectionCamera.padding,
+      );
+      if (scr.visible) {
+        result.push({ stop, x: scr.x, y: scr.y });
+      }
+    }
+    return result;
+  }, [
+    webglAvailable,
+    projectionCamera,
+    evaluated.overnightStops,
+    viewportSize.width,
+    viewportSize.height,
+  ]);
+
+  const projectedPhotos = useMemo<ProjectedPhoto[]>(() => {
+    if (!webglAvailable || !projectionCamera || reachedPhotos.length === 0) return [];
+    const result: ProjectedPhoto[] = [];
+    for (const photo of reachedPhotos) {
+      if (
+        photo.pinPosition === null ||
+        !Number.isFinite(photo.pinPosition[0]) ||
+        !Number.isFinite(photo.pinPosition[1]) ||
+        Math.abs(photo.pinPosition[1]) > 90
+      ) {
+        continue;
+      }
+      const scr = projectLngLatToScreen(
+        photo.pinPosition,
+        projectionCamera.center,
+        projectionCamera.zoom,
+        projectionCamera.pitch,
+        projectionCamera.bearing,
+        viewportSize.width,
+        viewportSize.height,
+        projectionCamera.padding,
+      );
+      if (scr.visible) {
+        result.push({ photo, x: scr.x, y: scr.y });
+      }
+    }
+    return result;
+  }, [
+    webglAvailable,
+    projectionCamera,
+    reachedPhotos,
+    viewportSize.width,
+    viewportSize.height,
+  ]);
+
+  const projectedMarker = useMemo<ProjectedPoint | null>(() => {
+    if (
+      !webglAvailable ||
+      !projectionCamera ||
+      !evaluated.activeStage ||
+      !Number.isFinite(evaluated.markerPosition[0]) ||
+      !Number.isFinite(evaluated.markerPosition[1]) ||
+      Math.abs(evaluated.markerPosition[1]) > 90
+    ) {
+      return null;
+    }
+    const scr = projectLngLatToScreen(
+      evaluated.markerPosition,
+      projectionCamera.center,
+      projectionCamera.zoom,
+      projectionCamera.pitch,
+      projectionCamera.bearing,
+      viewportSize.width,
+      viewportSize.height,
+      projectionCamera.padding,
+    );
+    return scr.visible ? { x: scr.x, y: scr.y } : null;
+  }, [
+    webglAvailable,
+    projectionCamera,
+    evaluated.activeStage,
+    evaluated.markerPosition,
+    viewportSize.width,
+    viewportSize.height,
+  ]);
+
   const is3dActive = is3dCameraActive(spec);
 
   // Initialize MapLibre + Deck.gl when WebGL is available (layout phase so camera/overlay commit runs on mount)
@@ -899,6 +1136,22 @@ export function TripStageCanvas({
     overlayRef.current = overlay;
     loadedStyleRef.current = spec.map_style;
     fitAppliedBoundsRef.current = null;
+
+    const handleManualMove = () => {
+      if (suppressMoveEventRef.current) {
+        return;
+      }
+      const snapshot = readMapCameraSnapshot(map);
+      if (!snapshot) {
+        return;
+      }
+      setManualCamera({
+        boundsKey: latestViewRef.current.boundsKey,
+        progressRatio: latestViewRef.current.progressRatio,
+        camera: snapshot,
+      });
+    };
+    map.on("move", handleManualMove);
 
     map.on("style.load", () => {
       sync3dBuildingsAndSky(map, is3dActive, spec.terrain_exaggeration, spec.map_style);
@@ -932,6 +1185,7 @@ export function TripStageCanvas({
     return () => {
       cancelled = true;
       fitAppliedBoundsRef.current = null;
+      map.off("move", handleManualMove);
       try {
         map.removeControl(overlay as unknown as maplibregl.IControl);
       } catch {
@@ -982,13 +1236,18 @@ export function TripStageCanvas({
     };
   }, [pinModeActive, onMapPinClick, webglAvailable]);
 
-  // Update Deck.gl layers, MapLibre camera, projected stop/photo badges & active marker synchronously in commit phase
+  // Update Deck.gl layers and MapLibre camera synchronously in commit phase
   useLayoutEffect(() => {
     const map = mapRef.current;
     const overlay = overlayRef.current;
     if (!map || !overlay) {
       return;
     }
+
+    latestViewRef.current = {
+      boundsKey,
+      progressRatio: evaluated.progressRatio,
+    };
 
     overlay.setProps(
       buildDeckOverlayProps(evaluated.visiblePaths, evaluated.markerPosition, {
@@ -1003,6 +1262,7 @@ export function TripStageCanvas({
         elevationCurtain: spec.elevation_curtain,
         terrainExaggeration: spec.terrain_exaggeration,
         elevationStages: stages,
+        elevationCurtainData: fullCurtainData,
         maxDistanceM:
           spec.visibility_mode === "full" ? undefined : evaluated.distanceTravelledM,
         transferArcs: evaluated.transferArcs,
@@ -1011,9 +1271,6 @@ export function TripStageCanvas({
         showClimbCallouts: spec.show_climb_callouts,
       }),
     );
-
-    const padKey = `${layout.fitPadding.top},${layout.fitPadding.bottom},${layout.fitPadding.left},${layout.fitPadding.right}`;
-    const boundsKey = `${evaluated.bounds.join(",")}|${spec.camera_mode}|${spec.camera_preset}|${cameraFrame.pitch.toFixed(2)}|${cameraFrame.bearing.toFixed(2)}|${keyframeZoomOffset.toFixed(2)}|${viewportSize.width}x${viewportSize.height}|${padKey}`;
 
     const hasValidBounds = evaluated.bounds.every(Number.isFinite);
     const targetCenter = adaptiveFollow?.center ?? evaluated.markerPosition;
@@ -1024,196 +1281,143 @@ export function TripStageCanvas({
       Number.isFinite(targetCenter[1]) &&
       Math.abs(targetCenter[1]) <= 90;
 
-    if (spec.camera_mode === "fit-track") {
-      if (hasValidBounds && fitAppliedBoundsRef.current !== boundsKey) {
-        fitAppliedBoundsRef.current = boundsKey;
-        const bounds: [[number, number], [number, number]] = [
-          [evaluated.bounds[0], evaluated.bounds[1]],
-          [evaluated.bounds[2], evaluated.bounds[3]],
-        ];
-        const zeroPadding = { top: 0, bottom: 0, left: 0, right: 0 };
-        const mapEl = typeof map.getContainer === "function" ? map.getContainer() : null;
-        const canvasW = Math.max(120, mapEl?.clientWidth || viewportSize.width);
-        const canvasH = Math.max(120, mapEl?.clientHeight || viewportSize.height);
-        const clampedFitPad = clampFitTrackPadding(layout.fitPadding, canvasW, canvasH);
+    try {
+      suppressMoveEventRef.current = true;
+      if (spec.camera_mode === "fit-track") {
+        if (hasValidBounds && fitAppliedBoundsRef.current !== boundsKey) {
+          fitAppliedBoundsRef.current = boundsKey;
+          const bounds: [[number, number], [number, number]] = [
+            [evaluated.bounds[0], evaluated.bounds[1]],
+            [evaluated.bounds[2], evaluated.bounds[3]],
+          ];
+          const zeroPadding = { top: 0, bottom: 0, left: 0, right: 0 };
+          const mapEl = typeof map.getContainer === "function" ? map.getContainer() : null;
+          const canvasW = Math.max(120, mapEl?.clientWidth || viewportSize.width);
+          const canvasH = Math.max(120, mapEl?.clientHeight || viewportSize.height);
+          const clampedFitPad = clampFitTrackPadding(layout.fitPadding, canvasW, canvasH);
 
-        // Clear any persistent follow-marker padding & pitch before cameraForBounds,
-        // because MapLibre adds map.getPadding() + options.padding when fitting bounds.
-        if (typeof map.setPadding === "function") {
-          map.setPadding(zeroPadding);
-        }
-        map.jumpTo({
-          bearing: cameraFrame.bearing,
-          pitch: 0,
-          padding: zeroPadding,
-        });
-
-        const fitted =
-          typeof map.cameraForBounds === "function"
-            ? map.cameraForBounds(bounds, {
-                padding: clampedFitPad,
-                bearing: cameraFrame.bearing,
-              })
-            : undefined;
-        let fallbackCenter: [number, number] | null = null;
-        let fallbackZoom: number | null = null;
-        const fittedZoom = fitted?.zoom;
-        if (fitted && fitted.center && typeof fittedZoom === "number" && Number.isFinite(fittedZoom)) {
-          const targetZoom =
-            keyframeZoomOffset !== 0
-              ? Math.min(18, Math.max(2, fittedZoom + keyframeZoomOffset))
-              : fittedZoom;
+          // Clear any persistent follow-marker padding & pitch before cameraForBounds,
+          // because MapLibre adds map.getPadding() + options.padding when fitting bounds.
+          if (typeof map.setPadding === "function") {
+            map.setPadding(zeroPadding);
+          }
           map.jumpTo({
-            center: fitted.center,
-            zoom: targetZoom,
             bearing: cameraFrame.bearing,
-            pitch: cameraFrame.pitch,
+            pitch: 0,
             padding: zeroPadding,
           });
-          const fc = fitted.center as { lng?: number; lat?: number } | [number, number];
-          if (Array.isArray(fc) && fc.length >= 2) {
-            fallbackCenter = [fc[0], fc[1]];
-          } else if (fc && typeof fc === "object" && "lng" in fc && "lat" in fc) {
-            fallbackCenter = [Number(fc.lng), Number(fc.lat)];
-          }
-          fallbackZoom = targetZoom;
-        } else {
-          map.fitBounds(bounds, {
-            padding: 24,
-            duration: 0,
-            pitch: 0,
-            bearing: cameraFrame.bearing,
-          });
-          if (cameraFrame.pitch > 0 && typeof map.setPitch === "function") {
-            map.setPitch(cameraFrame.pitch);
-          }
-        }
 
-        const rawCenter =
-          typeof map.getCenter === "function"
-            ? (map.getCenter() as unknown as { lng?: number; lat?: number } | [number, number] | null)
-            : null;
-        const mapCenter: [number, number] | null = Array.isArray(rawCenter)
-          ? rawCenter.length >= 2 && Number.isFinite(rawCenter[0]) && Number.isFinite(rawCenter[1])
-            ? [rawCenter[0], rawCenter[1]]
-            : null
-          : rawCenter &&
-              typeof rawCenter === "object" &&
-              typeof rawCenter.lng === "number" &&
-              typeof rawCenter.lat === "number" &&
-              Number.isFinite(rawCenter.lng) &&
-              Number.isFinite(rawCenter.lat)
-            ? [rawCenter.lng, rawCenter.lat]
-            : null;
-        const mapZoom = typeof map.getZoom === "function" ? map.getZoom() : null;
-        const mapPitch = typeof map.getPitch === "function" ? map.getPitch() : null;
-        const mapBearing = typeof map.getBearing === "function" ? map.getBearing() : null;
-        const resolvedCenter = mapCenter ?? fallbackCenter;
-        const resolvedZoom =
-          typeof mapZoom === "number" && Number.isFinite(mapZoom) ? mapZoom : fallbackZoom;
-        if (resolvedCenter && resolvedZoom !== null && Number.isFinite(resolvedZoom)) {
-          setFitCamera({
-            boundsKey,
-            center: resolvedCenter,
-            zoom: resolvedZoom,
-            pitch:
-              typeof mapPitch === "number" && Number.isFinite(mapPitch)
-                ? mapPitch
-                : cameraFrame.pitch,
-            bearing:
-              typeof mapBearing === "number" && Number.isFinite(mapBearing)
-                ? mapBearing
-                : cameraFrame.bearing,
+          const fitted =
+            typeof map.cameraForBounds === "function"
+              ? map.cameraForBounds(bounds, {
+                  padding: clampedFitPad,
+                  bearing: cameraFrame.bearing,
+                })
+              : undefined;
+          let fallbackCenter: [number, number] | null = null;
+          let fallbackZoom: number | null = null;
+          const fittedZoom = fitted?.zoom;
+          if (fitted && fitted.center && typeof fittedZoom === "number" && Number.isFinite(fittedZoom)) {
+            const targetZoom =
+              keyframeZoomOffset !== 0
+                ? Math.min(18, Math.max(2, fittedZoom + keyframeZoomOffset))
+                : fittedZoom;
+            map.jumpTo({
+              center: fitted.center,
+              zoom: targetZoom,
+              bearing: cameraFrame.bearing,
+              pitch: cameraFrame.pitch,
+              padding: zeroPadding,
+            });
+            const fc = fitted.center as { lng?: number; lat?: number } | [number, number];
+            if (Array.isArray(fc) && fc.length >= 2) {
+              fallbackCenter = [fc[0], fc[1]];
+            } else if (fc && typeof fc === "object" && "lng" in fc && "lat" in fc) {
+              fallbackCenter = [Number(fc.lng), Number(fc.lat)];
+            }
+            fallbackZoom = targetZoom;
+          } else {
+            map.fitBounds(bounds, {
+              padding: 24,
+              duration: 0,
+              pitch: 0,
+              bearing: cameraFrame.bearing,
+            });
+            if (cameraFrame.pitch > 0 && typeof map.setPitch === "function") {
+              map.setPitch(cameraFrame.pitch);
+            }
+          }
+
+          const rawCenter =
+            typeof map.getCenter === "function"
+              ? (map.getCenter() as unknown as { lng?: number; lat?: number } | [number, number] | null)
+              : null;
+          const mapCenter: [number, number] | null = Array.isArray(rawCenter)
+            ? rawCenter.length >= 2 && Number.isFinite(rawCenter[0]) && Number.isFinite(rawCenter[1])
+              ? [rawCenter[0], rawCenter[1]]
+              : null
+            : rawCenter &&
+                typeof rawCenter === "object" &&
+                typeof rawCenter.lng === "number" &&
+                typeof rawCenter.lat === "number" &&
+                Number.isFinite(rawCenter.lng) &&
+                Number.isFinite(rawCenter.lat)
+              ? [rawCenter.lng, rawCenter.lat]
+              : null;
+          const mapZoom = typeof map.getZoom === "function" ? map.getZoom() : null;
+          const mapPitch = typeof map.getPitch === "function" ? map.getPitch() : null;
+          const mapBearing = typeof map.getBearing === "function" ? map.getBearing() : null;
+          const resolvedCenter = mapCenter ?? fallbackCenter;
+          const resolvedZoom =
+            typeof mapZoom === "number" && Number.isFinite(mapZoom) ? mapZoom : fallbackZoom;
+          if (resolvedCenter && resolvedZoom !== null && Number.isFinite(resolvedZoom)) {
+            setFitCamera({
+              boundsKey,
+              center: resolvedCenter,
+              zoom: resolvedZoom,
+              pitch:
+                typeof mapPitch === "number" && Number.isFinite(mapPitch)
+                  ? mapPitch
+                  : cameraFrame.pitch,
+              bearing:
+                typeof mapBearing === "number" && Number.isFinite(mapBearing)
+                  ? mapBearing
+                  : cameraFrame.bearing,
+            });
+          }
+        }
+      } else {
+        fitAppliedBoundsRef.current = null;
+        setFitCamera((prev) => (prev !== null ? null : prev));
+        const followZoom = effectiveFollowZoom ?? 11.5;
+        if (hasValidMarker && Number.isFinite(followZoom)) {
+          map.jumpTo({
+            center: targetCenter,
+            zoom: followZoom,
+            pitch: cameraFrame.pitch,
+            bearing: cameraFrame.bearing,
+            padding: layout.followPadding,
           });
         }
       }
-    } else {
-      fitAppliedBoundsRef.current = null;
-      setFitCamera((prev) => (prev !== null ? null : prev));
-      const followZoom = effectiveFollowZoom ?? 11.5;
-      if (hasValidMarker && Number.isFinite(followZoom)) {
-        map.jumpTo({
-          center: targetCenter,
-          zoom: followZoom,
-          pitch: cameraFrame.pitch,
-          bearing: cameraFrame.bearing,
-          padding: layout.followPadding,
-        });
-      }
+    } finally {
+      suppressMoveEventRef.current = false;
     }
 
     map.triggerRepaint();
-
-    const updateProjected = () => {
-      const reached = evaluated.overnightStops.filter(
-        (s) =>
-          s.reached &&
-          Number.isFinite(s.position[0]) &&
-          Number.isFinite(s.position[1]) &&
-          Math.abs(s.position[1]) <= 90,
-      );
-      if (reached.length === 0) {
-        setProjectedStops((prev) => (prev.length === 0 ? prev : []));
-      } else {
-        setProjectedStops(
-          reached.map((stop) => {
-            const pt = map.project(stop.position);
-            return { stop, x: pt.x, y: pt.y };
-          }),
-        );
-      }
-
-      if (reachedPhotos.length === 0) {
-        setProjectedPhotos((prev) => (prev.length === 0 ? prev : []));
-      } else {
-        setProjectedPhotos(
-          reachedPhotos
-            .filter(
-              (p) =>
-                p.pinPosition !== null &&
-                Number.isFinite(p.pinPosition[0]) &&
-                Number.isFinite(p.pinPosition[1]) &&
-                Math.abs(p.pinPosition[1]) <= 90,
-            )
-            .map((photo) => {
-              const pt = map.project(photo.pinPosition!);
-              return { photo, x: pt.x, y: pt.y };
-            }),
-        );
-      }
-
-      if (
-        evaluated.activeStage &&
-        Number.isFinite(evaluated.markerPosition[0]) &&
-        Number.isFinite(evaluated.markerPosition[1]) &&
-        Math.abs(evaluated.markerPosition[1]) <= 90
-      ) {
-        const mPt = map.project(evaluated.markerPosition);
-        setProjectedMarker((prev) =>
-          prev && prev.x === mPt.x && prev.y === mPt.y ? prev : { x: mPt.x, y: mPt.y },
-        );
-      } else {
-        setProjectedMarker((prev) => (prev === null ? prev : null));
-      }
-    };
-
-    updateProjected();
-    map.on("move", updateProjected);
-    return () => {
-      map.off("move", updateProjected);
-    };
   }, [
+    boundsKey,
     evaluated,
     reachedPhotos,
     reachedClimbs,
     stages,
+    fullCurtainData,
     adaptiveFollow,
     effectiveFollowZoom,
     keyframeZoomOffset,
     layout.fitPadding,
     layout.followPadding,
     spec.camera_mode,
-    spec.camera_preset,
     spec.track_width_px,
     spec.marker_color,
     spec.color_by,
@@ -1268,8 +1472,16 @@ export function TripStageCanvas({
           await awaitNextAnimationFrames(1);
           return;
         }
-        // Await 1 rAF so useLayoutEffect's jumpTo/fitBounds has committed before awaiting idle
+        // Await 1 rAF so useLayoutEffect's jumpTo/fitBounds commits and MapLibre's _render() updates _inViewTiles
         await awaitNextAnimationFrames(1);
+        const tilesCached =
+          typeof map.loaded === "function" &&
+          typeof map.areTilesLoaded === "function" &&
+          map.loaded() &&
+          map.areTilesLoaded();
+        if (tilesCached) {
+          return;
+        }
         map.triggerRepaint();
         if (
           cameraChanged ||

@@ -1,4 +1,12 @@
 -- Pure SQL + DuckDB spatial hex-bin coverage grid (~1.1 km cells, zero community extensions).
+{{
+    config(
+        materialized='incremental',
+        unique_key='stage_id',
+        incremental_strategy='delete+insert',
+        pre_hook="{% if is_incremental() %} DELETE FROM {{ this }} WHERE stage_id NOT IN (SELECT stage_id FROM {{ ref('mart_stage_summary') }}) OR stage_id IN (SELECT stage_id FROM {{ ref('mart_stage_summary') }} WHERE _dbt_invocation_id = '{{ invocation_id }}'); {% endif %}"
+    )
+}}
 WITH pts_with_year AS (
     SELECT
         p.trip_id,
@@ -13,6 +21,9 @@ WITH pts_with_year AS (
         )::BIGINT AS r_idx
     FROM {{ ref('stg_telemetry_points') }} AS p
     JOIN {{ ref('mart_stage_summary') }} AS m ON m.stage_id = p.stage_id
+    {% if is_incremental() %}
+    WHERE m._dbt_invocation_id = '{{ invocation_id }}'
+    {% endif %}
 )
 SELECT
     trip_id,

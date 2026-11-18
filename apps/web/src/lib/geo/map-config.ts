@@ -311,6 +311,11 @@ export interface ElevationRidgeDatum {
   path: [number, number, number][];
 }
 
+export interface ElevationCurtainData {
+  polygons: ElevationCurtainPolygonDatum[];
+  ridges: ElevationRidgeDatum[];
+}
+
 export interface DeckOverlayBuildOptions {
   trackWidthPx?: number;
   markerColorHex?: string;
@@ -320,6 +325,7 @@ export interface DeckOverlayBuildOptions {
   elevationCurtain?: boolean;
   terrainExaggeration?: number;
   elevationStages?: readonly TimelineStage[];
+  elevationCurtainData?: ElevationCurtainData | null;
   maxDistanceM?: number;
   transferArcs?: readonly TransferArcSegment[];
   showTransferArcs?: boolean;
@@ -327,11 +333,22 @@ export interface DeckOverlayBuildOptions {
   showClimbCallouts?: boolean;
 }
 
-function buildElevationCurtainData(
+interface CachedElevationCurtainEntry {
+  sig: string;
+  byExag: Map<number, ElevationCurtainData>;
+}
+
+const ELEVATION_CURTAIN_CACHE = new WeakMap<
+  readonly TimelineStage[],
+  CachedElevationCurtainEntry
+>();
+const MAX_CURTAIN_EXAG_ENTRIES = 16;
+
+function computeElevationCurtainData(
   stages: readonly TimelineStage[],
   exaggeration: number,
   maxDistanceM?: number,
-): { polygons: ElevationCurtainPolygonDatum[]; ridges: ElevationRidgeDatum[] } {
+): ElevationCurtainData {
   const polygons: ElevationCurtainPolygonDatum[] = [];
   const ridges: ElevationRidgeDatum[] = [];
   const scaleZ = Math.max(0.5, exaggeration) * 1.5;
@@ -384,6 +401,39 @@ function buildElevationCurtainData(
   return { polygons, ridges };
 }
 
+export function buildElevationCurtainData(
+  stages: readonly TimelineStage[],
+  exaggeration: number,
+  maxDistanceM?: number,
+): ElevationCurtainData {
+  const normalizedExag = Math.max(0.5, Number.isFinite(exaggeration) ? exaggeration : 1.4);
+  if (maxDistanceM !== undefined) {
+    return computeElevationCurtainData(stages, normalizedExag, maxDistanceM);
+  }
+
+  const sig = stages.map((s) => `${s.id}:${s.color}:${s.points.length}`).join("|");
+  let entry = ELEVATION_CURTAIN_CACHE.get(stages);
+  if (!entry || entry.sig !== sig) {
+    entry = { sig, byExag: new Map() };
+    ELEVATION_CURTAIN_CACHE.set(stages, entry);
+  }
+
+  const cached = entry.byExag.get(normalizedExag);
+  if (cached) {
+    return cached;
+  }
+
+  const computed = computeElevationCurtainData(stages, normalizedExag, undefined);
+  if (entry.byExag.size >= MAX_CURTAIN_EXAG_ENTRIES) {
+    const oldestKey = entry.byExag.keys().next().value;
+    if (oldestKey !== undefined) {
+      entry.byExag.delete(oldestKey);
+    }
+  }
+  entry.byExag.set(normalizedExag, computed);
+  return computed;
+}
+
 export function buildDeckOverlayProps(
   tracks: readonly VisiblePathSegment[] | readonly TrackFeatureDatum[],
   markerPosition: [number, number],
@@ -395,12 +445,17 @@ export function buildDeckOverlayProps(
   const photoPins = options?.photoPins ?? [];
   const layers: Layer[] = [];
 
-  if (options?.elevationCurtain && options.elevationStages && options.elevationStages.length > 0) {
-    const { polygons, ridges } = buildElevationCurtainData(
-      options.elevationStages,
-      options.terrainExaggeration ?? 1.4,
-      options.maxDistanceM,
-    );
+  if (
+    options?.elevationCurtain &&
+    (options.elevationCurtainData || (options.elevationStages && options.elevationStages.length > 0))
+  ) {
+    const { polygons, ridges } =
+      options.elevationCurtainData ??
+      buildElevationCurtainData(
+        options.elevationStages!,
+        options.terrainExaggeration ?? 1.4,
+        options.maxDistanceM,
+      );
     if (polygons.length > 0) {
       layers.push(
         new PolygonLayer<ElevationCurtainPolygonDatum>({

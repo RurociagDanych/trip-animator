@@ -342,6 +342,10 @@ export function buildTimelineFromProject(
 
   let globalDistOffset = 0;
   let globalElapsedOffset = 0;
+  const chartPoints =
+    orderedStages.length > 0 && chart?.points?.length
+      ? smoothTelemetryChartPoints(chart.points, spec.telemetry_smoothing)
+      : [];
 
   return orderedStages.map((stage) => {
     const feature = featuresByStageId.get(stage.id);
@@ -382,8 +386,6 @@ export function buildTimelineFromProject(
     const distScale = runningRawDist > 0 ? targetStageDist / runningRawDist : 1;
     const stageDurationS = Math.max(stage.elapsed_seconds || stage.moving_seconds || targetStageDist / 4, 1);
     const startMs = stage.started_at ? Date.parse(stage.started_at) : null;
-
-    const chartPoints = smoothTelemetryChartPoints(chart?.points ?? [], spec.telemetry_smoothing);
 
     const points: TimelinePoint[] = rawCoords.map((rc) => {
       const cumDistM = rc.rawDistM * distScale;
@@ -435,7 +437,7 @@ export function buildTimelineFromProject(
   });
 }
 
-export function computeTimelineBounds(stages: readonly TimelineStage[]): [number, number, number, number] {
+function computeTimelineBoundsUncached(stages: readonly TimelineStage[]): [number, number, number, number] {
   let minLon = Infinity;
   let minLat = Infinity;
   let maxLon = -Infinity;
@@ -464,6 +466,10 @@ export function computeTimelineBounds(stages: readonly TimelineStage[]): [number
     maxLat += 0.005;
   }
   return [minLon, minLat, maxLon, maxLat];
+}
+
+export function computeTimelineBounds(stages: readonly TimelineStage[]): [number, number, number, number] {
+  return getTimelineCache(stages).bounds;
 }
 
 export function frameIndexToProgress(
@@ -500,6 +506,165 @@ interface FlatSample {
   stageIndex: number;
   point: TimelinePoint;
   metricValue: number; // either globalDistM or globalElapsedS
+}
+
+interface IndexedTimelineSamples {
+  samples: FlatSample[];
+  useTimeMetric: boolean;
+  minMetric: number;
+  maxMetric: number;
+  maxGlobalDist: number;
+  maxGlobalElapsed: number;
+}
+
+interface CachedTimelineEntry {
+  length: number;
+  stageRefs: readonly TimelineStage[];
+  pointCounts: readonly number[];
+  hasTimestampsFlags: readonly boolean[];
+  firstPoints: readonly (TimelinePoint | undefined)[];
+  lastPoints: readonly (TimelinePoint | undefined)[];
+  bounds: [number, number, number, number];
+  nonEmptyStages: TimelineStage[];
+  transferArcs: TransferArcSegment[];
+  byMode: {
+    distance?: IndexedTimelineSamples;
+    "recorded-time"?: IndexedTimelineSamples;
+  };
+}
+
+const TIMELINE_CACHE = new WeakMap<readonly TimelineStage[], CachedTimelineEntry>();
+
+function getTimelineCache(stages: readonly TimelineStage[]): CachedTimelineEntry {
+  const existing = TIMELINE_CACHE.get(stages);
+  if (
+    existing &&
+    existing.length === stages.length &&
+    stages.every(
+      (s, i) =>
+        s === existing.stageRefs[i] &&
+        s.points.length === existing.pointCounts[i] &&
+        s.hasTimestamps === existing.hasTimestampsFlags[i] &&
+        s.points[0] === existing.firstPoints[i] &&
+        s.points[s.points.length - 1] === existing.lastPoints[i],
+    )
+  ) {
+    return existing;
+  }
+
+  const nonEmptyStages = stages.filter((s) => s.points.length > 0);
+  const entry: CachedTimelineEntry = {
+    length: stages.length,
+    stageRefs: [...stages],
+    pointCounts: stages.map((s) => s.points.length),
+    hasTimestampsFlags: stages.map((s) => s.hasTimestamps),
+    firstPoints: stages.map((s) => s.points[0]),
+    lastPoints: stages.map((s) => s.points[s.points.length - 1]),
+    bounds: computeTimelineBoundsUncached(stages),
+    nonEmptyStages,
+    transferArcs: detectTransferArcs(nonEmptyStages),
+    byMode: {},
+  };
+  TIMELINE_CACHE.set(stages, entry);
+  return entry;
+}
+
+function buildIndexedSamplesForMode(
+  nonEmptyStages: readonly TimelineStage[],
+  timelineMode: "distance" | "recorded-time",
+): IndexedTimelineSamples | null {
+  if (nonEmptyStages.length === 0) {
+    return null;
+  }
+  const samples: FlatSample[] = [];
+  let maxGlobalDist = 0;
+  let maxGlobalElapsed = 0;
+
+  nonEmptyStages.forEach((stage, stageIndex) => {
+    for (const pt of stage.points) {
+      samples.push({ stageIndex, point: pt, metricValue: 0 });
+      if (pt.globalDistM > maxGlobalDist) maxGlobalDist = pt.globalDistM;
+      if (pt.globalElapsedS > maxGlobalElapsed) maxGlobalElapsed = pt.globalElapsedS;
+    }
+  });
+
+  if (samples.length === 0) {
+    return null;
+  }
+
+  const allStagesHaveTimestamps = nonEmptyStages.every((s) => s.hasTimestamps);
+  const useTimeMetric =
+    timelineMode === "recorded-time" && allStagesHaveTimestamps && maxGlobalElapsed > 0;
+  for (const s of samples) {
+    s.metricValue = useTimeMetric ? s.point.globalElapsedS : s.point.globalDistM;
+  }
+
+  return {
+    samples,
+    useTimeMetric,
+    minMetric: samples[0]!.metricValue,
+    maxMetric: samples[samples.length - 1]!.metricValue,
+    maxGlobalDist,
+    maxGlobalElapsed,
+  };
+}
+
+function getIndexedTimelineSamples(
+  stages: readonly TimelineStage[],
+  spec: Pick<RenderSpecV2, "timeline_mode">,
+): { cache: CachedTimelineEntry; indexed: IndexedTimelineSamples | null } {
+  const cache = getTimelineCache(stages);
+  if (cache.nonEmptyStages.length === 0) {
+    return { cache, indexed: null };
+  }
+  const modeKey: "distance" | "recorded-time" =
+    spec.timeline_mode === "recorded-time" ? "recorded-time" : "distance";
+  let indexed = cache.byMode[modeKey];
+  if (!indexed) {
+    indexed = buildIndexedSamplesForMode(cache.nonEmptyStages, modeKey) ?? undefined;
+    if (indexed) {
+      cache.byMode[modeKey] = indexed;
+    }
+  }
+  return { cache, indexed: indexed ?? null };
+}
+
+function locateIndexedSample(
+  indexed: IndexedTimelineSamples,
+  progressRatio: number,
+): {
+  lo: number;
+  hi: number;
+  sampleA: FlatSample;
+  sampleB: FlatSample;
+  activePoint: TimelinePoint;
+  targetMetric: number;
+} {
+  const p = clamp01(progressRatio);
+  const { samples, minMetric, maxMetric } = indexed;
+  const targetMetric = minMetric + (maxMetric - minMetric) * p;
+
+  let lo = 0;
+  let hi = samples.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if ((samples[mid]?.metricValue ?? 0) <= targetMetric) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  const sampleA = samples[lo]!;
+  const sampleB = samples[hi]!;
+  const span = sampleB.metricValue - sampleA.metricValue;
+  const sameStageAndSeg =
+    sampleA.stageIndex === sampleB.stageIndex &&
+    sampleA.point.segmentIdx === sampleB.point.segmentIdx;
+  const t = sameStageAndSeg && span > 0 ? clamp01((targetMetric - sampleA.metricValue) / span) : 0;
+  const activePoint = sameStageAndSeg
+    ? interpolatePoint(sampleA.point, sampleB.point, t)
+    : sampleA.point;
+  return { lo, hi, sampleA, sampleB, activePoint, targetMetric };
 }
 
 function interpolateNullable(
@@ -1113,12 +1278,13 @@ export function evaluateTimeline(
   options?: { durationS?: number; isPreview?: boolean },
 ): EvaluatedTimelineState {
   const progress = clamp01(progressRatio);
-  const bounds = computeTimelineBounds(stages);
-  const nonEmptyStages = stages.filter((s) => s.points.length > 0);
+  const { cache, indexed } = getIndexedTimelineSamples(stages, spec);
+  const bounds = cache.bounds;
+  const nonEmptyStages = cache.nonEmptyStages;
   const colorBy = spec.color_by ?? "stage";
   const colorLegendStops = computeColorLegendScale(colorBy);
 
-  if (nonEmptyStages.length === 0) {
+  if (!indexed || nonEmptyStages.length === 0) {
     const centerLon = (bounds[0] + bounds[2]) / 2;
     const centerLat = (bounds[1] + bounds[3]) / 2;
     return {
@@ -1147,49 +1313,14 @@ export function evaluateTimeline(
     };
   }
 
-  const allSamples: FlatSample[] = [];
-  let maxGlobalDist = 0;
-  let maxGlobalElapsed = 0;
-
-  nonEmptyStages.forEach((stage, stageIndex) => {
-    for (const pt of stage.points) {
-      allSamples.push({ stageIndex, point: pt, metricValue: 0 });
-      if (pt.globalDistM > maxGlobalDist) maxGlobalDist = pt.globalDistM;
-      if (pt.globalElapsedS > maxGlobalElapsed) maxGlobalElapsed = pt.globalElapsedS;
-    }
-  });
-
-  const allStagesHaveTimestamps = nonEmptyStages.every((s) => s.hasTimestamps);
-  const useTimeMetric =
-    spec.timeline_mode === "recorded-time" && allStagesHaveTimestamps && maxGlobalElapsed > 0;
-  for (const s of allSamples) {
-    s.metricValue = useTimeMetric ? s.point.globalElapsedS : s.point.globalDistM;
-  }
-
-  const minMetric = allSamples[0]!.metricValue;
-  const maxMetric = allSamples[allSamples.length - 1]!.metricValue;
-  const targetMetric = minMetric + (maxMetric - minMetric) * progress;
-
-  let lo = 0;
-  let hi = allSamples.length - 1;
-  while (hi - lo > 1) {
-    const mid = (lo + hi) >> 1;
-    if ((allSamples[mid]?.metricValue ?? 0) <= targetMetric) {
-      lo = mid;
-    } else {
-      hi = mid;
-    }
-  }
-
-  const sampleA = allSamples[lo]!;
-  const sampleB = allSamples[hi]!;
-  const span = sampleB.metricValue - sampleA.metricValue;
-  const sameStageAndSeg =
-    sampleA.stageIndex === sampleB.stageIndex &&
-    sampleA.point.segmentIdx === sampleB.point.segmentIdx;
-  const t = sameStageAndSeg && span > 0 ? clamp01((targetMetric - sampleA.metricValue) / span) : 0;
-
-  const activePoint = sameStageAndSeg ? interpolatePoint(sampleA.point, sampleB.point, t) : sampleA.point;
+  const {
+    samples: allSamples,
+    useTimeMetric,
+    minMetric,
+    maxMetric,
+    maxGlobalDist,
+  } = indexed;
+  const { lo, sampleA, activePoint, targetMetric } = locateIndexedSample(indexed, progress);
   const activeStageIndex = sampleA.stageIndex;
   const activeStage = nonEmptyStages[activeStageIndex] ?? null;
 
@@ -1272,7 +1403,7 @@ export function evaluateTimeline(
   // >2km inter-stage transfer arcs
   const transferArcs: TransferArcSegment[] = [];
   if (spec.show_transfer_arcs !== false) {
-    const rawArcs = detectTransferArcs(nonEmptyStages);
+    const rawArcs = cache.transferArcs;
     const metricByStageId = new Map<string, { startMetric: number; endMetric: number }>();
     for (const st of nonEmptyStages) {
       const firstPt = st.points[0]!;
@@ -1393,78 +1524,11 @@ export interface AdaptiveFollowCameraResult {
   courseBearingDeg: number | null;
 }
 
-interface IndexedTimelineSamples {
-  samples: FlatSample[];
-  useTimeMetric: boolean;
-  minMetric: number;
-  maxMetric: number;
-}
-
-function buildIndexedSamples(
-  stages: readonly TimelineStage[],
-  spec: RenderSpecV2,
-): IndexedTimelineSamples | null {
-  const nonEmptyStages = stages.filter((s) => s.points.length > 0);
-  if (nonEmptyStages.length === 0) {
-    return null;
-  }
-  const samples: FlatSample[] = [];
-  let maxGlobalElapsed = 0;
-
-  nonEmptyStages.forEach((stage, stageIndex) => {
-    for (const pt of stage.points) {
-      samples.push({ stageIndex, point: pt, metricValue: 0 });
-      if (pt.globalElapsedS > maxGlobalElapsed) {
-        maxGlobalElapsed = pt.globalElapsedS;
-      }
-    }
-  });
-
-  if (samples.length === 0) {
-    return null;
-  }
-
-  const allStagesHaveTimestamps = nonEmptyStages.every((s) => s.hasTimestamps);
-  const useTimeMetric =
-    spec.timeline_mode === "recorded-time" && allStagesHaveTimestamps && maxGlobalElapsed > 0;
-  for (const s of samples) {
-    s.metricValue = useTimeMetric ? s.point.globalElapsedS : s.point.globalDistM;
-  }
-
-  return {
-    samples,
-    useTimeMetric,
-    minMetric: samples[0]!.metricValue,
-    maxMetric: samples[samples.length - 1]!.metricValue,
-  };
-}
-
 function sampleIndexedAtProgress(
   indexed: IndexedTimelineSamples,
   progressRatio: number,
 ): TimelinePoint {
-  const p = clamp01(progressRatio);
-  const { samples, minMetric, maxMetric } = indexed;
-  const targetMetric = minMetric + (maxMetric - minMetric) * p;
-
-  let lo = 0;
-  let hi = samples.length - 1;
-  while (hi - lo > 1) {
-    const mid = (lo + hi) >> 1;
-    if ((samples[mid]?.metricValue ?? 0) <= targetMetric) {
-      lo = mid;
-    } else {
-      hi = mid;
-    }
-  }
-  const sampleA = samples[lo]!;
-  const sampleB = samples[hi]!;
-  const span = sampleB.metricValue - sampleA.metricValue;
-  const sameStageAndSeg =
-    sampleA.stageIndex === sampleB.stageIndex &&
-    sampleA.point.segmentIdx === sampleB.point.segmentIdx;
-  const t = sameStageAndSeg && span > 0 ? clamp01((targetMetric - sampleA.metricValue) / span) : 0;
-  return sameStageAndSeg ? interpolatePoint(sampleA.point, sampleB.point, t) : sampleA.point;
+  return locateIndexedSample(indexed, progressRatio).activePoint;
 }
 
 /**
@@ -1475,7 +1539,7 @@ export function sampleTimelinePointAtProgress(
   spec: RenderSpecV2,
   progressRatio: number,
 ): TimelinePoint | null {
-  const indexed = buildIndexedSamples(stages, spec);
+  const { indexed } = getIndexedTimelineSamples(stages, spec);
   if (!indexed) {
     return null;
   }
@@ -1498,8 +1562,8 @@ export function computeAdaptiveFollowCamera(
   progressRatio: number,
   options?: AdaptiveFollowCameraOptions,
 ): AdaptiveFollowCameraResult {
-  const bounds = options?.bounds ?? computeTimelineBounds(stages);
-  const indexed = buildIndexedSamples(stages, spec);
+  const { cache, indexed } = getIndexedTimelineSamples(stages, spec);
+  const bounds = options?.bounds ?? cache.bounds;
   if (!indexed) {
     return {
       center: [(bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2],

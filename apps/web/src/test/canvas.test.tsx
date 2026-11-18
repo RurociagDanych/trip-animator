@@ -1,10 +1,11 @@
 // Activity coordinates below use a constructed numeric grid, not a recorded GPS route.
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
+import { createRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDefaultRenderSpecV2, type ClimbHighlightOut } from "../lib/api/types";
 import { rectsIntersect, solveStageLayout, type Rect } from "../lib/geo/layout";
 import { computeAdaptiveFollowCamera, evaluateTimeline, type TimelinePoint, type TimelineStage } from "../lib/geo/timeline";
-import { TripStageCanvas } from "../components/stage/TripStageCanvas";
+import { TripStageCanvas, type TripStageCanvasHandle } from "../components/stage/TripStageCanvas";
 
 interface JumpToCall {
   center?: [number, number] | { lng: number; lat: number };
@@ -22,17 +23,36 @@ const mockState = vi.hoisted(() => ({
   center: [0.55, 0.25] as [number, number],
   pitch: 0,
   bearing: 0,
+  loaded: true,
+  areTilesLoaded: true,
+  moveOnCount: 0,
+  idleOnceCount: 0,
+  emit: null as ((event: string) => void) | null,
 }));
 
 vi.mock("maplibre-gl", () => {
   class MockMap {
     private listeners = new Map<string, Set<(...args: unknown[]) => void>>();
 
+    constructor() {
+      mockState.emit = (event: string) => {
+        for (const cb of [...(this.listeners.get(event) ?? [])]) {
+          cb();
+        }
+      };
+    }
+
     setStyle() {}
     addControl() {}
     removeControl() {}
     isStyleLoaded() {
       return true;
+    }
+    loaded() {
+      return mockState.loaded;
+    }
+    areTilesLoaded() {
+      return mockState.areTilesLoaded;
     }
     getStyle() {
       return { sources: {}, layers: [] };
@@ -69,6 +89,7 @@ vi.mock("maplibre-gl", () => {
           ? opts.center
           : [opts.center.lng, opts.center.lat];
       }
+      mockState.emit?.("move");
     }
     getCenter() {
       return { lng: mockState.center[0], lat: mockState.center[1] };
@@ -90,6 +111,9 @@ vi.mock("maplibre-gl", () => {
       };
     }
     on(event: string, cb: (...args: unknown[]) => void) {
+      if (event === "move") {
+        mockState.moveOnCount += 1;
+      }
       if (!this.listeners.has(event)) {
         this.listeners.set(event, new Set());
       }
@@ -99,6 +123,9 @@ vi.mock("maplibre-gl", () => {
       this.listeners.get(event)?.delete(cb);
     }
     once(event: string, cb: (...args: unknown[]) => void) {
+      if (event === "idle") {
+        mockState.idleOnceCount += 1;
+      }
       const wrapped = (...args: unknown[]) => {
         this.off(event, wrapped);
         cb(...args);
@@ -235,6 +262,11 @@ describe("TripStageCanvas WebGL wiring (canvas.test.tsx)", () => {
     mockState.center = [0.55, 0.25];
     mockState.pitch = 0;
     mockState.bearing = 0;
+    mockState.loaded = true;
+    mockState.areTilesLoaded = true;
+    mockState.moveOnCount = 0;
+    mockState.idleOnceCount = 0;
+    mockState.emit = null;
 
     globalThis.WebGL2RenderingContext = class {} as typeof WebGL2RenderingContext;
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(((contextId: string) => {
@@ -440,5 +472,97 @@ describe("TripStageCanvas WebGL wiring (canvas.test.tsx)", () => {
     expect(screen.queryByTestId("climb-callout-leaders")).not.toBeInTheDocument();
     expect(screen.queryByTestId("climb-callout-climb-1")).not.toBeInTheDocument();
     expect(screen.queryByTestId("climb-leader-climb-1")).not.toBeInTheDocument();
+  });
+
+  it("registers map.on('move') once across 10 frame updates and re-projects pins on manual move", () => {
+    const stage: TimelineStage = {
+      ...makeStage(),
+      transition: "bed",
+    };
+    const spec = createDefaultRenderSpecV2();
+    spec.camera_mode = "fit-track";
+    spec.show_overnight_stops = true;
+    spec.visibility_mode = "full";
+
+    const { rerender } = render(
+      <TripStageCanvas
+        stages={[stage]}
+        spec={spec}
+        progressRatio={0.1}
+        durationS={20}
+        travelDurationS={20}
+        renderMode="interactive"
+        exactSize={{ width: 1280, height: 720 }}
+      />,
+    );
+
+    expect(mockState.moveOnCount).toBe(1);
+
+    for (let i = 2; i <= 10; i++) {
+      rerender(
+        <TripStageCanvas
+          stages={[stage]}
+          spec={spec}
+          progressRatio={i / 10}
+          durationS={20}
+          travelDurationS={20}
+          renderMode="interactive"
+          exactSize={{ width: 1280, height: 720 }}
+        />,
+      );
+    }
+
+    expect(mockState.moveOnCount).toBe(1);
+
+    const stopPinBefore = screen.getByTestId("stop-marker-stage-canvas-1");
+    const leftBefore = parseFloat(stopPinBefore.style.left);
+
+    act(() => {
+      mockState.center = [0.75, 0.25];
+      mockState.emit?.("move");
+    });
+
+    const stopPinAfter = screen.getByTestId("stop-marker-stage-canvas-1");
+    const leftAfter = parseFloat(stopPinAfter.style.left);
+    expect(leftAfter).not.toBeCloseTo(leftBefore, 1);
+  });
+
+  it("fast-paths waitForFrameSettle in 1 rAF when tiles are cached and awaits idle when tiles are not loaded", async () => {
+    const stage = makeStage();
+    const spec = createDefaultRenderSpecV2();
+    spec.camera_mode = "follow-marker";
+    const controllerRef = createRef<TripStageCanvasHandle | null>();
+
+    render(
+      <TripStageCanvas
+        stages={[stage]}
+        spec={spec}
+        progressRatio={0.5}
+        durationS={20}
+        travelDurationS={20}
+        controllerRef={controllerRef}
+        renderMode="deterministic"
+        exactSize={{ width: 1280, height: 720 }}
+      />,
+    );
+
+    mockState.idleOnceCount = 0;
+    mockState.loaded = true;
+    mockState.areTilesLoaded = true;
+    await controllerRef.current!.waitForFrameSettle(true);
+    expect(mockState.idleOnceCount).toBe(0);
+
+    mockState.areTilesLoaded = false;
+    let settled = false;
+    const settlePromise = controllerRef.current!.waitForFrameSettle(true).then(() => {
+      settled = true;
+    });
+    await vi.waitFor(() => {
+      expect(mockState.idleOnceCount).toBe(1);
+    });
+    expect(settled).toBe(false);
+    mockState.emit?.("idle");
+    await settlePromise;
+    expect(settled).toBe(true);
   });
 });

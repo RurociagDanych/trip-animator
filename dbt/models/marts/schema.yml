@@ -81,6 +81,10 @@ models:
       - name: vam_m_per_h
         tests:
           - not_null
+      - name: _dbt_invocation_id
+        description: "dbt invocation ID of the run that last inserted or updated this stage row."
+        tests:
+          - not_null
 
   - name: mart_trip_daily_summary
     description: "Gold local-date daily trip rollup across stages."

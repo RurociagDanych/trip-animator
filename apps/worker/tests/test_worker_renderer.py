@@ -554,3 +554,204 @@ async def test_virtual_photo_route_and_ssrf_first_tile_cache(
             await handler(big_route)  # type: ignore[arg-type]
         total_bin_bytes = sum(p.stat().st_size for p in cache_dir.rglob("*.bin"))
         assert total_bin_bytes <= 32
+
+
+def test_warm_playwright_browser_reuses_browser_isolates_context_and_recycles_after_max_renders(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trip_worker import renderer as renderer_mod
+    from trip_worker.renderer import WarmPlaywrightHost, render_manifest_to_mp4
+
+    launch_records: list[dict[str, Any]] = []
+    context_records: list[dict[str, Any]] = []
+    pw_stopped = {"count": 0}
+
+    class FakeWarmContext:
+        def __init__(self, browser_idx: int, ctx_idx: int) -> None:
+            self.browser_idx = browser_idx
+            self.ctx_idx = ctx_idx
+            self.closed = False
+
+        async def new_page(self) -> Any:
+            return type(
+                "FakeWarmPage",
+                (),
+                {"set_default_timeout": lambda *_a: None},
+            )()
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class FakeWarmBrowser:
+        def __init__(self, browser_idx: int) -> None:
+            self.browser_idx = browser_idx
+            self.connected = True
+            self.closed = False
+            self.contexts_created = 0
+
+        def is_connected(self) -> bool:
+            return self.connected and not self.closed
+
+        async def new_context(self, **kwargs: Any) -> FakeWarmContext:
+            self.contexts_created += 1
+            ctx = FakeWarmContext(self.browser_idx, self.contexts_created)
+            context_records.append(
+                {
+                    "browser_idx": self.browser_idx,
+                    "ctx": ctx,
+                    "viewport": kwargs.get("viewport"),
+                }
+            )
+            return ctx
+
+        async def close(self) -> None:
+            self.closed = True
+            self.connected = False
+
+    class FakeChromium:
+        def __init__(self) -> None:
+            self.browsers: list[FakeWarmBrowser] = []
+
+        async def launch(self, **kwargs: Any) -> FakeWarmBrowser:
+            b = FakeWarmBrowser(len(self.browsers) + 1)
+            self.browsers.append(b)
+            launch_records.append({"browser_idx": b.browser_idx, "kwargs": kwargs, "browser": b})
+            return b
+
+    fake_chromium = FakeChromium()
+
+    class FakePlaywright:
+        chromium = fake_chromium
+
+        async def stop(self) -> None:
+            pw_stopped["count"] += 1
+
+    class FakePlaywrightStarter:
+        async def start(self) -> FakePlaywright:
+            return FakePlaywright()
+
+    monkeypatch.setattr(renderer_mod, "async_playwright", lambda: FakePlaywrightStarter())
+
+    async def fake_render_with_page(
+        _page: Any,
+        manifest: RenderManifest,
+        _encoder: Any,
+        _settings: WorkerSettings,
+        **_kwargs: Any,
+    ) -> int:
+        return manifest.total_frames
+
+    monkeypatch.setattr(renderer_mod, "render_manifest_with_page", fake_render_with_page)
+
+    settings = WorkerSettings(
+        render_base_url="http://web:8080",
+        worker_browser_max_renders=2,
+    )
+    manifest = _sample_manifest(4)
+
+    with WarmPlaywrightHost(settings) as host:
+        for idx in range(3):
+            out_mp4 = tmp_path / f"out_{idx}.mp4"
+            browser = host.run_coro(host.acquire_browser())
+            host.run_coro(
+                render_manifest_to_mp4(manifest, out_mp4, settings, browser=browser)
+            )
+
+        # Renders 1 & 2 shared browser #1; render 3 recycled into browser #2
+        assert len(launch_records) == 2
+        assert launch_records[0]["browser"].closed is True
+        assert launch_records[1]["browser"].closed is False
+        assert len(context_records) == 3
+        assert [c["browser_idx"] for c in context_records] == [1, 1, 2]
+        assert all(c["ctx"].closed for c in context_records)
+        assert host.render_count == 1
+
+    assert launch_records[1]["browser"].closed is True
+    assert pw_stopped["count"] == 1
+
+
+def test_warm_playwright_browser_crash_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    from trip_worker import renderer as renderer_mod
+    from trip_worker import runner as runner_mod
+    from trip_worker.renderer import WarmPlaywrightHost
+
+    launched_browsers: list[Any] = []
+
+    class FakeCrashBrowser:
+        def __init__(self, idx: int) -> None:
+            self.idx = idx
+            self.connected = True
+            self.closed = False
+
+        def is_connected(self) -> bool:
+            return self.connected and not self.closed
+
+        async def close(self) -> None:
+            self.closed = True
+            self.connected = False
+
+    class FakeChromium:
+        async def launch(self, **_kwargs: Any) -> FakeCrashBrowser:
+            b = FakeCrashBrowser(len(launched_browsers) + 1)
+            launched_browsers.append(b)
+            return b
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+        async def stop(self) -> None:
+            return None
+
+    class FakePlaywrightStarter:
+        async def start(self) -> FakePlaywright:
+            return FakePlaywright()
+
+    monkeypatch.setattr(renderer_mod, "async_playwright", lambda: FakePlaywrightStarter())
+
+    settings = WorkerSettings(render_base_url="http://web:8080", worker_browser_max_renders=50)
+    manifest = _sample_manifest(4)
+    attempt = {"n": 0}
+
+    async def flaky_render(
+        _manifest: RenderManifest,
+        out_path: Path,
+        _settings: WorkerSettings,
+        *,
+        browser: Any = None,
+        **_kwargs: Any,
+    ) -> Path:
+        attempt["n"] += 1
+        if attempt["n"] == 1:
+            browser.connected = False
+            raise RuntimeError("Target closed")
+        await asyncio.to_thread(out_path.write_bytes, b"ok")
+        return out_path
+
+    with WarmPlaywrightHost(settings) as host:
+        with pytest.raises(RuntimeError, match="Target closed"):
+            runner_mod._execute_render(
+                flaky_render,
+                manifest,
+                tmp_path / "fail.mp4",
+                settings,
+                browser_host=host,
+            )
+        assert launched_browsers[0].closed is True
+
+        # Next render launches a fresh clean browser automatically
+        res = runner_mod._execute_render(
+            flaky_render,
+            manifest,
+            tmp_path / "ok.mp4",
+            settings,
+            browser_host=host,
+        )
+        assert res == tmp_path / "ok.mp4"
+        assert len(launched_browsers) == 2
+        assert launched_browsers[1].is_connected() is True

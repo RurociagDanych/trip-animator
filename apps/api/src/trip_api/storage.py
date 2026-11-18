@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import shutil
+import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -108,6 +111,9 @@ class ObjectStore(Protocol):
         range_header: str | None = None,
         chunk_size: int = _STREAM_CHUNK_BYTES,
     ) -> ObjectStream: ...
+    def copy(
+        self, src_key: str, dst_key: str, *, content_type: str | None = None
+    ) -> None: ...
     def delete(self, key: str) -> None: ...
 
 
@@ -194,6 +200,21 @@ class LocalObjectStore:
             end=end,
             is_partial=is_partial,
         )
+
+    def copy(
+        self, src_key: str, dst_key: str, *, content_type: str | None = None
+    ) -> None:
+        _ = content_type
+        src = self.resolve_existing_path(src_key)
+        dst = self._safe_path(dst_key)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dst.parent / f".{dst.name}.{uuid.uuid4().hex}.tmp"
+        try:
+            shutil.copy2(src, tmp)
+            os.replace(tmp, dst)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
 
     def delete(self, key: str) -> None:
         target = self._safe_path(key)
@@ -305,6 +326,27 @@ class S3ObjectStore:
             end=end,
             is_partial=is_partial,
         )
+
+    def copy(
+        self, src_key: str, dst_key: str, *, content_type: str | None = None
+    ) -> None:
+        extra_args: dict[str, Any] | None = None
+        if content_type:
+            extra_args = {
+                "ContentType": content_type,
+                "MetadataDirective": "REPLACE",
+            }
+        try:
+            self.client.copy(
+                {"Bucket": self.bucket, "Key": src_key},
+                self.bucket,
+                dst_key,
+                ExtraArgs=extra_args,
+            )
+        except ClientError as exc:
+            if _is_not_found_client_error(exc):
+                raise FileNotFoundError(f"Object not found: {src_key!r}") from exc
+            raise
 
     def delete(self, key: str) -> None:
         try:

@@ -10,9 +10,14 @@ import {
   Unplug,
   Zap,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import { AtlasView } from "../components/dashboard/AtlasView";
+import { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import { ActivityIcon, getActivityIconMeta } from "../components/icons";
+
+const LazyAtlasView = lazy(() =>
+  import("../components/dashboard/AtlasView").then((m) => ({
+    default: m.AtlasView,
+  })),
+);
 import { AppHeader } from "../components/layout/AppHeader";
 import { ApiError } from "../lib/api/client";
 import {
@@ -261,11 +266,20 @@ export function DashboardPage() {
         ) : null}
 
         {dashboardTab === "atlas" ? (
-          <AtlasView
-            projects={projects}
-            career={careerQuery.data}
-            heatmap={heatmapQuery.data}
-          />
+          <Suspense
+            fallback={
+              <div className="flex items-center justify-center rounded-lg border border-border bg-surface p-10 text-xs text-ink-muted">
+                <Loader2 className="mr-2 h-4 w-4 animate-spin text-sky-accent" aria-hidden="true" />
+                <span>Loading Atlas view...</span>
+              </div>
+            }
+          >
+            <LazyAtlasView
+              projects={projects}
+              career={careerQuery.data}
+              heatmap={heatmapQuery.data}
+            />
+          </Suspense>
         ) : (
           <>
             {/* Strava Integration Card */}

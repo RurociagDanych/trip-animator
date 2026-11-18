@@ -85,8 +85,9 @@ def create_user(
         raise ValueError("Invalid email address")
 
     pw_hash = hash_password(password)
-    resolved_url = database_url or get_settings().database_url
-    engine = create_db_engine(resolved_url)
+    cfg = get_settings() if database_url is None else None
+    resolved_url = database_url or (cfg.database_url if cfg is not None else "")
+    engine = create_db_engine(resolved_url, settings=cfg)
     session_factory = create_session_factory(engine)
     try:
         with session_factory() as db:
@@ -142,7 +143,7 @@ def run_replay_silver(
     resolved_url = database_url or cfg.database_url
     target_ver = target_etl_version if target_etl_version is not None else current_etl_version()
 
-    engine = create_db_engine(resolved_url)
+    engine = create_db_engine(resolved_url, settings=cfg)
     sf = create_session_factory(engine)
     store = build_object_store(cfg)
     replayed = 0
@@ -265,7 +266,7 @@ def run_process_ingest_jobs(
 
     cfg = settings or Settings()
     resolved_url = database_url or cfg.database_url
-    engine = create_db_engine(resolved_url)
+    engine = create_db_engine(resolved_url, settings=cfg)
     sf = create_session_factory(engine)
     store = build_object_store(cfg)
 
@@ -328,7 +329,7 @@ def run_ingest_worker_loop(
 
     cfg = settings or Settings()
     resolved_url = database_url or cfg.database_url
-    engine = create_db_engine(resolved_url)
+    engine = create_db_engine(resolved_url, settings=cfg)
     sf = create_session_factory(engine)
     store = build_object_store(cfg)
 

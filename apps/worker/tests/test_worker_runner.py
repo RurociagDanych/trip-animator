@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import psycopg
+import pytest
 from trip_telemetry import ParsedTrack, TrackPoint, build_silver_dataframe, write_silver_parquet
 from trip_worker import (
     ClaimedJob,
@@ -1569,3 +1570,197 @@ def test_run_worker_loop_concurrency_spawns_and_stops_threads(
     run_worker_loop(cfg, once=False)
     assert len(seen_threads) == 2
     assert all(name.startswith("trip-worker-") for name in seen_threads)
+
+
+def test_chunked_job_uses_pre_serialized_manifest_without_rebuilding(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    from trip_worker import manifest as manifest_mod
+    from trip_worker import runner as runner_mod
+    from trip_worker.manifest import chunk_manifest_key
+
+    class SpyLocalStore(LocalObjectStore):
+        def __init__(self, root_dir: Path) -> None:
+            super().__init__(root_dir)
+            self.get_keys: list[str] = []
+
+        def get_bytes(self, key: str) -> bytes:
+            self.get_keys.append(key)
+            return super().get_bytes(key)
+
+    store = SpyLocalStore(tmp_path)
+    db = InMemoryRenderDatabase()
+    owner_id, project_id, stage_id = _seed_project_and_stage(db, store)
+    silver_key = db.stages[project_id][0]["silver_object_key"]
+
+    photo_id = uuid.uuid4()
+    thumb_key = f"photos/{project_id}/{photo_id}_thumb.webp"
+    store.put_bytes(thumb_key, b"RIFFwebp-thumb", content_type="image/webp")
+    db.photos[project_id] = [{
+        "id": photo_id,
+        "project_id": project_id,
+        "thumb_object_key": thumb_key,
+        "width": 640,
+        "height": 480,
+        "caption": "Summit",
+        "taken_at_utc": None,
+        "lat": None,
+        "lon": None,
+        "matched_lat": None,
+        "matched_lon": None,
+        "matched_progress": None,
+        "match_method": "unmatched",
+        "enabled": True,
+    }]
+
+    job_id = uuid.uuid4()
+    db.jobs[job_id] = {
+        "id": job_id,
+        "project_id": project_id,
+        "owner_user_id": owner_id,
+        "spec_json": {"version": 2, "resolution": "1280x720", "fps": 30, "duration_seconds": 10.0},
+        "status": "queued",
+        "progress_pct": 0,
+        "attempt_count": 0,
+        "lease_expires_at": None,
+        "output_object_key": None,
+        "thumbnail_key": None,
+        "expires_at": None,
+        "error_message": None,
+        "is_chunked": False,
+        "total_frames": None,
+        "created_at": datetime.now(UTC),
+        "updated_at": datetime.now(UTC),
+    }
+
+    build_calls: list[dict[str, Any]] = []
+    orig_build = manifest_mod.build_render_manifest
+
+    def spy_build(*args: Any, **kwargs: Any) -> RenderManifest:
+        build_calls.append(kwargs)
+        return orig_build(*args, **kwargs)
+
+    monkeypatch.setattr(runner_mod, "build_render_manifest", spy_build)
+
+    manifest_seen_in_chunks: list[bool] = []
+    chunk_photo_assets: list[dict[str, bytes] | None] = []
+
+    async def fake_chunk_render(
+        manifest: RenderManifest,
+        output_mp4_path: Path,
+        settings: WorkerSettings,
+        *,
+        on_progress: Any = None,
+        is_cancelled: Any = None,
+        frame_start: int = 0,
+        frame_end: int | None = None,
+        preroll_frames: int = 0,
+        photo_assets: dict[str, bytes] | None = None,
+        gop_aligned: bool = False,
+    ) -> Path:
+        _ = manifest, settings, on_progress, is_cancelled, preroll_frames, gop_aligned
+        manifest_seen_in_chunks.append(
+            store.resolve_existing_path(chunk_manifest_key(job_id)).is_file()
+        )
+        chunk_photo_assets.append(dict(photo_assets) if photo_assets is not None else None)
+        await asyncio.to_thread(
+            output_mp4_path.write_bytes, f"CHUNK_{frame_start}_{frame_end}".encode()
+        )
+        return output_mp4_path
+
+    monkeypatch.setattr(
+        "trip_worker.runner.concat_mp4_chunks",
+        lambda paths, out, **_kw: out.write_bytes(b"+".join(p.read_bytes() for p in paths)) or out,
+    )
+    monkeypatch.setattr(
+        "trip_worker.runner.verify_mp4_output",
+        lambda *_a, **_kw: type("Probe", (), {"width": 1280, "height": 720, "duration_s": 10.0})(),
+    )
+    monkeypatch.setattr(
+        "trip_worker.runner.extract_thumbnail",
+        lambda _mp4, thumb_p, **_kw: thumb_p.write_bytes(b"RIFFwebp") or thumb_p,
+    )
+
+    cf = db.conn_factory()
+    settings = WorkerSettings(
+        chunk_threshold_frames=100,
+        chunk_size_frames=150,
+        chunk_preroll_frames=15,
+    )
+    assert run_once(settings, conn_factory=cf, store=store, render_fn=fake_chunk_render) is True
+    assert db.jobs[job_id]["status"] == "succeeded"
+
+    # Manifest was built exactly once (in _prepare_chunked with load_assets=False)
+    assert len(build_calls) == 1
+    assert build_calls[0]["load_assets"] is False
+    assert manifest_seen_in_chunks == [True, True]
+    assert chunk_photo_assets == [
+        {str(photo_id): b"RIFFwebp-thumb"},
+        {str(photo_id): b"RIFFwebp-thumb"},
+    ]
+    # Silver Parquet was NOT read via get_bytes (LocalObjectStore resolves path in build once)
+    assert silver_key not in store.get_keys
+    # Pre-serialized manifest was read by chunks + finalize and deleted on completion
+    assert chunk_manifest_key(job_id) in store.get_keys
+    with pytest.raises(FileNotFoundError):
+        store.resolve_existing_path(chunk_manifest_key(job_id))
+
+    # Fatal chunk failure also deletes the pre-serialized manifest
+    fail_job_id = uuid.uuid4()
+    db.jobs[fail_job_id] = {
+        "id": fail_job_id,
+        "project_id": project_id,
+        "owner_user_id": owner_id,
+        "spec_json": {"version": 2, "resolution": "1280x720", "fps": 30, "duration_seconds": 10.0},
+        "status": "queued",
+        "progress_pct": 0,
+        "attempt_count": 0,
+        "lease_expires_at": None,
+        "output_object_key": None,
+        "thumbnail_key": None,
+        "expires_at": None,
+        "error_message": None,
+        "is_chunked": False,
+        "total_frames": None,
+        "created_at": datetime.now(UTC),
+        "updated_at": datetime.now(UTC),
+    }
+
+    async def fail_chunk(*_a: Any, **_kw: Any) -> Path:
+        raise ValueError("fatal chunk error")
+
+    assert run_once(settings, conn_factory=cf, store=store, render_fn=fail_chunk) is True
+    assert db.jobs[fail_job_id]["status"] == "failed"
+    with pytest.raises(FileNotFoundError):
+        store.resolve_existing_path(chunk_manifest_key(fail_job_id))
+
+    # Cancellation during chunked run also deletes the pre-serialized manifest
+    cancel_job_id = uuid.uuid4()
+    db.jobs[cancel_job_id] = {
+        "id": cancel_job_id,
+        "project_id": project_id,
+        "owner_user_id": owner_id,
+        "spec_json": {"version": 2, "resolution": "1280x720", "fps": 30, "duration_seconds": 10.0},
+        "status": "queued",
+        "progress_pct": 0,
+        "attempt_count": 0,
+        "lease_expires_at": None,
+        "output_object_key": None,
+        "thumbnail_key": None,
+        "expires_at": None,
+        "error_message": None,
+        "is_chunked": False,
+        "total_frames": None,
+        "created_at": datetime.now(UTC),
+        "updated_at": datetime.now(UTC),
+    }
+
+    async def cancel_chunk(*_a: Any, **_kw: Any) -> Path:
+        db.jobs[cancel_job_id]["status"] = "cancelled"
+        raise RenderCancelledError("cancelled by user")
+
+    assert run_once(settings, conn_factory=cf, store=store, render_fn=cancel_chunk) is True
+    assert db.jobs[cancel_job_id]["status"] == "cancelled"
+    with pytest.raises(FileNotFoundError):
+        store.resolve_existing_path(chunk_manifest_key(cancel_job_id))

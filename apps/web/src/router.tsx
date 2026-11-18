@@ -3,15 +3,27 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  lazyRouteComponent,
   type RouterHistory,
 } from "@tanstack/react-router";
+import { RouteLoadingFallback } from "./components/layout/RouteLoadingFallback";
 import { DashboardPage } from "./routes/DashboardPage";
-import { EditorPage } from "./routes/EditorPage";
 import { LoginPage } from "./routes/LoginPage";
 import { NotFoundPage } from "./routes/NotFoundPage";
-import { RenderHarnessPage } from "./routes/RenderHarnessPage";
-import { ShareViewPage } from "./routes/ShareViewPage";
 import { StravaCallbackPage } from "./routes/StravaCallbackPage";
+
+const LazyEditorPage = lazyRouteComponent(
+  () => import("./routes/EditorPage"),
+  "EditorPage",
+);
+const LazyRenderHarnessPage = lazyRouteComponent(
+  () => import("./routes/RenderHarnessPage"),
+  "RenderHarnessPage",
+);
+const LazyShareViewPage = lazyRouteComponent(
+  () => import("./routes/ShareViewPage"),
+  "ShareViewPage",
+);
 
 const rootRoute = createRootRoute({
   component: Outlet,
@@ -38,19 +50,21 @@ const stravaCallbackRoute = createRoute({
 const editorRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/projects/$projectId",
-  component: EditorPage,
+  component: LazyEditorPage,
+  pendingComponent: RouteLoadingFallback,
 });
 
 const renderHarnessRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/render/$jobId",
-  component: RenderHarnessPage,
+  component: LazyRenderHarnessPage,
 });
 
 const shareViewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/share/$slug",
-  component: ShareViewPage,
+  component: LazyShareViewPage,
+  pendingComponent: RouteLoadingFallback,
 });
 
 const routeTree = rootRoute.addChildren([

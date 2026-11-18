@@ -6,6 +6,7 @@ import {
   type RenderManifest,
   type StageOut,
   type TelemetryChartPoint,
+  type TelemetryGeometryFeature,
 } from "../lib/api/types";
 import {
   buildTelemetryPlotData,
@@ -25,11 +26,13 @@ import {
   computeAdaptiveFollowCamera,
   computeColorLegendScale,
   computeFollowZoom,
+  computeTimelineBounds,
   detectTransferArcs,
   evaluateTimeline,
   frameIndexToProgress,
   mapClimbsToTimelineProgress,
   sampleTelemetryReadoutAtProgress,
+  sampleTimelinePointAtProgress,
   smoothTelemetryChartPoints,
   type TimelineStage,
 } from "../lib/geo/timeline";
@@ -730,5 +733,314 @@ describe("Timeline math and formatting", () => {
     expect(plotOpts.series[4]?.show).toBe(true);
     expect(plotOpts.series[5]?.show).toBe(true);
     expect(plotOpts.cursor?.drag?.x).toBe(true);
+  });
+
+  it("caches timeline samples by (stages, timeline_mode), invalidates on in-place mutation, and memoizes full elevation curtain data", () => {
+    const stages: TimelineStage[] = [
+      {
+        id: "cache-s1",
+        name: "Fast Flat",
+        dayIndex: 1,
+        stageOrder: 0,
+        activityType: "cycling",
+        color: "#38bdf8",
+        transition: "none",
+        distanceM: 1000,
+        elevationGainM: 10,
+        movingSeconds: 100,
+        elapsedSeconds: 100,
+        hasTimestamps: true,
+        points: [
+          {
+            lat: 0.1,
+            lon: 0.1,
+            lonUnwrapped: 0.1,
+            elevM: 100,
+            cumDistM: 0,
+            globalDistM: 0,
+            speedMps: 10,
+            gradePct: 0,
+            elapsedS: 0,
+            globalElapsedS: 0,
+            tsUtcMs: 1_750_000_000_000,
+            segmentIdx: 0,
+          },
+          {
+            lat: 0.11,
+            lon: 0.11,
+            lonUnwrapped: 0.11,
+            elevM: 110,
+            cumDistM: 1000,
+            globalDistM: 1000,
+            speedMps: 10,
+            gradePct: 1,
+            elapsedS: 100,
+            globalElapsedS: 100,
+            tsUtcMs: 1_750_000_100_000,
+            segmentIdx: 0,
+          },
+        ],
+      },
+      {
+        id: "cache-s2",
+        name: "Steep Climb",
+        dayIndex: 2,
+        stageOrder: 1,
+        activityType: "cycling",
+        color: "#14b8a6",
+        transition: "none",
+        distanceM: 1000,
+        elevationGainM: 400,
+        movingSeconds: 900,
+        elapsedSeconds: 900,
+        hasTimestamps: true,
+        points: [
+          {
+            lat: 0.11,
+            lon: 0.11,
+            lonUnwrapped: 0.11,
+            elevM: 110,
+            cumDistM: 0,
+            globalDistM: 1000,
+            speedMps: 1.1,
+            gradePct: 8,
+            elapsedS: 0,
+            globalElapsedS: 100,
+            tsUtcMs: 1_750_000_200_000,
+            segmentIdx: 0,
+          },
+          {
+            lat: 0.12,
+            lon: 0.12,
+            lonUnwrapped: 0.12,
+            elevM: 510,
+            cumDistM: 1000,
+            globalDistM: 2000,
+            speedMps: 1.1,
+            gradePct: 10,
+            elapsedS: 900,
+            globalElapsedS: 1000,
+            tsUtcMs: 1_750_001_100_000,
+            segmentIdx: 0,
+          },
+        ],
+      },
+    ];
+
+    const distSpec = { ...createDefaultRenderSpecV2(), timeline_mode: "distance" as const };
+    const timeSpec = { ...createDefaultRenderSpecV2(), timeline_mode: "recorded-time" as const };
+
+    // Identical stages ref under distance vs recorded-time must not collide in WeakMap cache
+    const evalDist = evaluateTimeline(stages, distSpec, 0.5);
+    const evalTime = evaluateTimeline(stages, timeSpec, 0.5);
+    expect(evalDist.distanceTravelledM).toBeCloseTo(1000, 3);
+    expect(evalDist.elapsedSeconds).toBeCloseTo(100, 3);
+    expect(evalTime.elapsedSeconds).toBeCloseTo(500, 3);
+    expect(evalTime.distanceTravelledM).toBeCloseTo(1444.444, 1);
+
+    const ptDist = sampleTimelinePointAtProgress(stages, distSpec, 0.5);
+    const ptTime = sampleTimelinePointAtProgress(stages, timeSpec, 0.5);
+    expect(ptDist?.globalDistM).toBeCloseTo(1000, 3);
+    expect(ptTime?.globalElapsedS).toBeCloseTo(500, 3);
+
+    // Elevation curtain WeakMap memoization for visibility_mode === "full"
+    const overlay1 = buildDeckOverlayProps(evalDist.visiblePaths, evalDist.markerPosition, {
+      elevationCurtain: true,
+      terrainExaggeration: 1.8,
+      elevationStages: stages,
+    });
+    const overlay2 = buildDeckOverlayProps(evalDist.visiblePaths, evalDist.markerPosition, {
+      elevationCurtain: true,
+      terrainExaggeration: 1.8,
+      elevationStages: stages,
+    });
+    const poly1 = overlay1.layers?.find((l) => (l as { id?: string }).id === "trip-elevation-curtain") as
+      | { props?: { data?: unknown } }
+      | undefined;
+    const poly2 = overlay2.layers?.find((l) => (l as { id?: string }).id === "trip-elevation-curtain") as
+      | { props?: { data?: unknown } }
+      | undefined;
+    const ridge1 = overlay1.layers?.find((l) => (l as { id?: string }).id === "trip-elevation-ridge") as
+      | { props?: { data?: unknown } }
+      | undefined;
+    const ridge2 = overlay2.layers?.find((l) => (l as { id?: string }).id === "trip-elevation-ridge") as
+      | { props?: { data?: unknown } }
+      | undefined;
+    expect(poly1?.props?.data).toBe(poly2?.props?.data);
+    expect(ridge1?.props?.data).toBe(ridge2?.props?.data);
+
+    // Changing exaggeration or maxDistanceM returns distinct array data
+    const overlayExag = buildDeckOverlayProps(evalDist.visiblePaths, evalDist.markerPosition, {
+      elevationCurtain: true,
+      terrainExaggeration: 2.6,
+      elevationStages: stages,
+    });
+    const overlayPartial = buildDeckOverlayProps(evalDist.visiblePaths, evalDist.markerPosition, {
+      elevationCurtain: true,
+      terrainExaggeration: 1.8,
+      elevationStages: stages,
+      maxDistanceM: 1200,
+    });
+    const polyExag = overlayExag.layers?.find((l) => (l as { id?: string }).id === "trip-elevation-curtain") as
+      | { props?: { data?: unknown } }
+      | undefined;
+    const polyPartial = overlayPartial.layers?.find(
+      (l) => (l as { id?: string }).id === "trip-elevation-curtain",
+    ) as { props?: { data?: unknown } } | undefined;
+    expect(polyExag?.props?.data).not.toBe(poly1?.props?.data);
+    expect(polyPartial?.props?.data).not.toBe(poly1?.props?.data);
+
+    // In-place mutation guard invalidates cached bounds and samples
+    const boundsBefore = computeTimelineBounds(stages);
+    expect(boundsBefore[2]).toBeCloseTo(0.12, 6);
+    stages[1]!.points.push({
+      lat: 0.25,
+      lon: 0.25,
+      lonUnwrapped: 0.25,
+      elevM: 600,
+      cumDistM: 2000,
+      globalDistM: 3000,
+      speedMps: 5,
+      gradePct: 4,
+      elapsedS: 1200,
+      globalElapsedS: 1300,
+      tsUtcMs: 1_750_001_400_000,
+      segmentIdx: 0,
+    });
+    const boundsAfter = computeTimelineBounds(stages);
+    expect(boundsAfter[2]).toBeCloseTo(0.25, 6);
+    expect(evaluateTimeline(stages, distSpec, 1).totalDistanceM).toBeCloseTo(3000, 3);
+  });
+
+  it("hoists smoothTelemetryChartPoints in buildTimelineFromProject across multiple stages", () => {
+    const projectStages: StageOut[] = [
+      {
+        id: "ps-1",
+        project_id: "proj-1",
+        source_type: "gpx",
+        external_source_id: null,
+        strava_activity_id: null,
+        name: "Stage 1",
+        stage_order: 0,
+        day_index: 1,
+        trim_start_s: null,
+        trim_end_s: null,
+        started_at: "2001-06-14T08:00:00Z",
+        point_count: 2,
+        distance_m: 1000,
+        elevation_gain_m: 50,
+        elevation_loss_m: 10,
+        moving_seconds: 120,
+        elapsed_seconds: 120,
+        has_timestamps: true,
+        min_lat: 0.1,
+        max_lat: 0.11,
+        min_lon: 0.1,
+        max_lon: 0.11,
+        warnings: [],
+        created_at: "2001-06-14T08:00:00Z",
+      },
+      {
+        id: "ps-2",
+        project_id: "proj-1",
+        source_type: "gpx",
+        external_source_id: null,
+        strava_activity_id: null,
+        name: "Stage 2",
+        stage_order: 1,
+        day_index: 2,
+        trim_start_s: null,
+        trim_end_s: null,
+        started_at: "2001-06-15T08:00:00Z",
+        point_count: 2,
+        distance_m: 1000,
+        elevation_gain_m: 100,
+        elevation_loss_m: 20,
+        moving_seconds: 180,
+        elapsed_seconds: 180,
+        has_timestamps: true,
+        min_lat: 0.11,
+        max_lat: 0.12,
+        min_lon: 0.11,
+        max_lon: 0.12,
+        warnings: [],
+        created_at: "2001-06-15T08:00:00Z",
+      },
+    ];
+    const features: TelemetryGeometryFeature[] = [
+      {
+        type: "Feature" as const,
+        id: "ps-1",
+        geometry: {
+          type: "MultiLineString" as const,
+          coordinates: [
+            [
+              [0.1, 0.1],
+              [0.105, 0.1],
+            ],
+          ],
+        },
+        properties: {
+          lod: "medium" as const,
+          point_count: 2,
+          original_point_count: 2,
+          segment_count: 1,
+          bbox: [0.1, 0.1, 0.105, 0.1] as [number, number, number, number],
+          crosses_antimeridian: false,
+          stage_id: "ps-1",
+          name: "Stage 1",
+          day_index: 1,
+          stage_order: 0,
+          source_type: "gpx" as const,
+          distance_m: 1000,
+          elevation_gain_m: 50,
+        },
+      },
+      {
+        type: "Feature" as const,
+        id: "ps-2",
+        geometry: {
+          type: "MultiLineString" as const,
+          coordinates: [
+            [
+              [0.105, 0.1],
+              [0.11, 0.1],
+            ],
+          ],
+        },
+        properties: {
+          lod: "medium" as const,
+          point_count: 2,
+          original_point_count: 2,
+          segment_count: 1,
+          bbox: [0.105, 0.1, 0.11, 0.1] as [number, number, number, number],
+          crosses_antimeridian: false,
+          stage_id: "ps-2",
+          name: "Stage 2",
+          day_index: 2,
+          stage_order: 1,
+          source_type: "gpx" as const,
+          distance_m: 1000,
+          elevation_gain_m: 100,
+        },
+      },
+    ];
+    const chartPoints: TelemetryChartPoint[] = [
+      { cum_dist_m: 0, elev_m: 100, speed_mps: 8, grade_pct: 1, hr_bpm: 130, watts: 200 },
+      { cum_dist_m: 1000, elev_m: 200, speed_mps: 6, grade_pct: 5, hr_bpm: 150, watts: 260 },
+      { cum_dist_m: 2000, elev_m: 300, speed_mps: 5, grade_pct: 8, hr_bpm: 170, watts: 320 },
+    ];
+    const spec = { ...createDefaultRenderSpecV2(), telemetry_smoothing: 3 };
+    const built = buildTimelineFromProject(
+      projectStages,
+      features,
+      { project_id: "proj-1", total_distance_m: 2000, points: chartPoints },
+      spec,
+    );
+    const expectedSmoothed = smoothTelemetryChartPoints(chartPoints, 3);
+    expect(built).toHaveLength(2);
+    expect(built[0]?.points[0]?.elevM).toBeCloseTo(expectedSmoothed[0]!.elev_m!, 5);
+    expect(built[1]?.points[0]?.elevM).toBeCloseTo(expectedSmoothed[1]!.elev_m!, 5);
+    expect(built[1]?.points[1]?.watts).toBeCloseTo(expectedSmoothed[2]!.watts!, 5);
   });
 });

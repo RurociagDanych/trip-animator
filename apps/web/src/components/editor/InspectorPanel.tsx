@@ -85,6 +85,7 @@ export interface InspectorPanelProps {
   stageCount: number;
   dayCount?: number;
   currentProgress?: number;
+  getCurrentProgress?: () => number;
   onSelectSection: (section: InspectorSection) => void;
   onUpdateSpec: (patch: Partial<RenderSpecV2>) => void;
   onUpdateHud: (patch: Partial<StatisticsPanelConfig>) => void;
@@ -99,6 +100,7 @@ export function InspectorPanel({
   stageCount,
   dayCount,
   currentProgress = 0,
+  getCurrentProgress,
   onSelectSection,
   onUpdateSpec,
   onUpdateHud,
@@ -122,7 +124,8 @@ export function InspectorPanel({
   }
 
   function handleAddKeyframe() {
-    const clampedProgress = Math.round(Math.min(1, Math.max(0, currentProgress)) * 1000) / 1000;
+    const rawProgress = getCurrentProgress ? getCurrentProgress() : currentProgress;
+    const clampedProgress = Math.round(Math.min(1, Math.max(0, rawProgress)) * 1000) / 1000;
     const nextKf: CameraKeyframe = {
       progress: clampedProgress,
       camera_mode: spec.camera_mode,

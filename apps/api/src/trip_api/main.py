@@ -79,7 +79,7 @@ def create_app(
 ) -> FastAPI:
     cfg = settings or get_settings()
 
-    db_engine = engine or create_db_engine(cfg.database_url)
+    db_engine = engine or create_db_engine(cfg.database_url, settings=cfg)
     db_session_factory = session_factory or create_session_factory(db_engine)
     store = object_store or _build_object_store(cfg)
 

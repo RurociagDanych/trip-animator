@@ -361,6 +361,11 @@ class _SpyObjectStore:
     ) -> ObjectStream:
         return self._backing.open_stream(key, range_header=range_header, chunk_size=chunk_size)
 
+    def copy(
+        self, src_key: str, dst_key: str, *, content_type: str | None = None
+    ) -> None:
+        self._backing.copy(src_key, dst_key, content_type=content_type)
+
     def delete(self, key: str) -> None:
         self._backing.delete(key)
 

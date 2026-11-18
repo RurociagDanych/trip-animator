@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
     JSON,
@@ -27,6 +28,9 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from trip_telemetry import VALID_ACTIVITY_TYPES
+
+if TYPE_CHECKING:
+    from trip_api.config import Settings
 
 JSONVariant = JSON().with_variant(JSONB(), "postgresql")
 
@@ -398,16 +402,22 @@ class RateLimitRecord(Base):
     )
 
 
-def create_db_engine(database_url: str) -> Engine:
+def create_db_engine(database_url: str, *, settings: Settings | None = None) -> Engine:
+    is_sqlite = database_url.startswith("sqlite")
     connect_args: dict[str, object] = {}
-    if database_url.startswith("sqlite"):
+    engine_kwargs: dict[str, Any] = {
+        "pool_pre_ping": not is_sqlite,
+        "future": True,
+        "connect_args": connect_args,
+    }
+    if is_sqlite:
         connect_args["check_same_thread"] = False
-    return create_engine(
-        database_url,
-        pool_pre_ping=not database_url.startswith("sqlite"),
-        future=True,
-        connect_args=connect_args,
-    )
+    else:
+        engine_kwargs["pool_size"] = settings.db_pool_size if settings is not None else 10
+        engine_kwargs["max_overflow"] = settings.db_max_overflow if settings is not None else 20
+        engine_kwargs["pool_timeout"] = settings.db_pool_timeout_s if settings is not None else 30
+        engine_kwargs["pool_recycle"] = settings.db_pool_recycle_s if settings is not None else 1800
+    return create_engine(database_url, **engine_kwargs)
 
 
 def create_session_factory(engine: Engine) -> sessionmaker[Session]:

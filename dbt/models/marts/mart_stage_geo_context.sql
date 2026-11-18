@@ -1,3 +1,11 @@
+{{
+    config(
+        materialized='incremental',
+        unique_key='stage_id',
+        incremental_strategy='delete+insert',
+        pre_hook="{% if is_incremental() %} DELETE FROM {{ this }} WHERE stage_id NOT IN (SELECT stage_id FROM {{ ref('mart_stage_summary') }}) OR stage_id IN (SELECT stage_id FROM {{ ref('mart_stage_summary') }} WHERE _dbt_invocation_id = '{{ invocation_id }}'); {% endif %}"
+    )
+}}
 WITH stage_pts AS (
     SELECT
         trip_id,
@@ -7,6 +15,13 @@ WITH stage_pts AS (
         ROW_NUMBER() OVER (PARTITION BY stage_id ORDER BY seq ASC) AS rn,
         COUNT(*) OVER (PARTITION BY stage_id) AS total_n
     FROM {{ ref('stg_telemetry_points') }}
+    {% if is_incremental() %}
+    WHERE stage_id IN (
+        SELECT stage_id
+        FROM {{ ref('mart_stage_summary') }}
+        WHERE _dbt_invocation_id = '{{ invocation_id }}'
+    )
+    {% endif %}
 ),
 sampled AS (
     SELECT trip_id, stage_id, lat, lon
@@ -68,3 +83,6 @@ FROM {{ ref('mart_stage_summary') }} AS m
 LEFT JOIN stage_countries AS sc ON sc.stage_id = m.stage_id
 LEFT JOIN stage_regions AS sr ON sr.stage_id = m.stage_id
 LEFT JOIN stage_passes AS sp ON sp.stage_id = m.stage_id
+{% if is_incremental() %}
+WHERE m._dbt_invocation_id = '{{ invocation_id }}'
+{% endif %}

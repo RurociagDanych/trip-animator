@@ -908,3 +908,52 @@ async def test_x_forwarded_for_spoofing_vs_trusted_forwarded_allow_ips(
             headers={"X-Forwarded-For": "198.51.100.51"},
         )
         assert other_client_res.status_code == 401
+
+
+def test_create_db_engine_applies_pool_params_on_postgres_and_skips_sqlite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trip_api import db as db_mod
+    from trip_api.config import Settings
+
+    recorded: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_create_engine(url: str, **kwargs: Any) -> Any:
+        recorded.append((url, kwargs))
+        return object()
+
+    monkeypatch.setattr(db_mod, "create_engine", fake_create_engine)
+
+    pg_url = "postgresql+psycopg://trip_app:secret@localhost:5432/trip_animator"
+    custom_cfg = Settings(
+        db_pool_size=12,
+        db_max_overflow=24,
+        db_pool_timeout_s=45,
+        db_pool_recycle_s=900,
+    )
+    db_mod.create_db_engine(pg_url, settings=custom_cfg)
+    db_mod.create_db_engine(pg_url)
+    db_mod.create_db_engine("sqlite:///tmp/test_pool.db", settings=custom_cfg)
+
+    assert len(recorded) == 3
+
+    _, pg_custom_kw = recorded[0]
+    assert pg_custom_kw["pool_size"] == 12
+    assert pg_custom_kw["max_overflow"] == 24
+    assert pg_custom_kw["pool_timeout"] == 45
+    assert pg_custom_kw["pool_recycle"] == 900
+    assert pg_custom_kw["pool_pre_ping"] is True
+    assert pg_custom_kw["connect_args"] == {}
+
+    _, pg_default_kw = recorded[1]
+    assert pg_default_kw["pool_size"] == 10
+    assert pg_default_kw["max_overflow"] == 20
+    assert pg_default_kw["pool_timeout"] == 30
+    assert pg_default_kw["pool_recycle"] == 1800
+    assert pg_default_kw["pool_pre_ping"] is True
+
+    _, sqlite_kw = recorded[2]
+    assert sqlite_kw["pool_pre_ping"] is False
+    assert sqlite_kw["connect_args"] == {"check_same_thread": False}
+    for pool_key in ("pool_size", "max_overflow", "pool_timeout", "pool_recycle"):
+        assert pool_key not in sqlite_kw

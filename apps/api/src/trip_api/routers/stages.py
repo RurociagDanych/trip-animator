@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import tempfile
 import uuid
@@ -44,11 +45,12 @@ from trip_api.services import (
     get_owned_project,
     get_project_stages,
     get_silver_total_elapsed_s,
-    ingest_parsed_track,
     invalidate_or_rebuild_stage_lod_cache,
     materialize_silver_parquet,
     persist_or_delete_stage_chart_cache,
     persist_or_delete_stage_lod_cache,
+    persist_prepared_stage,
+    prepare_stage_artifacts,
     project_to_out,
     stage_chart_cache_key,
     stage_events_cache_key,
@@ -179,7 +181,8 @@ async def _handle_track_upload(
         )
 
     try:
-        parsed = _parse_track_payload(
+        parsed = await asyncio.to_thread(
+            _parse_track_payload,
             raw_bytes,
             filename=file.filename,
             source_format=source_format,
@@ -201,34 +204,49 @@ async def _handle_track_upload(
         "strava": "application/json",
     }
 
-    stage = ingest_parsed_track(
-        db=db,
+    prepared = await asyncio.to_thread(
+        prepare_stage_artifacts,
         store=store,
-        project=project,
+        project_id=project.id,
         parsed=parsed,
         raw_bronze_bytes=raw_bytes,
         bronze_ext=source_format,
         bronze_content_type=content_type_map[source_format],
-        source_type="gpx",
-        source_format=source_format,
-        stage_name=resolved_name,
-        day_index=day_index,
-        activity_type=resolved_activity,
     )
-    write_audit_event(
-        db,
-        user_id=auth.user.id,
-        project_id=project.id,
-        event_type="stage.gpx_uploaded",
-        metadata={
-            "stage_id": str(stage.id),
-            "name": stage.name,
-            "source_format": source_format,
-            "activity_type": stage.activity_type,
-            "point_count": stage.point_count,
-        },
-    )
-    db.commit()
+    try:
+        stage = persist_prepared_stage(
+            db=db,
+            store=store,
+            project=project,
+            prepared=prepared,
+            source_type="gpx",
+            source_format=source_format,
+            stage_name=resolved_name,
+            day_index=day_index,
+            activity_type=resolved_activity,
+        )
+        write_audit_event(
+            db,
+            user_id=auth.user.id,
+            project_id=project.id,
+            event_type="stage.gpx_uploaded",
+            metadata={
+                "stage_id": str(stage.id),
+                "name": stage.name,
+                "source_format": source_format,
+                "activity_type": stage.activity_type,
+                "point_count": stage.point_count,
+            },
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        for k in prepared.uploaded_keys:
+            try:
+                await asyncio.to_thread(store.delete, k)
+            except Exception:
+                logger.warning("Failed to rollback stage key %s", k)
+        raise
     return stage_to_out(stage)
 
 

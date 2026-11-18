@@ -709,6 +709,12 @@ def test_non_local_store_materialization_and_lod_cache_error_fallbacks(
                 is_partial=False,
             )
 
+        def copy(
+            self, src_key: str, dst_key: str, *, content_type: str | None = None
+        ) -> None:
+            _ = content_type
+            self._blobs[dst_key] = self.get_bytes(src_key)
+
         def delete(self, key: str) -> None:
             self._blobs.pop(key, None)
 

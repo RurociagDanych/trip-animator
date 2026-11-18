@@ -2,7 +2,9 @@
     config(
         materialized='incremental',
         unique_key='stage_id',
-        incremental_strategy='delete+insert'
+        incremental_strategy='delete+insert',
+        on_schema_change='append_new_columns',
+        post_hook="{% if is_incremental() %} DELETE FROM {{ this }} WHERE stage_id NOT IN (SELECT DISTINCT stage_id FROM {{ ref('stg_telemetry_points') }}); {% endif %}"
     )
 }}
 WITH base AS (
@@ -84,7 +86,9 @@ final AS (
         END::DOUBLE AS vam_m_per_h
     FROM agg
 )
-SELECT *
+SELECT
+    final.*,
+    '{{ invocation_id }}' AS _dbt_invocation_id
 FROM final
 {% if is_incremental() %}
 WHERE NOT EXISTS (
@@ -94,5 +98,7 @@ WHERE NOT EXISTS (
       AND existing.point_count = final.point_count
       AND ABS(existing.total_distance_m - final.total_distance_m) < 1e-6
       AND ABS(existing.elevation_gain_m - final.elevation_gain_m) < 1e-6
+      AND existing.started_at_utc IS NOT DISTINCT FROM final.started_at_utc
+      AND existing.ended_at_utc IS NOT DISTINCT FROM final.ended_at_utc
 )
 {% endif %}

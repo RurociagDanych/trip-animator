@@ -6,6 +6,7 @@ import socket
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from threading import Barrier
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
@@ -1326,3 +1327,170 @@ def test_render_download_streaming_ranges_and_s3_404(
     h.app.state.object_store = s3_store
     assert client.get(f"/api/v1/renders/{job_id}/download").status_code == 404
     assert client.get(f"/api/v1/renders/{job_id}/thumbnail").status_code == 404
+
+
+def test_local_and_s3_object_store_copy_zero_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trip_api.storage import LocalObjectStore
+
+    local = LocalObjectStore(tmp_path)
+    local.put_bytes("outputs/src.mp4", b"mp4-binary-payload", content_type="video/mp4")
+    local.copy("outputs/src.mp4", "outputs/nested/dst.mp4", content_type="video/mp4")
+    assert local.get_bytes("outputs/nested/dst.mp4") == b"mp4-binary-payload"
+    assert local.get_bytes("outputs/src.mp4") == b"mp4-binary-payload"
+
+    with pytest.raises(FileNotFoundError):
+        local.copy("outputs/missing.mp4", "outputs/dst2.mp4")
+    with pytest.raises(ValueError, match="Unsafe object key"):
+        local.copy("outputs/src.mp4", "../escape.mp4")
+
+    s3_copy_calls: list[tuple[Any, ...]] = []
+
+    class FakeS3CopyClient:
+        def copy(
+            self,
+            copy_source: dict[str, str],
+            bucket: str,
+            key: str,
+            ExtraArgs: dict[str, Any] | None = None,
+        ) -> None:
+            s3_copy_calls.append((copy_source, bucket, key, ExtraArgs))
+            if copy_source["Key"] == "outputs/missing.mp4":
+                raise ClientError(
+                    {"Error": {"Code": "NoSuchKey", "Message": "Missing"}},
+                    "CopyObject",
+                )
+
+    monkeypatch.setattr(boto3, "client", lambda *_args, **_kwargs: FakeS3CopyClient())
+    s3 = S3ObjectStore(
+        endpoint_url="",
+        access_key_id="",
+        secret_access_key="",
+        bucket="my-bucket",
+        region="us-east-1",
+    )
+    s3.copy("outputs/a.mp4", "outputs/b.mp4", content_type="video/mp4")
+    assert s3_copy_calls == [
+        (
+            {"Bucket": "my-bucket", "Key": "outputs/a.mp4"},
+            "my-bucket",
+            "outputs/b.mp4",
+            {"ContentType": "video/mp4", "MetadataDirective": "REPLACE"},
+        )
+    ]
+    with pytest.raises(FileNotFoundError):
+        s3.copy("outputs/missing.mp4", "outputs/c.mp4")
+
+
+def test_try_copy_cached_render_artifacts_uses_store_copy(tmp_path: Path) -> None:
+    from trip_api.routers.renders import _try_copy_cached_render_artifacts
+    from trip_api.storage import LocalObjectStore
+
+    class CopySpyStore(LocalObjectStore):
+        def __init__(self, root: Path) -> None:
+            super().__init__(root)
+            self.copy_calls: list[tuple[str, str, str | None]] = []
+
+        def get_bytes(self, key: str) -> bytes:
+            raise AssertionError(f"get_bytes should not be called during zero-copy: {key}")
+
+        def copy(
+            self, src_key: str, dst_key: str, *, content_type: str | None = None
+        ) -> None:
+            self.copy_calls.append((src_key, dst_key, content_type))
+            super().copy(src_key, dst_key, content_type=content_type)
+
+    store = CopySpyStore(tmp_path)
+    src_job_id = uuid.uuid4()
+    new_job_id = uuid.uuid4()
+    src_mp4 = f"outputs/{src_job_id}.mp4"
+    src_webp = f"outputs/{src_job_id}.webp"
+    store.put_bytes(src_mp4, b"MP4-DATA", content_type="video/mp4")
+    store.put_bytes(src_webp, b"WEBP-DATA", content_type="image/webp")
+
+    cached_job = RenderJob(
+        id=src_job_id,
+        project_id=uuid.uuid4(),
+        owner_user_id=uuid.uuid4(),
+        idempotency_key="cache-src",
+        idempotency_hash="c" * 64,
+        spec_json={},
+        status="succeeded",
+        progress_pct=100,
+        output_object_key=src_mp4,
+        thumbnail_key=src_webp,
+    )
+    copied = _try_copy_cached_render_artifacts(store, cached_job, new_job_id)
+    assert copied == (f"outputs/{new_job_id}.mp4", f"outputs/{new_job_id}.webp")
+    assert store.copy_calls == [
+        (src_mp4, f"outputs/{new_job_id}.mp4", "video/mp4"),
+        (src_webp, f"outputs/{new_job_id}.webp", "image/webp"),
+    ]
+    assert store.resolve_existing_path(f"outputs/{new_job_id}.mp4").read_bytes() == b"MP4-DATA"
+    assert store.resolve_existing_path(f"outputs/{new_job_id}.webp").read_bytes() == b"WEBP-DATA"
+
+    missing_job = RenderJob(
+        id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        owner_user_id=uuid.uuid4(),
+        idempotency_key="cache-missing",
+        idempotency_hash="d" * 64,
+        spec_json={},
+        status="succeeded",
+        progress_pct=100,
+        output_object_key="outputs/does-not-exist.mp4",
+        thumbnail_key=None,
+    )
+    assert _try_copy_cached_render_artifacts(store, missing_job, uuid.uuid4()) is None
+
+
+def test_stream_render_events_offloads_snapshot_fetch(
+    make_harness: HarnessFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    from trip_api.routers import renders as renders_router
+
+    h = make_harness()
+    user = h.create_user("sseoffload@example.com")
+    client, csrf = h.login_client("sseoffload@example.com")
+    proj_id = client.post(
+        "/api/v1/projects",
+        json={"title": "Offload Trip"},
+        headers={"X-CSRF-Token": csrf},
+    ).json()["id"]
+
+    job_id = uuid.uuid4()
+    with h.session_factory() as db:
+        db.add(
+            RenderJob(
+                id=job_id,
+                project_id=uuid.UUID(proj_id),
+                owner_user_id=user.id,
+                idempotency_key="sse-offload-1",
+                idempotency_hash="e" * 64,
+                spec_json={"version": 2},
+                status="succeeded",
+                progress_pct=100,
+            )
+        )
+        db.commit()
+
+    offloaded_fns: list[Any] = []
+    real_to_thread = asyncio.to_thread
+
+    async def spy_to_thread(func: Any, /, *args: Any, **kwargs: Any) -> Any:
+        offloaded_fns.append(func)
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(renders_router.asyncio, "to_thread", spy_to_thread)
+
+    with client.stream("GET", f"/api/v1/renders/{job_id}/events") as sse:
+        assert sse.status_code == 200
+        body = "".join(sse.iter_text())
+        assert '"status": "succeeded"' in body
+
+    assert renders_router._fetch_job_snapshot in offloaded_fns

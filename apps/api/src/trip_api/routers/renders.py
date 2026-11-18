@@ -124,23 +124,20 @@ def _try_copy_cached_render_artifacts(
 ) -> tuple[str, str | None] | None:
     if not cached_job.output_object_key:
         return None
+    new_out_key = f"outputs/{new_job_id}.mp4"
     try:
-        video_bytes = store.get_bytes(cached_job.output_object_key)
+        store.copy(cached_job.output_object_key, new_out_key, content_type="video/mp4")
     except FileNotFoundError:
         return None
     except Exception as exc:
-        logger.warning("Failed reading cached render video %s: %s", cached_job.id, exc)
+        logger.warning("Failed copying cached render video %s: %s", cached_job.id, exc)
         return None
-
-    new_out_key = f"outputs/{new_job_id}.mp4"
-    store.put_bytes(new_out_key, video_bytes, content_type="video/mp4")
 
     new_thumb_key: str | None = None
     if cached_job.thumbnail_key:
+        candidate_thumb_key = f"outputs/{new_job_id}.webp"
         try:
-            thumb_bytes = store.get_bytes(cached_job.thumbnail_key)
-            candidate_thumb_key = f"outputs/{new_job_id}.webp"
-            store.put_bytes(candidate_thumb_key, thumb_bytes, content_type="image/webp")
+            store.copy(cached_job.thumbnail_key, candidate_thumb_key, content_type="image/webp")
             new_thumb_key = candidate_thumb_key
         except FileNotFoundError:
             new_thumb_key = None
@@ -387,7 +384,9 @@ async def stream_render_events(
                     while (time.monotonic() - start_mono) < deadline_s:
                         if await request.is_disconnected():
                             break
-                        current = _fetch_job_snapshot(session_factory, job_id, user_id)
+                        current = await asyncio.to_thread(
+                            _fetch_job_snapshot, session_factory, job_id, user_id
+                        )
                         if current is None:
                             yield 'event: error\ndata: {"detail":"Render job not found"}\n\n'
                             return
@@ -425,7 +424,9 @@ async def stream_render_events(
             polls_done += 1
             if await request.is_disconnected():
                 break
-            current = _fetch_job_snapshot(session_factory, job_id, user_id)
+            current = await asyncio.to_thread(
+                _fetch_job_snapshot, session_factory, job_id, user_id
+            )
             if current is None:
                 yield 'event: error\ndata: {"detail":"Render job not found"}\n\n'
                 break

@@ -9,13 +9,13 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlparse
 
 import httpx
-from playwright.async_api import Page, Route, async_playwright
+from playwright.async_api import Browser, Page, Playwright, Route, async_playwright
 
 from trip_worker.config import WorkerSettings
 from trip_worker.encoder import StreamingVideoEncoder
@@ -433,6 +433,124 @@ async def render_manifest_with_page(
     return frames_written
 
 
+class WarmPlaywrightHost:
+    """Thread-affine persistent asyncio event loop and warm Chromium browser host."""
+
+    def __init__(self, settings: WorkerSettings) -> None:
+        self._settings = settings
+        self._loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
+        self._playwright: Playwright | None = None
+        self._browser: Browser | None = None
+        self._render_count: int = 0
+
+    def __enter__(self) -> WarmPlaywrightHost:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    @property
+    def render_count(self) -> int:
+        """Number of renders dispatched to the active Chromium instance."""
+        return self._render_count
+
+    def run_coro[T](self, coro: Coroutine[Any, Any, T]) -> T:
+        """Execute an async coroutine on the worker thread's persistent event loop."""
+        return self._loop.run_until_complete(coro)
+
+    async def acquire_browser(self) -> Browser:
+        """Return a connected Chromium Browser, launching or recycling when needed."""
+        if self._browser is not None:
+            needs_recycle = (
+                not self._browser.is_connected()
+                or self._render_count >= self._settings.worker_browser_max_renders
+            )
+            if needs_recycle:
+                await self.reset_browser()
+
+        if self._playwright is None:
+            self._playwright = await async_playwright().start()
+
+        if self._browser is None:
+            self._browser = await self._playwright.chromium.launch(
+                headless=True,
+                args=build_chromium_launch_args(self._settings),
+            )
+            self._render_count = 0
+
+        self._render_count += 1
+        return self._browser
+
+    async def reset_browser(self) -> None:
+        """Close the active Browser instance so the next render launches a fresh one."""
+        browser = self._browser
+        self._browser = None
+        self._render_count = 0
+        if browser is not None:
+            try:
+                await browser.close()
+            except Exception:
+                logger.debug("Ignoring error closing recycled/crashed Chromium", exc_info=True)
+
+    async def aclose(self) -> None:
+        """Shut down the active Chromium Browser and Playwright driver."""
+        await self.reset_browser()
+        pw = self._playwright
+        self._playwright = None
+        if pw is not None:
+            try:
+                await pw.stop()
+            except Exception:
+                logger.debug("Ignoring error stopping Playwright", exc_info=True)
+
+    def close(self) -> None:
+        """Synchronously close browser resources and the owned event loop."""
+        if self._loop.is_closed():
+            return
+        try:
+            self._loop.run_until_complete(self.aclose())
+        finally:
+            self._loop.close()
+
+
+async def _render_with_browser(
+    browser: Browser,
+    manifest: RenderManifest,
+    encoder: StreamingVideoEncoder,
+    settings: WorkerSettings,
+    *,
+    on_progress: Callable[[int, int], bool] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+    frame_start: int = 0,
+    frame_end: int | None = None,
+    preroll_frames: int = 0,
+    photo_assets: Mapping[str, bytes] | None = None,
+    tile_cache: TileCache | None = None,
+) -> None:
+    context = await browser.new_context(
+        viewport={"width": manifest.width, "height": manifest.height},
+        device_scale_factor=1,
+    )
+    try:
+        page = await context.new_page()
+        page.set_default_timeout(settings.render_frame_timeout_ms)
+        await render_manifest_with_page(
+            page,
+            manifest,
+            encoder,
+            settings,
+            on_progress=on_progress,
+            is_cancelled=is_cancelled,
+            frame_start=frame_start,
+            frame_end=frame_end,
+            preroll_frames=preroll_frames,
+            photo_assets=photo_assets,
+            tile_cache=tile_cache,
+        )
+    finally:
+        await context.close()
+
+
 async def render_manifest_to_mp4(
     manifest: RenderManifest,
     output_mp4_path: Path,
@@ -446,8 +564,9 @@ async def render_manifest_to_mp4(
     photo_assets: Mapping[str, bytes] | None = None,
     tile_cache: TileCache | None = None,
     gop_aligned: bool = False,
+    browser: Browser | None = None,
 ) -> Path:
-    """Launch headless Chromium via Playwright, capture manifest frames, and encode MP4."""
+    """Launch or reuse headless Chromium via Playwright, capture frames, and encode MP4."""
     if is_cancelled is not None and is_cancelled():
         raise RenderCancelledError(f"Render job {manifest.job_id} was cancelled before launch")
 
@@ -461,35 +580,42 @@ async def render_manifest_to_mp4(
         gop_aligned=use_gop,
     )
 
+    if browser is not None:
+        await _render_with_browser(
+            browser,
+            manifest,
+            encoder,
+            settings,
+            on_progress=on_progress,
+            is_cancelled=is_cancelled,
+            frame_start=frame_start,
+            frame_end=frame_end,
+            preroll_frames=preroll_frames,
+            photo_assets=photo_assets,
+            tile_cache=tile_cache,
+        )
+        return output_mp4_path
+
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
+        launched = await pw.chromium.launch(
             headless=True,
             args=build_chromium_launch_args(settings),
         )
         try:
-            context = await browser.new_context(
-                viewport={"width": manifest.width, "height": manifest.height},
-                device_scale_factor=1,
+            await _render_with_browser(
+                launched,
+                manifest,
+                encoder,
+                settings,
+                on_progress=on_progress,
+                is_cancelled=is_cancelled,
+                frame_start=frame_start,
+                frame_end=frame_end,
+                preroll_frames=preroll_frames,
+                photo_assets=photo_assets,
+                tile_cache=tile_cache,
             )
-            try:
-                page = await context.new_page()
-                page.set_default_timeout(settings.render_frame_timeout_ms)
-                await render_manifest_with_page(
-                    page,
-                    manifest,
-                    encoder,
-                    settings,
-                    on_progress=on_progress,
-                    is_cancelled=is_cancelled,
-                    frame_start=frame_start,
-                    frame_end=frame_end,
-                    preroll_frames=preroll_frames,
-                    photo_assets=photo_assets,
-                    tile_cache=tile_cache,
-                )
-            finally:
-                await context.close()
         finally:
-            await browser.close()
+            await launched.close()
 
     return output_mp4_path

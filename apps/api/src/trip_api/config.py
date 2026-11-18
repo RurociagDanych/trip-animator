@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     database_url: str = (
         "postgresql+psycopg://trip_app:dev-postgres-password-change-me@localhost:5432/trip_animator"
     )
+    db_pool_size: int = Field(default=10, ge=1, le=100)
+    db_max_overflow: int = Field(default=20, ge=0, le=200)
+    db_pool_timeout_s: int = Field(default=30, ge=1, le=300)
+    db_pool_recycle_s: int = Field(default=1800, ge=60, le=86400)
 
     session_secret: str = ""
     session_cookie_name: str = "trip_session"

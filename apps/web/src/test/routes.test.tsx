@@ -281,6 +281,7 @@ describe("Route tests: DashboardPage, LoginPage, ShareViewPage, StravaCallbackPa
       expect(await screen.findByText("Fictional Meridian Circuit")).toBeInTheDocument();
       expect(screen.getByTestId("project-silhouette-proj-atlas-1")).toBeInTheDocument();
       expect(screen.getByText("+3100 m")).toBeInTheDocument();
+      expect(screen.queryByTestId("atlas-view")).not.toBeInTheDocument();
 
       fireEvent.click(screen.getByRole("tab", { name: "Atlas" }));
       expect(await screen.findByTestId("atlas-view")).toBeInTheDocument();

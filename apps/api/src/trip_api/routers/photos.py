@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import math
@@ -454,7 +455,7 @@ async def upload_project_photo(
     if not raw_bytes:
         raise HTTPException(status_code=422, detail="Uploaded photo file is empty")
 
-    processed = process_uploaded_image(raw_bytes)
+    processed = await asyncio.to_thread(process_uploaded_image, raw_bytes)
     final_taken_at = (
         ensure_utc(taken_at_utc) if taken_at_utc is not None else processed.taken_at_utc
     )
@@ -467,9 +468,13 @@ async def upload_project_photo(
     object_key = f"photos/{project.id}/{photo_id}.webp"
     thumb_key = f"photos/{project.id}/{photo_id}_thumb.webp"
 
-    store.put_bytes(object_key, processed.full_bytes, content_type="image/webp")
+    await asyncio.to_thread(
+        store.put_bytes, object_key, processed.full_bytes, content_type="image/webp"
+    )
     try:
-        store.put_bytes(thumb_key, processed.thumb_bytes, content_type="image/webp")
+        await asyncio.to_thread(
+            store.put_bytes, thumb_key, processed.thumb_bytes, content_type="image/webp"
+        )
         photo = ProjectPhoto(
             id=photo_id,
             project_id=project.id,
@@ -509,7 +514,7 @@ async def upload_project_photo(
     except Exception:
         for k in (object_key, thumb_key):
             try:
-                store.delete(k)
+                await asyncio.to_thread(store.delete, k)
             except Exception:
                 logger.warning("Failed to rollback photo key %s", k)
         raise

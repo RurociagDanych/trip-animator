@@ -29,8 +29,19 @@ from trip_worker.encoder import (
     extract_thumbnail,
     verify_mp4_output,
 )
-from trip_worker.manifest import PhotoRecord, RenderManifest, StageRecord, build_render_manifest
-from trip_worker.renderer import RenderCancelledError, RenderError, render_manifest_to_mp4
+from trip_worker.manifest import (
+    PhotoRecord,
+    RenderManifest,
+    StageRecord,
+    build_render_manifest,
+    chunk_manifest_key,
+)
+from trip_worker.renderer import (
+    RenderCancelledError,
+    RenderError,
+    WarmPlaywrightHost,
+    render_manifest_to_mp4,
+)
 from trip_worker.storage import ObjectStore, build_object_store
 
 logger = logging.getLogger(__name__)
@@ -540,6 +551,20 @@ def notify_render_job_event(
     conn.execute(NOTIFY_RENDER_JOB_SQL, {"payload": payload})
 
 
+def _delete_blob_best_effort(store: ObjectStore, key: str) -> None:
+    try:
+        store.delete(key)
+    except Exception:
+        logger.debug("Best-effort blob delete failed for %s", key, exc_info=True)
+
+
+def _render_fn_accepts_browser(render_fn: Callable[..., Any]) -> bool:
+    params = inspect.signature(render_fn).parameters
+    return "browser" in params or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+
+
 def _invoke_render_fn(
     render_fn: Callable[..., Any],
     manifest: RenderManifest,
@@ -553,8 +578,9 @@ def _invoke_render_fn(
     preroll_frames: int = 0,
     photo_assets: Mapping[str, bytes] | None = None,
     gop_aligned: bool = False,
+    browser: Any = None,
 ) -> Any:
-    """Call `render_fn` passing extended chunk/photo kwargs only if supported by its signature."""
+    """Call `render_fn` passing extended chunk/photo/browser kwargs only if supported."""
     sig = inspect.signature(render_fn)
     params = sig.parameters
     accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
@@ -570,11 +596,88 @@ def _invoke_render_fn(
         "photo_assets": photo_assets,
         "gop_aligned": gop_aligned,
     }
+    if browser is not None:
+        optional_kwargs["browser"] = browser
     for k, v in optional_kwargs.items():
         if accepts_var_kw or k in params:
             kwargs[k] = v
 
     return render_fn(manifest, output_mp4_path, settings, **kwargs)
+
+
+def _execute_render(
+    render_fn: RenderCallable,
+    manifest: RenderManifest,
+    output_mp4_path: Path,
+    settings: WorkerSettings,
+    *,
+    browser_host: WarmPlaywrightHost | None = None,
+    on_progress: Callable[[int, int], bool] | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
+    frame_start: int = 0,
+    frame_end: int | None = None,
+    preroll_frames: int = 0,
+    photo_assets: Mapping[str, bytes] | None = None,
+    gop_aligned: bool = False,
+) -> Any:
+    """Run `render_fn` on `browser_host`'s warm Chromium/event loop when available."""
+    if browser_host is None:
+        return asyncio.run(
+            _invoke_render_fn(
+                render_fn,
+                manifest,
+                output_mp4_path,
+                settings,
+                on_progress=on_progress,
+                is_cancelled=is_cancelled,
+                frame_start=frame_start,
+                frame_end=frame_end,
+                preroll_frames=preroll_frames,
+                photo_assets=photo_assets,
+                gop_aligned=gop_aligned,
+            )
+        )
+
+    async def _run_with_warm_host() -> Any:
+        if not _render_fn_accepts_browser(render_fn):
+            return await _invoke_render_fn(
+                render_fn,
+                manifest,
+                output_mp4_path,
+                settings,
+                on_progress=on_progress,
+                is_cancelled=is_cancelled,
+                frame_start=frame_start,
+                frame_end=frame_end,
+                preroll_frames=preroll_frames,
+                photo_assets=photo_assets,
+                gop_aligned=gop_aligned,
+            )
+        browser = await browser_host.acquire_browser()
+        try:
+            return await _invoke_render_fn(
+                render_fn,
+                manifest,
+                output_mp4_path,
+                settings,
+                on_progress=on_progress,
+                is_cancelled=is_cancelled,
+                frame_start=frame_start,
+                frame_end=frame_end,
+                preroll_frames=preroll_frames,
+                photo_assets=photo_assets,
+                gop_aligned=gop_aligned,
+                browser=browser,
+            )
+        except RenderCancelledError:
+            if not browser.is_connected():
+                await browser_host.reset_browser()
+            raise
+        except Exception:
+            await browser_host.reset_browser()
+            raise
+
+    return browser_host.run_coro(_run_with_warm_host())
 
 
 def reap_exhausted_jobs(conn: DbConnection, *, max_attempts: int) -> int:
@@ -1211,6 +1314,7 @@ def _load_manifest_and_photo_assets(
     spec_json: dict[str, object],
     settings: WorkerSettings,
     store: ObjectStore,
+    load_assets: bool = True,
 ) -> tuple[bool, RenderManifest | None, dict[str, bytes]]:
     if is_job_cancelled(conn, job_id=job_id):
         return (True, None, {})
@@ -1229,8 +1333,68 @@ def _load_manifest_and_photo_assets(
         max_points_per_stage=settings.max_manifest_points_per_stage,
         max_total_manifest_points=settings.max_total_manifest_points,
         embed_photo_data_uris=False,
-        out_photo_assets=photo_assets,
+        load_assets=load_assets,
+        out_photo_assets=photo_assets if load_assets else None,
     )
+    return (False, manifest, photo_assets)
+
+
+def _load_pre_serialized_manifest_and_photo_assets(
+    conn: DbConnection,
+    *,
+    job_id: uuid.UUID,
+    project_id: uuid.UUID,
+    spec_json: dict[str, object],
+    settings: WorkerSettings,
+    store: ObjectStore,
+    load_assets: bool = True,
+) -> tuple[bool, RenderManifest | None, dict[str, bytes]]:
+    if is_job_cancelled(conn, job_id=job_id):
+        return (True, None, {})
+
+    manifest_key = chunk_manifest_key(job_id)
+    manifest: RenderManifest | None = None
+    try:
+        raw_json = store.get_bytes(manifest_key)
+        manifest = RenderManifest.model_validate_json(raw_json)
+    except FileNotFoundError:
+        manifest = None
+    except Exception as exc:
+        logger.warning(
+            "Failed loading pre-serialized manifest %s: %s; falling back to rebuild",
+            manifest_key,
+            exc,
+        )
+        manifest = None
+
+    if manifest is None:
+        return _load_manifest_and_photo_assets(
+            conn,
+            job_id=job_id,
+            project_id=project_id,
+            spec_json=spec_json,
+            settings=settings,
+            store=store,
+            load_assets=load_assets,
+        )
+
+    photo_assets: dict[str, bytes] = {}
+    if load_assets and manifest.photos:
+        needed_ids = {p.id for p in manifest.photos}
+        photos = load_project_photos(conn, project_id=project_id)
+        for photo in photos:
+            photo_id_str = str(photo.id)
+            if photo_id_str not in needed_ids:
+                continue
+            try:
+                photo_assets[photo_id_str] = store.get_bytes(photo.thumb_object_key)
+            except FileNotFoundError:
+                logger.warning(
+                    "Photo thumbnail %s missing for project %s; skipping",
+                    photo.thumb_object_key,
+                    project_id,
+                )
+
     return (False, manifest, photo_assets)
 
 
@@ -1299,22 +1463,17 @@ def _finalize_chunked_job(
             def _load_for_finalize(
                 conn: DbConnection,
             ) -> tuple[bool, RenderManifest | None, list[tuple[int, int, int, str]]]:
-                if is_job_cancelled(conn, job_id=job.id):
-                    return (True, None, [])
-                title = load_project_title(conn, project_id=job.project_id)
-                stages = load_project_stages(conn, project_id=job.project_id)
-                manifest = build_render_manifest(
+                cancelled, manifest, _ = _load_pre_serialized_manifest_and_photo_assets(
+                    conn,
                     job_id=job.id,
                     project_id=job.project_id,
-                    project_title=title,
                     spec_json=job.spec_json,
-                    stages=stages,
+                    settings=settings,
                     store=store,
-                    photos=None,
-                    max_points_per_stage=settings.max_manifest_points_per_stage,
-                    max_total_manifest_points=settings.max_total_manifest_points,
-                    embed_photo_data_uris=False,
+                    load_assets=False,
                 )
+                if cancelled or manifest is None:
+                    return (True, None, [])
                 chunk_rows = conn.execute(
                     LOAD_SUCCEEDED_CHUNKS_SQL, {"job_id": job.id}
                 ).fetchall()
@@ -1328,6 +1487,8 @@ def _finalize_chunked_job(
 
             cancelled, manifest, chunks_meta = lease.run(_load_for_finalize)
             if cancelled or manifest is None:
+                if cancelled:
+                    _delete_blob_best_effort(store, chunk_manifest_key(job.id))
                 return "cancelled"
             if not chunks_meta:
                 raise ValueError("No succeeded chunks available for finalization")
@@ -1402,11 +1563,13 @@ def _finalize_chunked_job(
                 )
                 if not committed:
                     if is_job_cancelled(conn, job_id=job.id):
-                        store.delete(output_key)
-                        store.delete(thumbnail_key)
+                        _delete_blob_best_effort(store, output_key)
+                        _delete_blob_best_effort(store, thumbnail_key)
+                        _delete_blob_best_effort(store, chunk_manifest_key(job.id))
                         return "cancelled"
                     return "lost_lease"
 
+                _delete_blob_best_effort(store, chunk_manifest_key(job.id))
                 for _ci, _sf, _ef, chunk_key in chunks_meta:
                     try:
                         store.delete(chunk_key)
@@ -1444,6 +1607,7 @@ def _finalize_chunked_job(
                     return "lost_lease"
                 conn.execute(CANCEL_REMAINING_CHUNKS_SQL, {"job_id": job.id})
                 conn.commit()
+                _delete_blob_best_effort(store, chunk_manifest_key(job.id))
                 record_audit_event(
                     conn,
                     user_id=job.owner_user_id,
@@ -1473,6 +1637,7 @@ def _finalize_chunked_job(
                         progress_pct=int(row[3]) if row[3] is not None else 0,
                     )
                 conn.commit()
+                _delete_blob_best_effort(store, chunk_manifest_key(job.id))
                 record_audit_event(
                     conn,
                     user_id=job.owner_user_id,
@@ -1492,6 +1657,7 @@ def process_claimed_chunk(
     store: ObjectStore,
     *,
     render_fn: RenderCallable = render_manifest_to_mp4,
+    browser_host: WarmPlaywrightHost | None = None,
 ) -> str:
     """Render a single GOP-aligned chunk `[start_frame, end_frame)` and finalize if last."""
     heartbeat_interval_s = min(
@@ -1511,8 +1677,10 @@ def process_claimed_chunk(
                 conn: DbConnection,
             ) -> tuple[bool, ClaimedJob | None, RenderManifest | None, dict[str, bytes]]:
                 row = conn.execute(LOAD_JOB_SQL, {"job_id": chunk.render_job_id}).fetchone()
-                conn.commit()
                 if row is None or str(row[5]) != "running":
+                    conn.commit()
+                    if row is not None and str(row[5]) in {"cancelled", "failed", "succeeded"}:
+                        _delete_blob_best_effort(store, chunk_manifest_key(chunk.render_job_id))
                     return (True, None, None, {})
                 loaded_job = ClaimedJob(
                     id=_parse_uuid(row[0]),
@@ -1521,14 +1689,16 @@ def process_claimed_chunk(
                     spec_json=_parse_spec_json(row[3]),
                     attempt_count=int(row[4]),
                 )
-                cancelled, manifest, photo_assets = _load_manifest_and_photo_assets(
+                cancelled, manifest, photo_assets = _load_pre_serialized_manifest_and_photo_assets(
                     conn,
                     job_id=loaded_job.id,
                     project_id=loaded_job.project_id,
                     spec_json=loaded_job.spec_json,
                     settings=settings,
                     store=store,
+                    load_assets=True,
                 )
+                conn.commit()
                 return (cancelled, loaded_job, manifest, photo_assets)
 
             cancelled_at_start, job_meta, manifest, photo_assets = lease.run(_load_inputs)
@@ -1540,20 +1710,19 @@ def process_claimed_chunk(
             try:
                 with tempfile.TemporaryDirectory(prefix="trip_chunk_") as tmpdir:
                     chunk_mp4 = Path(tmpdir) / f"chunk_{chunk.chunk_index:04d}.mp4"
-                    asyncio.run(
-                        _invoke_render_fn(
-                            render_fn,
-                            manifest,
-                            chunk_mp4,
-                            settings,
-                            on_progress=lease.on_render_progress,
-                            is_cancelled=lease.is_cancelled,
-                            frame_start=chunk.start_frame,
-                            frame_end=chunk.end_frame,
-                            preroll_frames=chunk.preroll_frames,
-                            photo_assets=photo_assets,
-                            gop_aligned=True,
-                        )
+                    _execute_render(
+                        render_fn,
+                        manifest,
+                        chunk_mp4,
+                        settings,
+                        browser_host=browser_host,
+                        on_progress=lease.on_render_progress,
+                        is_cancelled=lease.is_cancelled,
+                        frame_start=chunk.start_frame,
+                        frame_end=chunk.end_frame,
+                        preroll_frames=chunk.preroll_frames,
+                        photo_assets=photo_assets,
+                        gop_aligned=True,
                     )
                     if not lease.renew_lease(force=True):
                         raise RenderCancelledError(
@@ -1630,6 +1799,7 @@ def process_claimed_chunk(
                     return "lost_lease"
                 conn.execute(CANCEL_REMAINING_CHUNKS_SQL, {"job_id": chunk.render_job_id})
                 conn.commit()
+                _delete_blob_best_effort(store, chunk_manifest_key(chunk.render_job_id))
                 return "cancelled"
 
             return lease.run(_handle_chunk_cancel)
@@ -1669,6 +1839,7 @@ def process_claimed_chunk(
                             progress_pct=int(parent_row[3]) if parent_row[3] is not None else 0,
                         )
                     conn.commit()
+                    _delete_blob_best_effort(store, chunk_manifest_key(chunk.render_job_id))
                     if job_meta is not None:
                         record_audit_event(
                             conn,
@@ -1696,6 +1867,7 @@ def process_claimed_job(
     store: ObjectStore,
     *,
     render_fn: RenderCallable = render_manifest_to_mp4,
+    browser_host: WarmPlaywrightHost | None = None,
 ) -> str:
     """Execute unchunked or chunked Playwright frame capture, FFmpeg encode, probe, and upload."""
     started_at = datetime.now(UTC)
@@ -1718,7 +1890,7 @@ def process_claimed_job(
                 ) -> tuple[bool, bool]:
                     if is_job_cancelled(conn, job_id=job.id):
                         return (True, False)
-                    # Validate project/stages/manifest before fanning out chunks
+                    # Build and pre-serialize manifest once before fanning out chunks
                     _cancelled, _manifest, _assets = _load_manifest_and_photo_assets(
                         conn,
                         job_id=job.id,
@@ -1726,9 +1898,16 @@ def process_claimed_job(
                         spec_json=job.spec_json,
                         settings=settings,
                         store=store,
+                        load_assets=False,
                     )
-                    if _cancelled:
+                    if _cancelled or _manifest is None:
                         return (True, False)
+                    manifest_key = chunk_manifest_key(job.id)
+                    store.put_bytes(
+                        manifest_key,
+                        _manifest.model_dump_json().encode("utf-8"),
+                        content_type="application/json",
+                    )
                     split_ok = _split_job_into_chunks(
                         conn,
                         job=job,
@@ -1736,6 +1915,8 @@ def process_claimed_job(
                         chunk_size_frames=settings.chunk_size_frames,
                         preroll_frames=settings.chunk_preroll_frames,
                     )
+                    if not split_ok:
+                        _delete_blob_best_effort(store, manifest_key)
                     return (False, split_ok)
 
                 cancelled_at_start, split_ok = lease.run(_prepare_chunked)
@@ -1762,6 +1943,7 @@ def process_claimed_job(
                         settings,
                         store,
                         render_fn=render_fn,
+                        browser_host=browser_host,
                     )
                     if last_result in {"succeeded", "failed", "cancelled"}:
                         # Check if parent job reached terminal status
@@ -1800,16 +1982,15 @@ def process_claimed_job(
                     mp4_path = tmp_root / f"{job.id}.mp4"
                     thumb_path = tmp_root / f"{job.id}.webp"
 
-                    asyncio.run(
-                        _invoke_render_fn(
-                            render_fn,
-                            manifest,
-                            mp4_path,
-                            settings,
-                            on_progress=lease.on_render_progress,
-                            is_cancelled=lease.is_cancelled,
-                            photo_assets=photo_assets,
-                        )
+                    _execute_render(
+                        render_fn,
+                        manifest,
+                        mp4_path,
+                        settings,
+                        browser_host=browser_host,
+                        on_progress=lease.on_render_progress,
+                        is_cancelled=lease.is_cancelled,
+                        photo_assets=photo_assets,
                     )
 
                     if not lease.update_progress(97, force=True):
@@ -2007,6 +2188,7 @@ def run_once(
     conn_factory: Callable[[], AbstractContextManager[DbConnection]] | None = None,
     store: ObjectStore | None = None,
     render_fn: RenderCallable = render_manifest_to_mp4,
+    browser_host: WarmPlaywrightHost | None = None,
 ) -> bool:
     """Reap expired leases, claim a ready chunk or render job (or finalize), and process it."""
     cfg = settings or WorkerSettings()
@@ -2037,7 +2219,14 @@ def run_once(
             job = None
 
     if chunk is not None:
-        process_claimed_chunk(cf, chunk, cfg, obj_store, render_fn=render_fn)
+        process_claimed_chunk(
+            cf,
+            chunk,
+            cfg,
+            obj_store,
+            render_fn=render_fn,
+            browser_host=browser_host,
+        )
         return True
 
     if finalize_job is not None:
@@ -2047,7 +2236,14 @@ def run_once(
     if job is None:
         return False
 
-    process_claimed_job(cf, job, cfg, obj_store, render_fn=render_fn)
+    process_claimed_job(
+        cf,
+        job,
+        cfg,
+        obj_store,
+        render_fn=render_fn,
+        browser_host=browser_host,
+    )
     return True
 
 
@@ -2057,15 +2253,21 @@ def _worker_thread_loop(
     worker_idx: int,
 ) -> None:
     logger.debug("Worker thread %d started", worker_idx)
-    while not stop_event.is_set():
-        try:
-            did_work = run_once(cfg)
-        except Exception:
-            logger.exception("Worker loop iteration failed (worker=%d)", worker_idx)
-            did_work = False
+    accepts_browser_host = "browser_host" in inspect.signature(run_once).parameters
+    with WarmPlaywrightHost(cfg) as browser_host:
+        while not stop_event.is_set():
+            try:
+                did_work = (
+                    run_once(cfg, browser_host=browser_host)
+                    if accepts_browser_host
+                    else run_once(cfg)
+                )
+            except Exception:
+                logger.exception("Worker loop iteration failed (worker=%d)", worker_idx)
+                did_work = False
 
-        if not did_work and not stop_event.is_set():
-            stop_event.wait(timeout=cfg.poll_interval_seconds)
+            if not did_work and not stop_event.is_set():
+                stop_event.wait(timeout=cfg.poll_interval_seconds)
 
 
 def run_worker_loop(settings: WorkerSettings | None = None, *, once: bool = False) -> None:

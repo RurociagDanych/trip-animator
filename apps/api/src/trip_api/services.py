@@ -9,6 +9,7 @@ import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, cast
@@ -45,6 +46,7 @@ from trip_telemetry import (
     serialize_stage_events_parquet_bytes,
     write_silver_parquet,
 )
+from trip_telemetry.schemas import SilverTelemetrySummary
 
 from trip_api.db import (
     AuditEvent,
@@ -493,6 +495,162 @@ def align_project_photos(
     return photos
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedStageArtifacts:
+    """CPU-transformed and ObjectStore-uploaded stage artifacts ready for DB persistence."""
+
+    stage_id: uuid.UUID
+    full_sha256: str
+    bronze_key: str
+    silver_key: str
+    lod_key: str
+    chart_key: str
+    events_key: str
+    summary: SilverTelemetrySummary
+    parsed: ParsedTrack
+
+    @property
+    def uploaded_keys(self) -> tuple[str, ...]:
+        return (
+            self.bronze_key,
+            self.silver_key,
+            self.lod_key,
+            self.chart_key,
+            self.events_key,
+        )
+
+
+def prepare_stage_artifacts(
+    *,
+    store: ObjectStore,
+    project_id: uuid.UUID,
+    parsed: ParsedTrack,
+    raw_bronze_bytes: bytes,
+    bronze_ext: str,
+    bronze_content_type: str,
+) -> PreparedStageArtifacts:
+    """Build Silver Parquet + caches/sidecars and upload all stage blobs to ObjectStore."""
+    stage_id = uuid.uuid4()
+    full_sha256 = hashlib.sha256(raw_bronze_bytes).hexdigest()
+    digest = full_sha256[:16]
+    bronze_key = f"bronze/{project_id}/{stage_id}/{digest}.{bronze_ext}"
+    silver_key = f"silver/{project_id}/{stage_id}.parquet"
+    lod_key = stage_lod_cache_key(project_id, stage_id)
+    chart_key = stage_chart_cache_key(project_id, stage_id)
+    events_key = stage_events_cache_key(project_id, stage_id)
+
+    store.put_bytes(bronze_key, raw_bronze_bytes, content_type=bronze_content_type)
+
+    df, summary = build_silver_dataframe(
+        parsed,
+        trip_id=str(project_id),
+        stage_id=str(stage_id),
+    )
+    with tempfile.TemporaryDirectory(prefix="trip_silver_") as tmpdir:
+        parquet_path = write_silver_parquet(df, Path(tmpdir) / f"{stage_id}.parquet")
+        store.put_bytes(
+            silver_key,
+            parquet_path.read_bytes(),
+            content_type="application/vnd.apache.parquet",
+        )
+        try:
+            chart_gz_bytes = build_stage_chart_cache_bytes(parquet_path)
+            store.put_bytes(chart_key, chart_gz_bytes, content_type="application/gzip")
+        except Exception as exc:
+            logger.warning("Could not write chart cache for stage %s: %s", stage_id, exc)
+        try:
+            _persist_stage_events_sidecar(store, project_id, stage_id, parquet_path)
+        except Exception as exc:
+            logger.warning("Could not write events sidecar for stage %s: %s", stage_id, exc)
+
+    lod_gz_bytes = build_lod_cache_payload(parsed.points)
+    store.put_bytes(lod_key, lod_gz_bytes, content_type="application/gzip")
+
+    return PreparedStageArtifacts(
+        stage_id=stage_id,
+        full_sha256=full_sha256,
+        bronze_key=bronze_key,
+        silver_key=silver_key,
+        lod_key=lod_key,
+        chart_key=chart_key,
+        events_key=events_key,
+        summary=summary,
+        parsed=parsed,
+    )
+
+
+def persist_prepared_stage(
+    *,
+    db: Session,
+    store: ObjectStore,
+    project: Project,
+    prepared: PreparedStageArtifacts,
+    source_type: Literal["gpx", "strava"],
+    stage_name: str,
+    day_index: int,
+    activity_type: ActivityType = DEFAULT_ACTIVITY_TYPE,
+    source_format: StageFormat | None = None,
+    external_source_id: str | None = None,
+    strava_activity_id: int | None = None,
+    auto_align_photos: bool = True,
+) -> Stage:
+    """Insert a Stage row for already-uploaded artifacts and commit on the DB session."""
+    max_order = db.scalar(
+        select(func.coalesce(func.max(Stage.stage_order), -1)).where(
+            Stage.project_id == project.id
+        )
+    )
+    next_order = int(max_order if max_order is not None else -1) + 1
+
+    started_at: datetime | None = next(
+        (pt.ts_utc for pt in prepared.parsed.points if pt.ts_utc is not None), None
+    )
+
+    resolved_activity = normalize_activity_type(activity_type, DEFAULT_ACTIVITY_TYPE)
+    resolved_format = _normalize_stage_format(source_format, source_type)
+
+    stage = Stage(
+        id=prepared.stage_id,
+        project_id=project.id,
+        source_type=source_type,
+        source_format=resolved_format,
+        etl_version=current_etl_version(),
+        bronze_sha256=prepared.full_sha256,
+        activity_type=resolved_activity,
+        external_source_id=external_source_id,
+        strava_activity_id=strava_activity_id,
+        name=stage_name[:200],
+        stage_order=next_order,
+        day_index=day_index,
+        bronze_object_key=prepared.bronze_key,
+        silver_object_key=prepared.silver_key,
+        started_at=started_at,
+        point_count=prepared.summary.point_count,
+        distance_m=prepared.summary.distance_m,
+        elevation_gain_m=prepared.summary.elevation_gain_m,
+        elevation_loss_m=prepared.summary.elevation_loss_m,
+        moving_seconds=prepared.summary.moving_seconds,
+        elapsed_seconds=prepared.summary.elapsed_seconds,
+        has_timestamps=prepared.summary.has_timestamps,
+        min_lat=prepared.summary.min_lat,
+        max_lat=prepared.summary.max_lat,
+        min_lon=prepared.summary.min_lon,
+        max_lon=prepared.summary.max_lon,
+        warnings_json=[w.model_dump(mode="json") for w in prepared.parsed.warnings],
+    )
+    db.add(stage)
+    db.commit()
+    db.refresh(stage)
+
+    if auto_align_photos:
+        try:
+            align_project_photos(db, store, project.id, persist=True)
+        except Exception as exc:
+            logger.warning("Photo auto-alignment failed after stage ingest %s: %s", stage.id, exc)
+
+    return stage
+
+
 def ingest_parsed_track(
     *,
     db: Session,
@@ -512,95 +670,28 @@ def ingest_parsed_track(
     auto_align_photos: bool = True,
 ) -> Stage:
     """Persist Bronze payload, Silver Parquet + caches/sidecars, and insert Stage."""
-    stage_id = uuid.uuid4()
-    full_sha256 = hashlib.sha256(raw_bronze_bytes).hexdigest()
-    digest = full_sha256[:16]
-    bronze_key = f"bronze/{project.id}/{stage_id}/{digest}.{bronze_ext}"
-    silver_key = f"silver/{project.id}/{stage_id}.parquet"
-    lod_key = stage_lod_cache_key(project.id, stage_id)
-    chart_key = stage_chart_cache_key(project.id, stage_id)
-
-    store.put_bytes(bronze_key, raw_bronze_bytes, content_type=bronze_content_type)
-
-    df, summary = build_silver_dataframe(
-        parsed,
-        trip_id=str(project.id),
-        stage_id=str(stage_id),
-    )
-    with tempfile.TemporaryDirectory(prefix="trip_silver_") as tmpdir:
-        parquet_path = write_silver_parquet(df, Path(tmpdir) / f"{stage_id}.parquet")
-        store.put_bytes(
-            silver_key,
-            parquet_path.read_bytes(),
-            content_type="application/vnd.apache.parquet",
-        )
-        try:
-            chart_gz_bytes = build_stage_chart_cache_bytes(parquet_path)
-            store.put_bytes(chart_key, chart_gz_bytes, content_type="application/gzip")
-        except Exception as exc:
-            logger.warning("Could not write chart cache for stage %s: %s", stage_id, exc)
-        try:
-            _persist_stage_events_sidecar(store, project.id, stage_id, parquet_path)
-        except Exception as exc:
-            logger.warning("Could not write events sidecar for stage %s: %s", stage_id, exc)
-
-    lod_gz_bytes = build_lod_cache_payload(parsed.points)
-    store.put_bytes(lod_key, lod_gz_bytes, content_type="application/gzip")
-
-    max_order = db.scalar(
-        select(func.coalesce(func.max(Stage.stage_order), -1)).where(
-            Stage.project_id == project.id
-        )
-    )
-    next_order = int(max_order if max_order is not None else -1) + 1
-
-    started_at: datetime | None = next(
-        (pt.ts_utc for pt in parsed.points if pt.ts_utc is not None), None
-    )
-
-    resolved_activity = normalize_activity_type(activity_type, DEFAULT_ACTIVITY_TYPE)
-    resolved_format = _normalize_stage_format(source_format, source_type)
-
-    stage = Stage(
-        id=stage_id,
+    prepared = prepare_stage_artifacts(
+        store=store,
         project_id=project.id,
+        parsed=parsed,
+        raw_bronze_bytes=raw_bronze_bytes,
+        bronze_ext=bronze_ext,
+        bronze_content_type=bronze_content_type,
+    )
+    return persist_prepared_stage(
+        db=db,
+        store=store,
+        project=project,
+        prepared=prepared,
         source_type=source_type,
-        source_format=resolved_format,
-        etl_version=current_etl_version(),
-        bronze_sha256=full_sha256,
-        activity_type=resolved_activity,
+        stage_name=stage_name,
+        day_index=day_index,
+        activity_type=activity_type,
+        source_format=source_format,
         external_source_id=external_source_id,
         strava_activity_id=strava_activity_id,
-        name=stage_name[:200],
-        stage_order=next_order,
-        day_index=day_index,
-        bronze_object_key=bronze_key,
-        silver_object_key=silver_key,
-        started_at=started_at,
-        point_count=summary.point_count,
-        distance_m=summary.distance_m,
-        elevation_gain_m=summary.elevation_gain_m,
-        elevation_loss_m=summary.elevation_loss_m,
-        moving_seconds=summary.moving_seconds,
-        elapsed_seconds=summary.elapsed_seconds,
-        has_timestamps=summary.has_timestamps,
-        min_lat=summary.min_lat,
-        max_lat=summary.max_lat,
-        min_lon=summary.min_lon,
-        max_lon=summary.max_lon,
-        warnings_json=[w.model_dump(mode="json") for w in parsed.warnings],
+        auto_align_photos=auto_align_photos,
     )
-    db.add(stage)
-    db.commit()
-    db.refresh(stage)
-
-    if auto_align_photos:
-        try:
-            align_project_photos(db, store, project.id, persist=True)
-        except Exception as exc:
-            logger.warning("Photo auto-alignment failed after stage ingest %s: %s", stage.id, exc)
-
-    return stage
 
 
 def recompute_stage_trim_artifacts(

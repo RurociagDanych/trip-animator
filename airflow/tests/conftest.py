@@ -69,6 +69,14 @@ class FakeObjectStore:
             raise FileNotFoundError(clean)
         return self.blobs[clean]
 
+    def copy(
+        self, src_key: str, dst_key: str, *, content_type: str | None = None
+    ) -> None:
+        _ = content_type
+        clean_dst = dst_key.lstrip("/")
+        self.blobs[clean_dst] = self.get_bytes(src_key)
+        self.mtimes[clean_dst] = datetime.now(UTC)
+
     def delete(self, key: str) -> None:
         clean = key.lstrip("/")
         self.blobs.pop(clean, None)

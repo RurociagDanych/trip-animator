@@ -7,24 +7,19 @@ import {
   Download,
   Film,
   Loader2,
-  Pause,
-  Play,
   Redo2,
   RefreshCw,
-  RotateCcw,
   Save,
   Undo2,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { StoryTrackStrip } from "../components/charts/StoryTrackStrip";
-import { TelemetryChart } from "../components/charts/TelemetryChart";
 import { AuditLogDrawer } from "../components/editor/AuditLogDrawer";
+import { EditorPlaybackDock } from "../components/editor/EditorPlaybackDock";
 import { InspectorPanel } from "../components/editor/InspectorPanel";
 import { SharePopover } from "../components/editor/SharePopover";
 import { StageSidebar } from "../components/editor/StageSidebar";
 import { StravaPickerModal } from "../components/editor/StravaPickerModal";
 import { AppHeader } from "../components/layout/AppHeader";
-import { TripStageCanvas } from "../components/stage/TripStageCanvas";
 import { ApiError } from "../lib/api/client";
 import {
   authApi,
@@ -35,6 +30,8 @@ import {
   telemetryApi,
 } from "../lib/api/endpoints";
 import type {
+  CameraKeyframe,
+  ClimbHighlightOut,
   DirectorPreset,
   ProjectDetailOut,
   ProjectHighlightsOut,
@@ -43,19 +40,19 @@ import type {
   PublicConfigOut,
   SessionInfoOut,
   TelemetryChartOut,
+  TelemetryChartPoint,
   TelemetryGeometryFeature,
 } from "../lib/api/types";
 import { generateDirectorKeyframes } from "../lib/geo/director";
-import { formatDistance, formatElapsedTime, formatElevation } from "../lib/geo/format";
 import {
   evaluateTimelineSchedule,
   matchPhotosToTimeline,
-  progressRatioToTimeRatio,
 } from "../lib/geo/photos";
 import { buildTimelineFromProject } from "../lib/geo/timeline";
-import { type PlaybackSpeed, useEditorStore } from "../lib/state/editor-store";
+import { useEditorStore } from "../lib/state/editor-store";
 
-const PLAYBACK_SPEEDS: readonly PlaybackSpeed[] = [0.5, 1, 2, 4];
+const EMPTY_CLIMBS: readonly ClimbHighlightOut[] = [];
+const EMPTY_CHART_POINTS: readonly TelemetryChartPoint[] = [];
 
 function isEditableElement(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) {
@@ -79,49 +76,42 @@ export function EditorPage() {
   const [auditDrawerOpen, setAuditDrawerOpen] = useState(false);
   const autosaveTimerRef = useRef<number | null>(null);
 
-  const {
-    title,
-    revision,
-    stages,
-    spec,
-    shareEnabled,
-    shareSlug,
-    selectedStageId,
-    inspectorSection,
-    sidebarTab,
-    pinModePhotoId,
-    hasUnsavedChanges,
-    isSaving,
-    conflictError,
-    currentTimeRatio,
-    isPlaying,
-    playbackSpeed,
-    previewWatermark,
-    undoStack,
-    redoStack,
-    hydrateProject,
-    setShareState,
-    setTitle,
-    updateSpec,
-    updateStatisticsPanel,
-    setStageColor,
-    setStageTransition,
-    selectStage,
-    setInspectorSection,
-    setSidebarTab,
-    setPinModePhotoId,
-    setCurrentTimeRatio,
-    setPlaying,
-    togglePlaying,
-    setPlaybackSpeed,
-    setPreviewWatermark,
-    resetPlayback,
-    undo,
-    redo,
-    markSaving,
-    markSaved,
-    setConflictError,
-  } = useEditorStore();
+  const title = useEditorStore((s) => s.title);
+  const revision = useEditorStore((s) => s.revision);
+  const stages = useEditorStore((s) => s.stages);
+  const spec = useEditorStore((s) => s.spec);
+  const shareEnabled = useEditorStore((s) => s.shareEnabled);
+  const shareSlug = useEditorStore((s) => s.shareSlug);
+  const selectedStageId = useEditorStore((s) => s.selectedStageId);
+  const inspectorSection = useEditorStore((s) => s.inspectorSection);
+  const sidebarTab = useEditorStore((s) => s.sidebarTab);
+  const pinModePhotoId = useEditorStore((s) => s.pinModePhotoId);
+  const hasUnsavedChanges = useEditorStore((s) => s.hasUnsavedChanges);
+  const isSaving = useEditorStore((s) => s.isSaving);
+  const conflictError = useEditorStore((s) => s.conflictError);
+  const previewWatermark = useEditorStore((s) => s.previewWatermark);
+  const canUndo = useEditorStore((s) => s.undoStack.length > 0);
+  const canRedo = useEditorStore((s) => s.redoStack.length > 0);
+  const hydrateProject = useEditorStore((s) => s.hydrateProject);
+  const setShareState = useEditorStore((s) => s.setShareState);
+  const setTitle = useEditorStore((s) => s.setTitle);
+  const updateSpec = useEditorStore((s) => s.updateSpec);
+  const updateStatisticsPanel = useEditorStore((s) => s.updateStatisticsPanel);
+  const setStageColor = useEditorStore((s) => s.setStageColor);
+  const setStageTransition = useEditorStore((s) => s.setStageTransition);
+  const selectStage = useEditorStore((s) => s.selectStage);
+  const setInspectorSection = useEditorStore((s) => s.setInspectorSection);
+  const setSidebarTab = useEditorStore((s) => s.setSidebarTab);
+  const setPinModePhotoId = useEditorStore((s) => s.setPinModePhotoId);
+  const setCurrentTimeRatio = useEditorStore((s) => s.setCurrentTimeRatio);
+  const setPlaying = useEditorStore((s) => s.setPlaying);
+  const togglePlaying = useEditorStore((s) => s.togglePlaying);
+  const setPreviewWatermark = useEditorStore((s) => s.setPreviewWatermark);
+  const undo = useEditorStore((s) => s.undo);
+  const redo = useEditorStore((s) => s.redo);
+  const markSaving = useEditorStore((s) => s.markSaving);
+  const markSaved = useEditorStore((s) => s.markSaved);
+  const setConflictError = useEditorStore((s) => s.setConflictError);
 
   const sessionQuery = useQuery<SessionInfoOut>({
     queryKey: ["auth", "me"],
@@ -378,33 +368,6 @@ export function EditorPage() {
     ? Math.min(spec.duration_seconds, 5)
     : spec.duration_seconds;
 
-  // Playback animation loop
-  useEffect(() => {
-    if (!isPlaying) {
-      return;
-    }
-    let rafId = 0;
-    let lastTs = performance.now();
-    const durationMs = Math.max(1000, effectiveDurationS * 1000);
-
-    const tick = (now: number) => {
-      const dt = now - lastTs;
-      lastTs = now;
-      const prev = useEditorStore.getState().currentTimeRatio;
-      const next = prev + (dt * playbackSpeed) / durationMs;
-      if (next >= 1) {
-        setCurrentTimeRatio(1);
-        setPlaying(false);
-        return;
-      }
-      setCurrentTimeRatio(next);
-      rafId = window.requestAnimationFrame(tick);
-    };
-
-    rafId = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(rafId);
-  }, [isPlaying, playbackSpeed, effectiveDurationS, setCurrentTimeRatio, setPlaying]);
-
   const resolvedFeatures = useMemo(() => {
     const features: TelemetryGeometryFeature[] = [];
     for (const q of stageGeometryQueries) {
@@ -455,20 +418,28 @@ export function EditorPage() {
     [projectPhotos, timelineStages, spec, projectId],
   );
 
-  const schedule = useMemo(
-    () =>
-      evaluateTimelineSchedule(
-        timelineStages,
-        matchedPhotos,
-        spec,
-        currentTimeRatio * effectiveDurationS,
-        effectiveDurationS,
-        previewWatermark,
-      ),
-    [timelineStages, matchedPhotos, spec, currentTimeRatio, effectiveDurationS, previewWatermark],
-  );
+  const getCurrentProgress = useCallback(() => {
+    const state = useEditorStore.getState();
+    return evaluateTimelineSchedule(
+      timelineStages,
+      matchedPhotos,
+      state.spec,
+      state.currentTimeRatio * effectiveDurationS,
+      effectiveDurationS,
+      state.previewWatermark,
+    ).progressRatio;
+  }, [timelineStages, matchedPhotos, effectiveDurationS]);
 
-  const isPausedAtPhoto = Boolean(spec.pause_on_photo && schedule.activePhoto);
+  const handleCancelPinMode = useCallback(() => {
+    setPinModePhotoId(null);
+  }, [setPinModePhotoId]);
+
+  const handleUpdateKeyframes = useCallback(
+    (keyframes: CameraKeyframe[]) => {
+      updateSpec({ director_preset: "none", camera_keyframes: keyframes });
+    },
+    [updateSpec],
+  );
 
   const dayCount = useMemo(
     () => stages.reduce((acc, s) => Math.max(acc, s.day_index), 1),
@@ -657,7 +628,7 @@ export function EditorPage() {
                 type="button"
                 aria-label="Undo"
                 title="Undo (Ctrl/Cmd+Z)"
-                disabled={undoStack.length === 0}
+                disabled={!canUndo}
                 onClick={undo}
                 className="rounded p-1 text-ink-muted hover:text-ink disabled:opacity-35"
               >
@@ -667,7 +638,7 @@ export function EditorPage() {
                 type="button"
                 aria-label="Redo"
                 title="Redo (Ctrl/Cmd+Shift+Z)"
-                disabled={redoStack.length === 0}
+                disabled={!canRedo}
                 onClick={redo}
                 className="rounded p-1 text-ink-muted hover:text-ink disabled:opacity-35"
               >
@@ -811,189 +782,30 @@ export function EditorPage() {
         />
 
         {/* Center Pane: 1:1 WYSIWYG Stage & Synchronized uPlot Telemetry Dock */}
-        <section
-          aria-label="Map preview and timeline dock"
-          className="flex min-h-0 flex-col bg-canvas lg:col-span-6"
-        >
-          <div className="flex min-h-[340px] flex-1 items-center justify-center overflow-hidden p-3 lg:min-h-0">
-            <TripStageCanvas
-              stages={timelineStages}
-              spec={spec}
-              progressRatio={schedule.progressRatio}
-              durationS={effectiveDurationS}
-              travelDurationS={schedule.travelDurationS}
-              isPreview={previewWatermark}
-              renderMode="interactive"
-              geometryStatus={geometryStatus}
-              matchedPhotos={matchedPhotos}
-              activePhoto={schedule.activePhoto}
-              climbs={highlightsQuery.data?.climbs ?? []}
-              pinModeActive={Boolean(pinModePhotoId)}
-              onMapPinClick={(lngLat) => void handleMapPinClick(lngLat)}
-              onCancelPinMode={() => setPinModePhotoId(null)}
-              projectTitle={title}
-              totalStats={
-                kpis
-                  ? {
-                      distanceM: kpis.total_distance_m,
-                      elevationGainM: kpis.total_elevation_gain_m,
-                      movingSeconds: kpis.total_moving_seconds,
-                      stageCount: kpis.stage_count,
-                    }
-                  : undefined
-              }
-            />
-          </div>
-
-          <div className="shrink-0 space-y-2.5 border-t border-border bg-surface px-4 py-3">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={togglePlaying}
-                  aria-pressed={isPlaying}
-                  aria-label={isPlaying ? "Pause preview" : "Play preview"}
-                  className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-elevated px-3 text-xs font-medium text-ink hover:border-sky-accent/60 transition-colors"
-                >
-                  {isPlaying ? (
-                    <Pause className="h-3.5 w-3.5 text-amber-accent" aria-hidden="true" />
-                  ) : (
-                    <Play className="h-3.5 w-3.5 text-sky-accent" aria-hidden="true" />
-                  )}
-                  <span>{isPlaying ? "Pause" : "Play"}</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={resetPlayback}
-                  aria-label="Reset playhead"
-                  className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-border bg-elevated text-ink-muted hover:text-ink transition-colors"
-                >
-                  <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-                </button>
-
-                <div className="flex items-center rounded-md border border-border bg-elevated p-0.5 text-[11px]">
-                  {PLAYBACK_SPEEDS.map((spd) => (
-                    <button
-                      key={spd}
-                      type="button"
-                      aria-pressed={playbackSpeed === spd}
-                      onClick={() => setPlaybackSpeed(spd)}
-                      className={`rounded px-1.5 py-0.5 tabular-telemetry transition-colors ${
-                        playbackSpeed === spd
-                          ? "bg-sky-accent text-canvas font-semibold"
-                          : "text-ink-muted hover:text-ink"
-                      }`}
-                    >
-                      {spd}×
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="flex flex-1 items-center gap-3 min-w-[160px]">
-                <input
-                  type="range"
-                  min={0}
-                  max={1000}
-                  value={Math.round(schedule.progressRatio * 1000)}
-                  aria-label="Timeline scrubber"
-                  onChange={(e) => {
-                    const targetProgress = Number(e.currentTarget.value) / 1000;
-                    setPlaying(false);
-                    setCurrentTimeRatio(
-                      progressRatioToTimeRatio(
-                        matchedPhotos,
-                        spec,
-                        targetProgress,
-                        effectiveDurationS,
-                        previewWatermark,
-                      ),
-                    );
-                  }}
-                  className="w-full accent-sky-accent"
-                />
-                {isPausedAtPhoto ? (
-                  <span
-                    data-testid="photo-pause-indicator"
-                    className="shrink-0 rounded border border-amber-accent/50 bg-amber-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-accent"
-                  >
-                    Paused at photo
-                  </span>
-                ) : null}
-                <span className="tabular-telemetry shrink-0 text-xs text-ink-muted">
-                  {(currentTimeRatio * effectiveDurationS).toFixed(1)}s /{" "}
-                  {effectiveDurationS}s
-                </span>
-              </div>
-
-              {kpis ? (
-                <div className="tabular-telemetry hidden xl:flex items-center gap-3 text-[11px] text-ink-muted">
-                  <span>{formatDistance(kpis.total_distance_m, spec.units)}</span>
-                  <span className="text-teal-accent">
-                    +{formatElevation(kpis.total_elevation_gain_m, spec.units)}
-                  </span>
-                  <span>{formatElapsedTime(kpis.total_moving_seconds)}</span>
-                </div>
-              ) : null}
-            </div>
-
-            <StoryTrackStrip
-              stages={timelineStages}
-              totalDistanceM={chartQuery.data?.total_distance_m ?? kpis?.total_distance_m ?? 0}
-              progressRatio={schedule.progressRatio}
-              cameraKeyframes={spec.camera_keyframes}
-              matchedPhotos={matchedPhotos}
-              selectedStageId={selectedStageId}
-              cameraMode={spec.camera_mode}
-              cameraPreset={spec.camera_preset}
-              cameraPitchDeg={spec.camera_pitch_deg}
-              onSelectStage={selectStage}
-              onUpdateKeyframes={(keyframes) =>
-                updateSpec({ director_preset: "none", camera_keyframes: keyframes })
-              }
-              onSeek={(ratio) => {
-                setPlaying(false);
-                setCurrentTimeRatio(
-                  progressRatioToTimeRatio(
-                    matchedPhotos,
-                    spec,
-                    ratio,
-                    effectiveDurationS,
-                    previewWatermark,
-                  ),
-                );
-              }}
-            />
-
-            <TelemetryChart
-              points={chartQuery.data?.points ?? []}
-              totalDistanceM={chartQuery.data?.total_distance_m ?? 0}
-              units={spec.units}
-              progressRatio={schedule.progressRatio}
-              smoothingWindow={spec.telemetry_smoothing}
-              stages={timelineStages}
-              climbs={highlightsQuery.data?.climbs ?? []}
-              onTrimBrush={
-                stages.length > 0
-                  ? (startM, endM) => void handleTrimBrush(startM, endM)
-                  : undefined
-              }
-              onSeek={(ratio) => {
-                setPlaying(false);
-                setCurrentTimeRatio(
-                  progressRatioToTimeRatio(
-                    matchedPhotos,
-                    spec,
-                    ratio,
-                    effectiveDurationS,
-                    previewWatermark,
-                  ),
-                );
-              }}
-            />
-          </div>
-        </section>
+        <EditorPlaybackDock
+          timelineStages={timelineStages}
+          spec={spec}
+          matchedPhotos={matchedPhotos}
+          climbs={highlightsQuery.data?.climbs ?? EMPTY_CLIMBS}
+          chartPoints={chartQuery.data?.points ?? EMPTY_CHART_POINTS}
+          chartTotalDistanceM={chartQuery.data?.total_distance_m}
+          kpis={kpis}
+          selectedStageId={selectedStageId}
+          pinModeActive={Boolean(pinModePhotoId)}
+          previewWatermark={previewWatermark}
+          effectiveDurationS={effectiveDurationS}
+          geometryStatus={geometryStatus}
+          projectTitle={title}
+          onMapPinClick={(lngLat) => void handleMapPinClick(lngLat)}
+          onCancelPinMode={handleCancelPinMode}
+          onSelectStage={selectStage}
+          onUpdateKeyframes={handleUpdateKeyframes}
+          onTrimBrush={
+            stages.length > 0
+              ? (startM, endM) => void handleTrimBrush(startM, endM)
+              : undefined
+          }
+        />
 
         {/* Right Pane: Settings & Export */}
         <InspectorPanel
@@ -1002,7 +814,7 @@ export function EditorPage() {
           spec={spec}
           stageCount={stages.length}
           dayCount={dayCount}
-          currentProgress={schedule.progressRatio}
+          getCurrentProgress={getCurrentProgress}
           onSelectSection={setInspectorSection}
           onUpdateSpec={updateSpec}
           onUpdateHud={updateStatisticsPanel}

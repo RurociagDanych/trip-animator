@@ -840,6 +840,11 @@ def compute_frame_render_spans(
     return spans
 
 
+def chunk_manifest_key(job_id: uuid.UUID | str) -> str:
+    """Return the deterministic object key for a chunked job's pre-serialized RenderManifest."""
+    return f"outputs/manifests/{job_id}.json"
+
+
 def build_render_manifest(
     *,
     job_id: uuid.UUID,
@@ -852,6 +857,7 @@ def build_render_manifest(
     max_points_per_stage: int = 12_000,
     max_total_manifest_points: int = 36_000,
     embed_photo_data_uris: bool = True,
+    load_assets: bool = True,
     out_photo_assets: dict[str, bytes] | None = None,
 ) -> RenderManifest:
     """Build a deterministic RenderManifest from DB stage metadata and Silver Parquet blobs."""
@@ -1006,25 +1012,29 @@ def build_render_manifest(
     manifest_photos: list[ManifestPhoto] = []
     if spec.show_photos and photos:
         for photo in photos:
-            try:
-                thumb_bytes = store.get_bytes(photo.thumb_object_key)
-            except FileNotFoundError:
-                logger.warning(
-                    "Photo thumbnail %s missing for project %s; skipping",
-                    photo.thumb_object_key,
-                    project_id,
-                )
-                continue
             photo_id_str = str(photo.id)
-            if out_photo_assets is not None:
-                out_photo_assets[photo_id_str] = thumb_bytes
-            if embed_photo_data_uris:
-                b64_payload = base64.b64encode(thumb_bytes).decode("ascii")
-                data_uri = f"data:image/webp;base64,{b64_payload}"
-                asset_url = None
+            if load_assets:
+                try:
+                    thumb_bytes = store.get_bytes(photo.thumb_object_key)
+                except FileNotFoundError:
+                    logger.warning(
+                        "Photo thumbnail %s missing for project %s; skipping",
+                        photo.thumb_object_key,
+                        project_id,
+                    )
+                    continue
+                if out_photo_assets is not None:
+                    out_photo_assets[photo_id_str] = thumb_bytes
+                if embed_photo_data_uris:
+                    b64_payload = base64.b64encode(thumb_bytes).decode("ascii")
+                    data_uri = f"data:image/webp;base64,{b64_payload}"
+                    asset_url = None
+                else:
+                    data_uri = ""
+                    asset_url = f"https://render-assets.local/{photo_id_str}"
             else:
                 data_uri = ""
-                asset_url = f"https://render-assets.local/{photo_id_str}"
+                asset_url = None if embed_photo_data_uris else f"https://render-assets.local/{photo_id_str}"
             manifest_photos.append(
                 ManifestPhoto(
                     id=photo_id_str,

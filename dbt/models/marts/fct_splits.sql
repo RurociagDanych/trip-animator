@@ -1,3 +1,12 @@
+-- depends_on: {{ ref('mart_stage_summary') }}
+{{
+    config(
+        materialized='incremental',
+        unique_key='stage_id',
+        incremental_strategy='delete+insert',
+        pre_hook="{% if is_incremental() %} DELETE FROM {{ this }} WHERE stage_id NOT IN (SELECT stage_id FROM {{ ref('mart_stage_summary') }}) OR stage_id IN (SELECT stage_id FROM {{ ref('mart_stage_summary') }} WHERE _dbt_invocation_id = '{{ invocation_id }}'); {% endif %}"
+    )
+}}
 WITH base AS (
     SELECT
         trip_id,
@@ -15,6 +24,13 @@ WITH base AS (
         LAG(elev_m) OVER (PARTITION BY trip_id, stage_id ORDER BY seq) AS prev_elev_m,
         LAG(ts_utc) OVER (PARTITION BY trip_id, stage_id ORDER BY seq) AS prev_ts_utc
     FROM {{ ref('stg_telemetry_points') }}
+    {% if is_incremental() %}
+    WHERE stage_id IN (
+        SELECT stage_id
+        FROM {{ ref('mart_stage_summary') }}
+        WHERE _dbt_invocation_id = '{{ invocation_id }}'
+    )
+    {% endif %}
 ),
 bucketed AS (
     SELECT

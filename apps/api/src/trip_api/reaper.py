@@ -166,7 +166,12 @@ def reap_expired(
             for ch in chunks_by_job.get(job.id, [])
             if ch.chunk_object_key
         ]
-        for key in (job.output_object_key, job.thumbnail_key, *chunk_keys):
+        for key in (
+            job.output_object_key,
+            job.thumbnail_key,
+            f"outputs/manifests/{job.id}.json" if job.is_chunked else None,
+            *chunk_keys,
+        ):
             if not key:
                 continue
             ok, deleted = _delete_blob_safe(store, key)
@@ -218,7 +223,7 @@ def run_reap(
         else cfg.rate_limit_retention_hours
     )
 
-    engine = create_db_engine(resolved_url)
+    engine = create_db_engine(resolved_url, settings=cfg)
     session_factory = create_session_factory(engine)
     store = build_object_store(cfg)
     try:

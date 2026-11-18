@@ -503,3 +503,40 @@ def test_cli_reap_dry_run_and_execute(
     assert exec_out["blobs_deleted"] == 1
     with pytest.raises(FileNotFoundError):
         store.resolve_existing_path("outputs/cli-exp.mp4")
+
+
+def test_reap_expired_deletes_chunk_manifest_blob(harness: AppHarness) -> None:
+    user, proj = _seed_project(harness, "chunk-reap@example.com")
+    now = datetime.now(UTC)
+    exp_job_id = uuid.uuid4()
+    manifest_key = f"outputs/manifests/{exp_job_id}.json"
+    harness.store.put_bytes(manifest_key, b'{"job_id":"exp"}', content_type="application/json")
+
+    with harness.session_factory() as db:
+        db.add(
+            RenderJob(
+                id=exp_job_id,
+                project_id=proj.id,
+                owner_user_id=user.id,
+                idempotency_key="exp-chunk-manifest",
+                idempotency_hash="m" * 64,
+                spec_json={},
+                status="failed",
+                progress_pct=50,
+                attempt_count=3,
+                is_chunked=True,
+                output_object_key=None,
+                thumbnail_key=None,
+                expires_at=now - timedelta(hours=1),
+                created_at=now - timedelta(days=2),
+                updated_at=now - timedelta(days=2),
+            )
+        )
+        db.commit()
+
+        rep = reap_expired(db, harness.store, now=now, dry_run=False)
+        assert rep.render_jobs_deleted == 1
+        assert rep.blobs_deleted == 1
+
+    with pytest.raises(FileNotFoundError):
+        harness.store.resolve_existing_path(manifest_key)

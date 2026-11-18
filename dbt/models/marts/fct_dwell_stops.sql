@@ -1,3 +1,12 @@
+-- depends_on: {{ ref('mart_stage_summary') }}
+{{
+    config(
+        materialized='incremental',
+        unique_key='stage_id',
+        incremental_strategy='delete+insert',
+        pre_hook="{% if is_incremental() %} DELETE FROM {{ this }} WHERE stage_id NOT IN (SELECT stage_id FROM {{ ref('mart_stage_summary') }}) OR stage_id IN (SELECT stage_id FROM {{ ref('mart_stage_summary') }} WHERE _dbt_invocation_id = '{{ invocation_id }}'); {% endif %}"
+    )
+}}
 WITH flagged AS (
     SELECT
         trip_id,
@@ -13,6 +22,13 @@ WITH flagged AS (
         END AS is_dwell
     FROM {{ ref('stg_telemetry_points') }}
     WHERE ts_utc IS NOT NULL
+    {% if is_incremental() %}
+      AND stage_id IN (
+          SELECT stage_id
+          FROM {{ ref('mart_stage_summary') }}
+          WHERE _dbt_invocation_id = '{{ invocation_id }}'
+      )
+    {% endif %}
 ),
 islands AS (
     SELECT

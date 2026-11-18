@@ -657,3 +657,195 @@ def test_render_spec_v2_extended_bounds_and_backward_compatibility() -> None:
     ):
         with pytest.raises(ValueError):
             RenderSpecV2.model_validate(invalid_kwargs)
+
+
+def test_dbt_gold_incremental_stage_add_zero_row_edit_and_delete(tmp_path: Path) -> None:
+    def _build_climb_and_dwell_track(
+        *,
+        base_dt: datetime,
+        lat0: float,
+        lon0: float,
+        include_climb: bool,
+        include_dwell: bool,
+    ) -> ParsedTrack:
+        pts: list[TrackPoint] = []
+        for i in range(15):
+            pts.append(
+                TrackPoint(
+                    lat=lat0 + i * 0.0015,
+                    lon=lon0,
+                    elev_m=(1000.0 + i * 10.0) if include_climb else 1000.0,
+                    ts_utc=base_dt + timedelta(seconds=i * 60),
+                    hr_bpm=140,
+                    watts=200,
+                    segment_idx=0,
+                )
+            )
+        if include_dwell:
+            pts[-1].moving = False
+            for j in range(1, 4):
+                pts.append(
+                    TrackPoint(
+                        lat=pts[-1].lat,
+                        lon=pts[-1].lon,
+                        elev_m=pts[-1].elev_m,
+                        ts_utc=base_dt + timedelta(seconds=14 * 60 + j * 60),
+                        moving=False,
+                        segment_idx=0,
+                    )
+                )
+        return ParsedTrack(
+            name="Incremental Stage",
+            points=pts,
+            point_count=len(pts),
+            segment_count=1,
+            has_timestamps=True,
+            has_elevation=True,
+        )
+
+    silver_dir = tmp_path / "silver"
+    gold_dir = tmp_path / "gold"
+
+    # Initial build: stage-1 (climb + dwell) and stage-2 (climb)
+    t1 = _build_climb_and_dwell_track(
+        base_dt=datetime(2002, 7, 1, 8, 0, 0, tzinfo=UTC),
+        lat0=0.120,
+        lon0=0.340,
+        include_climb=True,
+        include_dwell=True,
+    )
+    t2 = _build_climb_and_dwell_track(
+        base_dt=datetime(2002, 7, 2, 8, 0, 0, tzinfo=UTC),
+        lat0=0.220,
+        lon0=0.440,
+        include_climb=True,
+        include_dwell=False,
+    )
+    df1, _ = build_silver_dataframe(t1, trip_id="trip-inc", stage_id="stage-1")
+    df2, _ = build_silver_dataframe(t2, trip_id="trip-inc", stage_id="stage-2")
+    write_silver_parquet(df1, silver_dir / "stage-1.parquet")
+    write_silver_parquet(df2, silver_dir / "stage-2.parquet")
+
+    res1 = run_dbt_gold_build(silver_dir / "*.parquet", gold_dir)
+    duckdb_path = Path(res1["duckdb_path"])
+
+    with duckdb.connect(str(duckdb_path), read_only=True) as con:
+        inv_map_1 = dict(
+            con.execute(
+                "SELECT stage_id, _dbt_invocation_id FROM mart_stage_summary"
+            ).fetchall()
+        )
+        assert set(inv_map_1) == {"stage-1", "stage-2"}
+        c1 = con.execute(
+            "SELECT COUNT(*) FROM fct_climbs WHERE stage_id = 'stage-1'"
+        ).fetchone()
+        d1 = con.execute(
+            "SELECT COUNT(*) FROM fct_dwell_stops WHERE stage_id = 'stage-1'"
+        ).fetchone()
+        assert c1 is not None and c1[0] == 1
+        assert d1 is not None and d1[0] == 1
+
+    # Incremental run 2: add stage-3; stage-1 and stage-2 keep original _dbt_invocation_id
+    t3 = _build_climb_and_dwell_track(
+        base_dt=datetime(2002, 7, 3, 8, 0, 0, tzinfo=UTC),
+        lat0=0.320,
+        lon0=0.540,
+        include_climb=True,
+        include_dwell=False,
+    )
+    df3, _ = build_silver_dataframe(t3, trip_id="trip-inc", stage_id="stage-3")
+    write_silver_parquet(df3, silver_dir / "stage-3.parquet")
+
+    run_dbt_gold_build(silver_dir / "*.parquet", gold_dir, full_refresh=False)
+    with duckdb.connect(str(duckdb_path), read_only=True) as con:
+        inv_map_2 = dict(
+            con.execute(
+                "SELECT stage_id, _dbt_invocation_id FROM mart_stage_summary"
+            ).fetchall()
+        )
+        assert set(inv_map_2) == {"stage-1", "stage-2", "stage-3"}
+        assert inv_map_2["stage-1"] == inv_map_1["stage-1"]
+        assert inv_map_2["stage-2"] == inv_map_1["stage-2"]
+        assert inv_map_2["stage-3"] != inv_map_1["stage-1"]
+        splits_cnt = con.execute("SELECT COUNT(DISTINCT stage_id) FROM fct_splits").fetchone()
+        geo_cnt = con.execute(
+            "SELECT COUNT(DISTINCT stage_id) FROM mart_stage_geo_context"
+        ).fetchone()
+        h3_cnt = con.execute(
+            "SELECT COUNT(DISTINCT stage_id) FROM mart_spatial_coverage_h3"
+        ).fetchone()
+        assert splits_cnt is not None and splits_cnt[0] == 3
+        assert geo_cnt is not None and geo_cnt[0] == 3
+        assert h3_cnt is not None and h3_cnt[0] == 3
+
+    # Incremental run 3: edit stage-1 so climbs and dwells drop to 0 (zero-row delta pruning)
+    t1_flat = _build_climb_and_dwell_track(
+        base_dt=datetime(2002, 7, 1, 8, 0, 0, tzinfo=UTC),
+        lat0=0.120,
+        lon0=0.340,
+        include_climb=False,
+        include_dwell=False,
+    )
+    df1_flat, _ = build_silver_dataframe(t1_flat, trip_id="trip-inc", stage_id="stage-1")
+    write_silver_parquet(df1_flat, silver_dir / "stage-1.parquet")
+
+    run_dbt_gold_build(silver_dir / "*.parquet", gold_dir, full_refresh=False)
+    with duckdb.connect(str(duckdb_path), read_only=True) as con:
+        inv_map_3 = dict(
+            con.execute(
+                "SELECT stage_id, _dbt_invocation_id FROM mart_stage_summary"
+            ).fetchall()
+        )
+        assert inv_map_3["stage-1"] != inv_map_2["stage-1"]
+        assert inv_map_3["stage-2"] == inv_map_2["stage-2"]
+        assert inv_map_3["stage-3"] == inv_map_2["stage-3"]
+        c1_after = con.execute(
+            "SELECT COUNT(*) FROM fct_climbs WHERE stage_id = 'stage-1'"
+        ).fetchone()
+        d1_after = con.execute(
+            "SELECT COUNT(*) FROM fct_dwell_stops WHERE stage_id = 'stage-1'"
+        ).fetchone()
+        climbs_stages = con.execute("SELECT COUNT(DISTINCT stage_id) FROM fct_climbs").fetchone()
+        assert c1_after is not None and c1_after[0] == 0
+        assert d1_after is not None and d1_after[0] == 0
+        assert climbs_stages is not None and climbs_stages[0] == 2
+
+    # Incremental run 4: delete stage-2 Silver Parquet -> purged from all 6 marts + rollups match
+    (silver_dir / "stage-2.parquet").unlink()
+    run_dbt_gold_build(silver_dir / "*.parquet", gold_dir, full_refresh=False)
+    with duckdb.connect(str(duckdb_path), read_only=True) as con:
+        for table_name in (
+            "mart_stage_summary",
+            "fct_climbs",
+            "fct_splits",
+            "mart_stage_geo_context",
+            "mart_spatial_coverage_h3",
+        ):
+            rows = con.execute(
+                f"SELECT DISTINCT stage_id FROM {table_name}"  # noqa: S608
+            ).fetchall()
+            stage_ids = {r[0] for r in rows}
+            assert "stage-2" not in stage_ids, f"stage-2 leaked in {table_name}"
+            assert "stage-3" in stage_ids
+
+        summary_totals = con.execute(
+            "SELECT COUNT(*), SUM(point_count), SUM(total_distance_m) FROM mart_stage_summary"
+        ).fetchone()
+        daily_totals = con.execute(
+            "SELECT SUM(stage_count), SUM(total_points), SUM(total_distance_m) "
+            "FROM mart_trip_daily_summary"
+        ).fetchone()
+        career_totals = con.execute(
+            "SELECT SUM(stage_count), SUM(total_points), SUM(total_distance_m) "
+            "FROM mart_user_career_summary"
+        ).fetchone()
+        assert summary_totals is not None
+        assert daily_totals is not None
+        assert career_totals is not None
+        assert summary_totals[0] == 2
+        assert daily_totals[0] == 2
+        assert career_totals[0] == 2
+        assert daily_totals[1] == summary_totals[1]
+        assert career_totals[1] == summary_totals[1]
+        assert daily_totals[2] == pytest.approx(summary_totals[2])
+        assert career_totals[2] == pytest.approx(summary_totals[2])
