@@ -112,9 +112,7 @@ def reap_expired(
     if expired_job_ids:
         expired_chunks = list(
             db.scalars(
-                select(RenderJobChunk).where(
-                    RenderJobChunk.render_job_id.in_(expired_job_ids)
-                )
+                select(RenderJobChunk).where(RenderJobChunk.render_job_id.in_(expired_job_ids))
             ).all()
         )
         for ch in expired_chunks:
@@ -162,9 +160,7 @@ def reap_expired(
     for job in expired_jobs:
         blob_ok = True
         chunk_keys = [
-            ch.chunk_object_key
-            for ch in chunks_by_job.get(job.id, [])
-            if ch.chunk_object_key
+            ch.chunk_object_key for ch in chunks_by_job.get(job.id, []) if ch.chunk_object_key
         ]
         for key in (
             job.output_object_key,
@@ -184,9 +180,7 @@ def reap_expired(
 
     jobs_deleted = 0
     if reaped_job_ids:
-        db.execute(
-            delete(RenderJobChunk).where(RenderJobChunk.render_job_id.in_(reaped_job_ids))
-        )
+        db.execute(delete(RenderJobChunk).where(RenderJobChunk.render_job_id.in_(reaped_job_ids)))
         job_res = cast(
             CursorResult[Any],
             db.execute(delete(RenderJob).where(RenderJob.id.in_(reaped_job_ids))),

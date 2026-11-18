@@ -83,9 +83,7 @@ def get_stage_geometry(
     lod: Annotated[LodLevel, Query()] = "medium",
 ) -> dict[str, object]:
     project = get_owned_project(db, project_id, auth.user.id)
-    stage = db.scalar(
-        select(Stage).where(Stage.id == stage_id, Stage.project_id == project.id)
-    )
+    stage = db.scalar(select(Stage).where(Stage.id == stage_id, Stage.project_id == project.id))
     if stage is None:
         raise HTTPException(status_code=404, detail="Stage not found")
     try:

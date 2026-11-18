@@ -129,8 +129,6 @@ def validate_outbound_url(
         for info in infos:
             ip_candidate = str(info[4][0])
             if _is_forbidden_ip(ip_candidate):
-                raise SsrfBlockedError(
-                    f"Host {host!r} resolved to restricted IP {ip_candidate!r}"
-                )
+                raise SsrfBlockedError(f"Host {host!r} resolved to restricted IP {ip_candidate!r}")
 
     return url

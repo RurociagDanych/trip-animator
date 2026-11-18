@@ -139,9 +139,7 @@ def test_parse_gpx_rejects_missing_trk_trkseg_and_waypoints_only() -> None:
     with pytest.raises(GpxParseError, match="zero valid trackpoints"):
         parse_gpx_bytes(missing_trkseg)
 
-    empty_trkseg = (
-        b'<?xml version="1.0"?><gpx version="1.1"><trk><trkseg></trkseg></trk></gpx>'
-    )
+    empty_trkseg = b'<?xml version="1.0"?><gpx version="1.1"><trk><trkseg></trkseg></trk></gpx>'
     with pytest.raises(GpxParseError, match="zero valid trackpoints"):
         parse_gpx_bytes(empty_trkseg)
 
@@ -724,9 +722,7 @@ def test_apply_non_destructive_trim_edge_cases(tmp_path: Path) -> None:
         build_silver_dataframe(empty_track, trip_id="t-empty", stage_id="s-empty")
 
     # 11) write_silver_parquet without lon_unwrapped column
-    pq_no_unwrap = write_silver_parquet(
-        df.drop("lon_unwrapped"), tmp_path / "no_unwrap.parquet"
-    )
+    pq_no_unwrap = write_silver_parquet(df.drop("lon_unwrapped"), tmp_path / "no_unwrap.parquet")
     assert pq_no_unwrap.is_file()
 
 
@@ -744,9 +740,7 @@ def test_lod_geometry_and_cache_edge_cases() -> None:
     two_pts = [TrackPoint(lat=0.120, lon=0.340), TrackPoint(lat=0.150, lon=0.390)]
     assert simplify_track_points(two_pts, tolerance_deg=0.01) == two_pts
 
-    feat = build_lod_geojson_feature_from_tuples(
-        loop_tuples, lod="medium", tolerance_deg=0.0001
-    )
+    feat = build_lod_geojson_feature_from_tuples(loop_tuples, lod="medium", tolerance_deg=0.0001)
     assert feat["properties"]["segment_count"] == 2
     assert len(feat["geometry"]["coordinates"][1]) == 2
 
@@ -760,16 +754,11 @@ def test_lod_geometry_and_cache_edge_cases() -> None:
     # Cache validation failure modes
     gz_valid = build_lod_cache_payload(loop_tuples, trim_start_s=10.0, trim_end_s=50.0)
     assert (
-        extract_lod_feature_from_cache(
-            gz_valid, "low", trim_start_s=10.0, trim_end_s=50.0
-        )
+        extract_lod_feature_from_cache(gz_valid, "low", trim_start_s=10.0, trim_end_s=50.0)
         is not None
     )
     assert (
-        extract_lod_feature_from_cache(
-            gz_valid, "low", trim_start_s=10.0, trim_end_s=60.0
-        )
-        is None
+        extract_lod_feature_from_cache(gz_valid, "low", trim_start_s=10.0, trim_end_s=60.0) is None
     )
 
     for bad_payload in (
@@ -801,9 +790,7 @@ def test_lod_geometry_and_cache_edge_cases() -> None:
     ):
         raw_gz = gzip.compress(json.dumps(bad_payload).encode("utf-8"))
         assert (
-            extract_lod_feature_from_cache(
-                raw_gz, "low", trim_start_s=10.0, trim_end_s=50.0
-            )
+            extract_lod_feature_from_cache(raw_gz, "low", trim_start_s=10.0, trim_end_s=50.0)
             is None
         )
 

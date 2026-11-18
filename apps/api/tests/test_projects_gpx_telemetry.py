@@ -363,9 +363,7 @@ def test_gpx_upload_edge_cases_empty_binary_1point_bom_and_size_bounds(
     # Downstream KPIs, chart, geometry, and exports handle 1-point stage cleanly
     assert client.get(f"/api/v1/projects/{proj_id}/kpis").status_code == 200
     assert client.get(f"/api/v1/projects/{proj_id}/telemetry/chart").status_code == 200
-    geom_1pt = client.get(
-        f"/api/v1/projects/{proj_id}/stages/{stage_1pt['id']}/geometry?lod=full"
-    )
+    geom_1pt = client.get(f"/api/v1/projects/{proj_id}/stages/{stage_1pt['id']}/geometry?lod=full")
     assert geom_1pt.status_code == 200
     assert len(geom_1pt.json()["geometry"]["coordinates"][0]) == 2
     gpx_1pt = client.get(f"/api/v1/projects/{proj_id}/export?format=gpx")
@@ -653,8 +651,7 @@ def test_stage_trim_validation_and_geojson_export_accuracy(
     assert single_feat["geometry"]["type"] == "MultiLineString"
     assert len(single_feat["geometry"]["coordinates"][0]) == 2
     assert (
-        single_feat["geometry"]["coordinates"][0][0]
-        == single_feat["geometry"]["coordinates"][0][1]
+        single_feat["geometry"]["coordinates"][0][0] == single_feat["geometry"]["coordinates"][0][1]
     )
 
 
@@ -717,13 +714,9 @@ def test_trim_export_reimport_roundtrip_and_multisegment_gpx(
         f"/api/v1/projects/{p1}/telemetry/geometry?stage_id={sid}&lod=full"
     ).json()
     assert len(geom["features"][0]["geometry"]["coordinates"][0]) == 3
-    assert geom["features"][0]["properties"]["distance_m"] == pytest.approx(
-        trimmed_dist, abs=0.01
-    )
+    assert geom["features"][0]["properties"]["distance_m"] == pytest.approx(trimmed_dist, abs=0.01)
 
-    stage_geom = user_client.get(
-        f"/api/v1/projects/{p1}/stages/{sid}/geometry?lod=full"
-    ).json()
+    stage_geom = user_client.get(f"/api/v1/projects/{p1}/stages/{sid}/geometry?lod=full").json()
     assert len(stage_geom["geometry"]["coordinates"][0]) == 3
     assert stage_geom["properties"]["elevation_gain_m"] == pytest.approx(60.0)
 
@@ -999,9 +992,7 @@ def test_telemetry_missing_stage_and_corrupt_parquet_errors(
         == 404
     )
     assert (
-        client.get(
-            f"/api/v1/projects/{proj_id}/stages/{unknown_stage_id}/geometry"
-        ).status_code
+        client.get(f"/api/v1/projects/{proj_id}/stages/{unknown_stage_id}/geometry").status_code
         == 404
     )
 

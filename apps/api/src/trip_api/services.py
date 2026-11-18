@@ -424,9 +424,7 @@ def align_project_photos(
         return []
 
     target_photos = [
-        p
-        for p in photos
-        if p.match_method != "manual" and (photo_ids is None or p.id in photo_ids)
+        p for p in photos if p.match_method != "manual" and (photo_ids is None or p.id in photo_ids)
     ]
     if not target_photos:
         return photos
@@ -595,10 +593,15 @@ def persist_prepared_stage(
     auto_align_photos: bool = True,
 ) -> Stage:
     """Insert a Stage row for already-uploaded artifacts and commit on the DB session."""
-    max_order = db.scalar(
-        select(func.coalesce(func.max(Stage.stage_order), -1)).where(
-            Stage.project_id == project.id
+    if db.get_bind().dialect.name == "postgresql":
+        locked_project = db.scalar(
+            select(Project).where(Project.id == project.id).with_for_update()
         )
+        if locked_project is None:
+            raise ValueError(f"Project {project.id} not found")
+
+    max_order = db.scalar(
+        select(func.coalesce(func.max(Stage.stage_order), -1)).where(Stage.project_id == project.id)
     )
     next_order = int(max_order if max_order is not None else -1) + 1
 
@@ -1213,11 +1216,7 @@ def build_project_highlights(
 
     distance_offset = 0.0
     for stage, bundle in zip(stages, bundles, strict=True):
-        denom = (
-            total_project_distance
-            if total_project_distance > 0
-            else max(stage.distance_m, 1.0)
-        )
+        denom = total_project_distance if total_project_distance > 0 else max(stage.distance_m, 1.0)
         for idx, c in enumerate(bundle.climbs):
             sd = float(c.start_dist_m)
             ed = float(c.end_dist_m)
@@ -1229,12 +1228,8 @@ def build_project_highlights(
                     category=c.category,
                     start_dist_m=round(distance_offset + sd, 2),
                     end_dist_m=round(distance_offset + ed, 2),
-                    start_progress=round(
-                        min(max((distance_offset + sd) / denom, 0.0), 1.0), 6
-                    ),
-                    end_progress=round(
-                        min(max((distance_offset + ed) / denom, 0.0), 1.0), 6
-                    ),
+                    start_progress=round(min(max((distance_offset + sd) / denom, 0.0), 1.0), 6),
+                    end_progress=round(min(max((distance_offset + ed) / denom, 0.0), 1.0), 6),
                     summit_progress=round(
                         min(
                             max(
@@ -1282,9 +1277,7 @@ def build_project_highlights(
                     lat=float(dw.lat),
                     lon=float(dw.lon),
                     cum_dist_m=round(distance_offset + cd, 2),
-                    progress=round(
-                        min(max((distance_offset + cd) / denom, 0.0), 1.0), 6
-                    ),
+                    progress=round(min(max((distance_offset + cd) / denom, 0.0), 1.0), 6),
                     duration_seconds=float(dw.duration_s),
                     started_at=dw.started_at_utc,
                     ended_at=dw.ended_at_utc,

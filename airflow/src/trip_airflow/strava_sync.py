@@ -93,10 +93,7 @@ def discover_active_strava_connections(db: Session) -> list[dict[str, str]]:
         .order_by(OAuthConnection.updated_at.asc())
     )
     rows = db.execute(stmt).all()
-    return [
-        {"connection_id": str(conn_id), "user_id": str(user_id)}
-        for conn_id, user_id in rows
-    ]
+    return [{"connection_id": str(conn_id), "user_id": str(user_id)} for conn_id, user_id in rows]
 
 
 def _resolve_or_create_autosync_project(db: Session, user_id: uuid.UUID) -> Project:

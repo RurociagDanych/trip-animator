@@ -55,7 +55,17 @@ from trip_worker.runner import (
     run_once,
     run_worker_loop,
 )
-from trip_worker.ssrf import is_render_request_allowed, is_render_request_allowed_async
+from trip_worker.ssrf import (
+    PinnedSsrfAsyncTransport,
+    RenderRequestDecision,
+    ResolvedExternalTarget,
+    SsrfBlockedConnectError,
+    SsrfPinnedNetworkBackend,
+    build_pinned_external_http_client,
+    is_render_request_allowed,
+    is_render_request_allowed_async,
+    resolve_and_validate_external_target_async,
+)
 from trip_worker.storage import LocalObjectStore, ObjectStore, S3ObjectStore, build_object_store
 
 __all__ = [
@@ -71,11 +81,16 @@ __all__ = [
     "ManifestStage",
     "ObjectStore",
     "PhotoRecord",
+    "PinnedSsrfAsyncTransport",
     "ProbeResult",
     "RenderCancelledError",
     "RenderError",
     "RenderManifest",
+    "RenderRequestDecision",
+    "ResolvedExternalTarget",
     "S3ObjectStore",
+    "SsrfBlockedConnectError",
+    "SsrfPinnedNetworkBackend",
     "StageRecord",
     "StreamingVideoEncoder",
     "TileCache",
@@ -90,6 +105,7 @@ __all__ = [
     "build_ffprobe_args",
     "build_manifest_init_script",
     "build_object_store",
+    "build_pinned_external_http_client",
     "build_render_manifest",
     "chunk_manifest_key",
     "claim_next_chunk",
@@ -108,6 +124,7 @@ __all__ = [
     "query_stage_manifest_points",
     "render_manifest_to_mp4",
     "render_manifest_with_page",
+    "resolve_and_validate_external_target_async",
     "run_once",
     "run_worker_loop",
     "vectorized_lttb_indices",

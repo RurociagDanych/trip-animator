@@ -20,7 +20,13 @@ from playwright.async_api import Browser, Page, Playwright, Route, async_playwri
 from trip_worker.config import WorkerSettings
 from trip_worker.encoder import StreamingVideoEncoder
 from trip_worker.manifest import RenderManifest, compute_frame_render_spans
-from trip_worker.ssrf import _normalized_origin, is_render_request_allowed_async
+from trip_worker.ssrf import (
+    ResolvedExternalTarget,
+    build_external_request_kwargs,
+    build_pinned_external_http_client,
+    pin_external_target,
+    resolve_and_validate_external_target_async,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +144,9 @@ def build_chromium_launch_args(settings: WorkerSettings) -> list[str]:
         "--ignore-gpu-blocklist",
         "--use-gl=angle",
         "--use-angle=swiftshader",
+        "--disable-features=WebRtcHideLocalIpsWithMdns",
+        "--enforce-webrtc-ip-permission-check",
+        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
     ]
     if settings.chromium_no_sandbox:
         args.append("--no-sandbox")
@@ -161,13 +170,23 @@ def make_ssrf_route_handler(
     http_client: httpx.AsyncClient | None = None,
 ) -> AsyncRouteHandler:
     """Create a Playwright `page.route()` handler enforcing SSRF, virtual photos, and tile cache."""
-    base_origin = _normalized_origin(urlparse(render_origin))
+    owned_client: httpx.AsyncClient | None = None
 
-    async def _fetch_external(url: str) -> httpx.Response:
-        if http_client is not None:
-            return await http_client.get(url)
-        async with httpx.AsyncClient(follow_redirects=False, timeout=15.0) as client:
-            return await client.get(url)
+    async def _fetch_external(
+        url: str,
+        *,
+        method: str,
+        target: ResolvedExternalTarget,
+    ) -> httpx.Response:
+        nonlocal owned_client
+        client = http_client
+        if client is None:
+            if owned_client is None:
+                owned_client = build_pinned_external_http_client(resolve_dns=resolve_dns)
+            client = owned_client
+        req_kwargs = build_external_request_kwargs(target)
+        with pin_external_target(target):
+            return await client.request(method, url, follow_redirects=False, **req_kwargs)
 
     async def _handle_route(route: Route) -> None:
         url = route.request.url
@@ -200,14 +219,14 @@ def make_ssrf_route_handler(
                 )
             return
 
-        # Always evaluate SSRF policy BEFORE consulting tile_cache
-        allowed = await is_render_request_allowed_async(
+        # Always evaluate SSRF policy and pin DNS BEFORE consulting tile_cache or fetching
+        decision = await resolve_and_validate_external_target_async(
             url,
             render_origin=render_origin,
             allowed_external_hosts=allowed_external_hosts,
             resolve_dns=resolve_dns,
         )
-        if not allowed:
+        if decision.kind == "blocked":
             logger.warning(
                 "Blocked disallowed Playwright request scheme=%s host=%s",
                 parsed.scheme,
@@ -216,47 +235,51 @@ def make_ssrf_route_handler(
             await route.abort("blockedbyclient")
             return
 
-        req_origin = _normalized_origin(parsed)
-        is_external_https_get = (
-            tile_cache is not None
-            and method == "GET"
-            and parsed.scheme.lower() == "https"
-            and (base_origin is None or req_origin != base_origin)
-        )
-        if is_external_https_get and tile_cache is not None:
+        if decision.kind in {"data_or_blob", "render_origin"}:
+            await route.continue_()
+            return
+
+        # External HTTPS requests must NEVER call route.continue_() (even when tile_cache is None)
+        if method not in {"GET", "HEAD"} or decision.target is None:
+            logger.warning(
+                "Blocked disallowed external HTTP method=%s host=%s",
+                method,
+                parsed.netloc,
+            )
+            await route.abort("blockedbyclient")
+            return
+
+        if tile_cache is not None and method == "GET":
             cached = await asyncio.to_thread(tile_cache.get, url)
             if cached is not None:
                 body, content_type = cached
                 await route.fulfill(status=200, content_type=content_type, body=body)
                 return
 
-            try:
-                resp = await _fetch_external(url)
-            except httpx.HTTPError:
-                await route.abort("failed")
-                return
-
-            if 300 <= resp.status_code < 400:
-                logger.warning(
-                    "Blocked redirect response status=%d for host=%s",
-                    resp.status_code,
-                    parsed.netloc,
-                )
-                await route.abort("blockedbyclient")
-                return
-
-            raw_ct = resp.headers.get("content-type", "application/octet-stream")
-            content_type = raw_ct.split(";")[0].strip() or "application/octet-stream"
-            if resp.status_code == 200:
-                await asyncio.to_thread(tile_cache.put, url, resp.content, content_type)
-            await route.fulfill(
-                status=resp.status_code,
-                content_type=content_type,
-                body=resp.content,
-            )
+        try:
+            resp = await _fetch_external(url, method=method, target=decision.target)
+        except httpx.HTTPError:
+            await route.abort("failed")
             return
 
-        await route.continue_()
+        if 300 <= resp.status_code < 400:
+            logger.warning(
+                "Blocked redirect response status=%d for host=%s",
+                resp.status_code,
+                parsed.netloc,
+            )
+            await route.abort("blockedbyclient")
+            return
+
+        raw_ct = resp.headers.get("content-type", "application/octet-stream")
+        content_type = raw_ct.split(";")[0].strip() or "application/octet-stream"
+        if tile_cache is not None and method == "GET" and resp.status_code == 200:
+            await asyncio.to_thread(tile_cache.put, url, resp.content, content_type)
+        await route.fulfill(
+            status=resp.status_code,
+            content_type=content_type,
+            body=b"" if method == "HEAD" else resp.content,
+        )
 
     return _handle_route
 
@@ -290,14 +313,14 @@ async def render_manifest_with_page(
     page_errors: list[str] = []
     page.on("pageerror", lambda err: page_errors.append(str(err)))
 
-    async with httpx.AsyncClient(follow_redirects=False, timeout=15.0) as http_client:
+    async with build_pinned_external_http_client(resolve_dns=resolve_dns) as http_client:
         route_handler = make_ssrf_route_handler(
             render_origin=settings.render_base_url,
             allowed_external_hosts=settings.allowed_external_hosts,
             resolve_dns=resolve_dns,
             photo_assets=photo_assets,
             tile_cache=resolved_cache,
-            http_client=http_client if resolved_cache is not None else None,
+            http_client=http_client,
         )
         await page.route("**/*", route_handler)
         await page.add_init_script(build_manifest_init_script(manifest))
@@ -353,10 +376,7 @@ async def render_manifest_with_page(
             # Silent preroll settle before capturing [eff_start, eff_end)
             preroll_start = max(0, eff_start - max(0, preroll_frames))
             for pre_idx in range(preroll_start, eff_start):
-                if (
-                    pre_idx == preroll_start
-                    or pre_idx % settings.lease_renew_interval_frames == 0
-                ):
+                if pre_idx == preroll_start or pre_idx % settings.lease_renew_interval_frames == 0:
                     if is_cancelled is not None and await asyncio.to_thread(is_cancelled):
                         encoder.abort()
                         raise RenderCancelledError(

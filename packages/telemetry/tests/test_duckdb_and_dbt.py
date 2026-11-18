@@ -160,19 +160,12 @@ def test_duckdb_empty_tables_and_missing_columns(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="Trim window excludes all telemetry points"):
         query_stage_kpis(valid_pq, trim_start_s=5000.0, trim_end_s=6000.0)
     assert (
-        query_telemetry_profile(
-            valid_pq, max_points=10, trim_start_s=5000.0, trim_end_s=6000.0
-        )
+        query_telemetry_profile(valid_pq, max_points=10, trim_start_s=5000.0, trim_end_s=6000.0)
         == []
     )
-    assert (
-        query_stage_export_points(valid_pq, trim_start_s=5000.0, trim_end_s=6000.0)
-        == []
-    )
+    assert query_stage_export_points(valid_pq, trim_start_s=5000.0, trim_end_s=6000.0) == []
     with pytest.raises(ValueError, match="No telemetry points found"):
-        query_map_geometry(
-            valid_pq, lod="low", trim_start_s=5000.0, trim_end_s=6000.0
-        )
+        query_map_geometry(valid_pq, lod="low", trim_start_s=5000.0, trim_end_s=6000.0)
 
     # 3) Parquet table without `is_trimmed` column + `is_moving=False` (VAM uses elapsed_time_s)
     df_no_trim_col = df.drop("is_trimmed").with_columns(
@@ -438,9 +431,7 @@ def test_dbt_gold_climbs_splits_and_dwells_from_live_parquet(tmp_path: Path) -> 
         has_timestamps=True,
         has_elevation=True,
     )
-    frame, _ = build_silver_dataframe(
-        track, trip_id="trip-analytics", stage_id="stage-analytics"
-    )
+    frame, _ = build_silver_dataframe(track, trip_id="trip-analytics", stage_id="stage-analytics")
     silver_path = write_silver_parquet(frame, tmp_path / "silver" / "stage.parquet")
     result = run_dbt_gold_build(silver_path, tmp_path / "gold")
     assert result["status"] == "success"
@@ -463,9 +454,7 @@ def test_dbt_gold_climbs_splits_and_dwells_from_live_parquet(tmp_path: Path) -> 
         assert splits[0][1] > 0.0
         assert splits[-1][0] >= 2
 
-        dwells = con.execute(
-            "SELECT duration_s, suggested_icon FROM fct_dwell_stops"
-        ).fetchall()
+        dwells = con.execute("SELECT duration_s, suggested_icon FROM fct_dwell_stops").fetchall()
         assert len(dwells) == 1
         assert dwells[0][0] >= 180.0
         assert dwells[0][1] == "coffee"
@@ -731,14 +720,10 @@ def test_dbt_gold_incremental_stage_add_zero_row_edit_and_delete(tmp_path: Path)
 
     with duckdb.connect(str(duckdb_path), read_only=True) as con:
         inv_map_1 = dict(
-            con.execute(
-                "SELECT stage_id, _dbt_invocation_id FROM mart_stage_summary"
-            ).fetchall()
+            con.execute("SELECT stage_id, _dbt_invocation_id FROM mart_stage_summary").fetchall()
         )
         assert set(inv_map_1) == {"stage-1", "stage-2"}
-        c1 = con.execute(
-            "SELECT COUNT(*) FROM fct_climbs WHERE stage_id = 'stage-1'"
-        ).fetchone()
+        c1 = con.execute("SELECT COUNT(*) FROM fct_climbs WHERE stage_id = 'stage-1'").fetchone()
         d1 = con.execute(
             "SELECT COUNT(*) FROM fct_dwell_stops WHERE stage_id = 'stage-1'"
         ).fetchone()
@@ -759,9 +744,7 @@ def test_dbt_gold_incremental_stage_add_zero_row_edit_and_delete(tmp_path: Path)
     run_dbt_gold_build(silver_dir / "*.parquet", gold_dir, full_refresh=False)
     with duckdb.connect(str(duckdb_path), read_only=True) as con:
         inv_map_2 = dict(
-            con.execute(
-                "SELECT stage_id, _dbt_invocation_id FROM mart_stage_summary"
-            ).fetchall()
+            con.execute("SELECT stage_id, _dbt_invocation_id FROM mart_stage_summary").fetchall()
         )
         assert set(inv_map_2) == {"stage-1", "stage-2", "stage-3"}
         assert inv_map_2["stage-1"] == inv_map_1["stage-1"]
@@ -792,9 +775,7 @@ def test_dbt_gold_incremental_stage_add_zero_row_edit_and_delete(tmp_path: Path)
     run_dbt_gold_build(silver_dir / "*.parquet", gold_dir, full_refresh=False)
     with duckdb.connect(str(duckdb_path), read_only=True) as con:
         inv_map_3 = dict(
-            con.execute(
-                "SELECT stage_id, _dbt_invocation_id FROM mart_stage_summary"
-            ).fetchall()
+            con.execute("SELECT stage_id, _dbt_invocation_id FROM mart_stage_summary").fetchall()
         )
         assert inv_map_3["stage-1"] != inv_map_2["stage-1"]
         assert inv_map_3["stage-2"] == inv_map_2["stage-2"]

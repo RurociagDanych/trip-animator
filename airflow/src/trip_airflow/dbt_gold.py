@@ -21,9 +21,7 @@ from trip_telemetry import run_dbt_gold_build
 from trip_airflow.runtime import resolve_gold_output_dir
 from trip_airflow.storage_helpers import list_object_keys, list_objects_with_mtime
 
-SILVER_PARQUET_KEY_RE = re.compile(
-    r"^silver/(?P<project_id>[^/]+)/(?P<stage_id>[^/]+)\.parquet$"
-)
+SILVER_PARQUET_KEY_RE = re.compile(r"^silver/(?P<project_id>[^/]+)/(?P<stage_id>[^/]+)\.parquet$")
 _PARITY_TOLERANCE = 1e-6
 _MANIFEST_FILE = ".silver_cache_manifest.json"
 logger = logging.getLogger(__name__)
@@ -134,12 +132,7 @@ def _sync_silver_cache_deltas(
         if not dest.is_relative_to(cache_root):
             raise ValueError(f"Unsafe staged path for Silver key {ref.key!r}")
         tok = tokens.get(ref.key, "")
-        if (
-            tok
-            and tok != "unknown"
-            and prev_manifest.get(ref.key) == tok
-            and dest.is_file()
-        ):
+        if tok and tok != "unknown" and prev_manifest.get(ref.key) == tok and dest.is_file():
             reused += 1
         else:
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -372,9 +365,7 @@ def validate_gold_marts(
     ]
     for metric_name, stage_val, daily_val in float_checks:
         if abs(stage_val - daily_val) > _PARITY_TOLERANCE:
-            raise ValueError(
-                f"Mart parity mismatch for {metric_name}: {stage_val} vs {daily_val}"
-            )
+            raise ValueError(f"Mart parity mismatch for {metric_name}: {stage_val} vs {daily_val}")
 
     return {
         "validated": True,

@@ -52,8 +52,7 @@ def _make_gpx(name: str, start_iso: str, *, lat0: float = 0.1, lon0: float = 0.2
         lon = lon0 + idx * 0.002
         elev = 1000.0 + idx * 25.0
         pts.append(
-            f'<trkpt lat="{lat:.5f}" lon="{lon:.5f}">'
-            f"<ele>{elev:.1f}</ele><time>{ts}</time></trkpt>"
+            f'<trkpt lat="{lat:.5f}" lon="{lon:.5f}"><ele>{elev:.1f}</ele><time>{ts}</time></trkpt>'
         )
     body = "\n".join(pts)
     return (
@@ -361,9 +360,7 @@ class _SpyObjectStore:
     ) -> ObjectStream:
         return self._backing.open_stream(key, range_header=range_header, chunk_size=chunk_size)
 
-    def copy(
-        self, src_key: str, dst_key: str, *, content_type: str | None = None
-    ) -> None:
+    def copy(self, src_key: str, dst_key: str, *, content_type: str | None = None) -> None:
         self._backing.copy(src_key, dst_key, content_type=content_type)
 
     def delete(self, key: str) -> None:
@@ -613,8 +610,6 @@ def test_ingest_cli_loop_max_attempts_and_throttled_backoff(
     assert loop_rep.matched_jobs == 1
     assert loop_rep.ignored_jobs == 1
 
-    assert (
-        cli_main(["process-ingest-jobs", "--dry-run", "--json", "--database-url", db_url]) == 0
-    )
+    assert cli_main(["process-ingest-jobs", "--dry-run", "--json", "--database-url", db_url]) == 0
     with h.session_factory() as db:
         assert len(db.scalars(select(Stage)).all()) == 2

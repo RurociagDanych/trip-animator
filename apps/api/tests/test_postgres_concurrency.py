@@ -29,6 +29,7 @@ from trip_api.db import (
     OAuthConnection,
     OAuthState,
     Project,
+    ProjectPhoto,
     RateLimitRecord,
     RenderJob,
     SessionRecord,
@@ -131,9 +132,7 @@ def pg_temp_db_url(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
 def pg_app_factory(
     pg_temp_db_url: str,
     tmp_path: Path,
-) -> Iterator[
-    Any
-]:
+) -> Iterator[Any]:
     created_engines: list[Engine] = []
 
     def _build(
@@ -484,3 +483,201 @@ def test_postgres_concurrent_render_idempotency_and_project_delete_audit_set_nul
         assert any(a.event_type == "project.deleted" and a.project_id is None for a in audits)
         # Prior project events had FK ON DELETE SET NULL triggered by PostgreSQL
         assert any(a.event_type == "project.created" and a.project_id is None for a in audits)
+
+
+def test_postgres_concurrent_photo_upload_quota_for_update(
+    pg_app_factory: Any,
+    tmp_path: Path,
+) -> None:
+    import io
+
+    from PIL import Image
+    from trip_api.routers.photos import MAX_PHOTOS_PER_PROJECT
+
+    app, _settings, _engine, sf, store = pg_app_factory(rate_limit_photo_max=50)
+    user = _create_pg_user(sf, "photo-pg@example.com")
+    client, csrf = _login_pg_client(app, "photo-pg@example.com")
+    cookies = dict(client.cookies)
+
+    proj_id = uuid.UUID(
+        client.post(
+            "/api/v1/projects",
+            json={"title": "PG Photo Quota"},
+            headers={"X-CSRF-Token": csrf},
+        ).json()["id"]
+    )
+
+    with sf() as db:
+        for idx in range(MAX_PHOTOS_PER_PROJECT - 1):
+            pid = uuid.uuid4()
+            db.add(
+                ProjectPhoto(
+                    id=pid,
+                    project_id=proj_id,
+                    source_type="upload",
+                    object_key=f"photos/{proj_id}/{pid}.webp",
+                    thumb_object_key=f"photos/{proj_id}/{pid}_thumb.webp",
+                    mime_type="image/webp",
+                    width=32,
+                    height=32,
+                    byte_size=128,
+                    caption=f"seed-{idx}",
+                    match_method="unmatched",
+                    exif_offset_s=0,
+                    enabled=True,
+                )
+            )
+        db.commit()
+    assert user.id is not None
+
+    buf = io.BytesIO()
+    Image.new("RGB", (32, 32), color=(249, 115, 22)).save(buf, format="JPEG")
+    jpg_bytes = buf.getvalue()
+
+    workers = 5
+    barrier = Barrier(workers)
+
+    def _upload(idx: int) -> int:
+        c = TestClient(app, cookies=cookies)
+        barrier.wait(timeout=10.0)
+        resp = c.post(
+            f"/api/v1/projects/{proj_id}/photos",
+            files={"file": (f"race_{idx}.jpg", jpg_bytes, "image/jpeg")},
+            headers={"X-CSRF-Token": csrf},
+        )
+        return int(resp.status_code)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        statuses = sorted(pool.map(_upload, range(workers)))
+
+    assert statuses.count(201) == 1
+    assert statuses.count(422) == workers - 1
+
+    with sf() as db:
+        total_photos = db.scalar(
+            select(func.count()).select_from(ProjectPhoto).where(ProjectPhoto.project_id == proj_id)
+        )
+        assert total_photos == MAX_PHOTOS_PER_PROJECT
+
+    # Rejected uploads rolled back their stored blobs; only the single winner's 2 WebP files remain
+    uploaded_webp_files = list(Path(store.root_dir).rglob("*.webp"))
+    assert len(uploaded_webp_files) == 2
+
+
+def test_postgres_concurrent_ingest_parsed_track_unique_stage_order(
+    pg_app_factory: Any,
+    sample_gpx: bytes,
+) -> None:
+    from trip_api.services import ingest_parsed_track
+    from trip_telemetry import parse_gpx_bytes
+
+    _app, _settings, _engine, sf, store = pg_app_factory()
+    user = _create_pg_user(sf, "stage-order-pg@example.com")
+    with sf() as db:
+        project = Project(owner_user_id=user.id, title="PG Stage Order")
+        db.add(project)
+        db.commit()
+        db.refresh(project)
+        project_id = project.id
+
+    parsed = parse_gpx_bytes(sample_gpx)
+    workers = 6
+    barrier = Barrier(workers)
+
+    def _ingest(idx: int) -> int:
+        with sf() as db:
+            proj = db.get(Project, project_id)
+            assert proj is not None
+            barrier.wait(timeout=10.0)
+            stage = ingest_parsed_track(
+                db=db,
+                store=store,
+                project=proj,
+                parsed=parsed,
+                raw_bronze_bytes=sample_gpx,
+                bronze_ext="gpx",
+                bronze_content_type="application/gpx+xml",
+                source_type="gpx",
+                stage_name=f"Stage {idx}",
+                day_index=1,
+                auto_align_photos=False,
+            )
+            return int(stage.stage_order)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        orders = sorted(pool.map(_ingest, range(workers)))
+
+    assert orders == list(range(workers))
+
+
+def test_postgres_concurrent_strava_token_refresh_for_update(
+    pg_app_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+    from threading import Lock
+
+    from trip_api.routers.strava import _get_valid_access_token, _oauth_aad
+    from trip_api.security import encrypt_secret
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_public_getaddrinfo)
+    _app, settings, _engine, sf, _store = pg_app_factory()
+    user = _create_pg_user(sf, "strava-refresh-pg@example.com")
+
+    key = settings.decoded_encryption_key
+    aad = _oauth_aad(user.id)
+    with sf() as db:
+        db.add(
+            OAuthConnection(
+                user_id=user.id,
+                provider="strava",
+                external_athlete_id="554433",
+                access_token_enc=encrypt_secret("expired-access", key, aad=aad),
+                refresh_token_enc=encrypt_secret("old-refresh", key, aad=aad),
+                expires_at=datetime.now(UTC) - timedelta(minutes=5),
+                scope="read,activity:read_all",
+            )
+        )
+        db.commit()
+
+    refresh_lock = Lock()
+    refresh_calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth/token":
+            with refresh_lock:
+                refresh_calls["n"] += 1
+            return httpx.Response(
+                200,
+                json={
+                    "token_type": "Bearer",
+                    "expires_at": int((datetime.now(UTC) + timedelta(hours=6)).timestamp()),
+                    "refresh_token": "fresh-pg-refresh",
+                    "access_token": "fresh-pg-access",
+                },
+            )
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    client_factory = lambda: httpx.AsyncClient(transport=transport, follow_redirects=False)  # noqa: E731
+
+    workers = 6
+    barrier = Barrier(workers)
+
+    def _refresh(_idx: int) -> str:
+        with sf() as db:
+            barrier.wait(timeout=10.0)
+            return asyncio.run(
+                _get_valid_access_token(
+                    db=db,
+                    settings=settings,
+                    user_id=user.id,
+                    client_factory=client_factory,
+                )
+            )
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        tokens = list(pool.map(_refresh, range(workers)))
+
+    assert tokens == ["fresh-pg-access"] * workers
+    assert refresh_calls["n"] == 1

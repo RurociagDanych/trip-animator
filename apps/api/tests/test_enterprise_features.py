@@ -562,9 +562,7 @@ def test_share_rate_limit_expire_slug_edge_cases_and_range_matrix(
     assert r_416.headers["content-range"] == "bytes */26"
 
     # Non-bytes / multi-range falls back to full 200
-    r_multi = anon.get(
-        f"/api/v1/share/{slug1}/render/video", headers={"Range": "bytes=0-1,2-3"}
-    )
+    r_multi = anon.get(f"/api/v1/share/{slug1}/render/video", headers={"Range": "bytes=0-1,2-3"})
     assert r_multi.status_code == 200
     assert r_multi.content == payload
 
@@ -709,9 +707,7 @@ def test_non_local_store_materialization_and_lod_cache_error_fallbacks(
                 is_partial=False,
             )
 
-        def copy(
-            self, src_key: str, dst_key: str, *, content_type: str | None = None
-        ) -> None:
+        def copy(self, src_key: str, dst_key: str, *, content_type: str | None = None) -> None:
             _ = content_type
             self._blobs[dst_key] = self.get_bytes(src_key)
 

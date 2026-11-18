@@ -133,9 +133,7 @@ def get_public_shared_stage_geometry(
 ) -> dict[str, object]:
     _rate_limit_share(request, db, settings)
     project = _get_shared_project(db, slug)
-    stage = db.scalar(
-        select(Stage).where(Stage.id == stage_id, Stage.project_id == project.id)
-    )
+    stage = db.scalar(select(Stage).where(Stage.id == stage_id, Stage.project_id == project.id))
     if stage is None:
         raise HTTPException(status_code=404, detail="Stage not found")
     try:

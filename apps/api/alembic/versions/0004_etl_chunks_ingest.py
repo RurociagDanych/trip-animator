@@ -46,9 +46,7 @@ def upgrade() -> None:
         )
 
     with op.batch_alter_table("project_photos") as batch_op:
-        batch_op.add_column(
-            sa.Column("camera_make_model", sa.String(length=128), nullable=True)
-        )
+        batch_op.add_column(sa.Column("camera_make_model", sa.String(length=128), nullable=True))
         batch_op.add_column(
             sa.Column(
                 "exif_offset_s",

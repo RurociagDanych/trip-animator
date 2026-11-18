@@ -184,9 +184,7 @@ def create_render_job(
 
     stages = get_project_stages(db, project.id)
     if not stages:
-        raise HTTPException(
-            status_code=422, detail="Cannot render a project with zero stages"
-        )
+        raise HTTPException(status_code=422, detail="Cannot render a project with zero stages")
     validate_stage_maps_against_project(spec, {str(s.id) for s in stages})
 
     payload_hash = _compute_idempotency_hash(project.id, spec)
@@ -365,11 +363,7 @@ async def stream_render_events(
     has_test_poll_cap = hasattr(request.app.state, "sse_max_polls")
     use_pg_listen = settings.database_url.startswith("postgresql") and not has_test_poll_cap
     poll_interval = float(getattr(request.app.state, "sse_poll_interval_s", 0.5))
-    max_polls: int | None = (
-        int(request.app.state.sse_max_polls)
-        if has_test_poll_cap
-        else None
-    )
+    max_polls: int | None = int(request.app.state.sse_max_polls) if has_test_poll_cap else None
 
     async def event_stream() -> AsyncIterator[str]:
         last_sig: tuple[str, int, str | None] | None = None
@@ -424,9 +418,7 @@ async def stream_render_events(
             polls_done += 1
             if await request.is_disconnected():
                 break
-            current = await asyncio.to_thread(
-                _fetch_job_snapshot, session_factory, job_id, user_id
-            )
+            current = await asyncio.to_thread(_fetch_job_snapshot, session_factory, job_id, user_id)
             if current is None:
                 yield 'event: error\ndata: {"detail":"Render job not found"}\n\n'
                 break

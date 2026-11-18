@@ -314,9 +314,7 @@ def update_stage(
     store: StoreDep,
 ) -> StageOut:
     project = get_owned_project(db, project_id, auth.user.id)
-    stage = db.scalar(
-        select(Stage).where(Stage.id == stage_id, Stage.project_id == project.id)
-    )
+    stage = db.scalar(select(Stage).where(Stage.id == stage_id, Stage.project_id == project.id))
     if stage is None:
         raise HTTPException(status_code=404, detail="Stage not found")
 
@@ -470,9 +468,7 @@ def delete_stage(
     store: StoreDep,
 ) -> Response:
     project = get_owned_project(db, project_id, auth.user.id)
-    stage = db.scalar(
-        select(Stage).where(Stage.id == stage_id, Stage.project_id == project.id)
-    )
+    stage = db.scalar(select(Stage).where(Stage.id == stage_id, Stage.project_id == project.id))
     if stage is None:
         raise HTTPException(status_code=404, detail="Stage not found")
 

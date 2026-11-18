@@ -24,6 +24,7 @@ from trip_worker import (
     is_render_request_allowed,
     is_render_request_allowed_async,
     probe_video,
+    resolve_and_validate_external_target_async,
     verify_mp4_output,
 )
 
@@ -1035,3 +1036,189 @@ def test_worker_settings_chunk_tile_cache_and_gop_concat(
         concat_mp4_chunks([], out)
     with pytest.raises(EncoderError, match="Missing or empty MP4 chunk"):
         concat_mp4_chunks([tmp_path / "missing.mp4"], out)
+
+
+async def test_resolve_and_validate_external_target_and_ip_pinned_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+    import ssl
+
+    import httpcore
+    import httpx
+    from trip_worker.ssrf import (
+        PinnedSsrfAsyncTransport,
+        SsrfBlockedConnectError,
+        SsrfPinnedNetworkBackend,
+        pin_external_target,
+    )
+
+    loop = asyncio.get_running_loop()
+    dns_calls: list[str] = []
+
+    async def fake_getaddrinfo(host: Any, _port: Any, **_kwargs: Any) -> list[Any]:
+        dns_calls.append(str(host))
+        if host == "mixed.openfreemap.org":
+            return [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443)),
+            ]
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+
+    monkeypatch.setattr(loop, "getaddrinfo", fake_getaddrinfo)
+    allowed = frozenset({"tiles.openfreemap.org", "mixed.openfreemap.org"})
+
+    d_data = await resolve_and_validate_external_target_async(
+        "data:image/png;base64,AAAA",
+        render_origin="http://caddy",
+        allowed_external_hosts=allowed,
+    )
+    assert d_data.kind == "data_or_blob" and d_data.target is None
+
+    d_origin = await resolve_and_validate_external_target_async(
+        "http://caddy/render/job-1",
+        render_origin="http://caddy",
+        allowed_external_hosts=allowed,
+    )
+    assert d_origin.kind == "render_origin" and d_origin.target is None
+
+    d_api = await resolve_and_validate_external_target_async(
+        "http://caddy/api/v1/projects",
+        render_origin="http://caddy",
+        allowed_external_hosts=allowed,
+    )
+    assert d_api.kind == "blocked"
+
+    d_mixed = await resolve_and_validate_external_target_async(
+        "https://mixed.openfreemap.org/tile.pbf",
+        render_origin="http://caddy",
+        allowed_external_hosts=allowed,
+    )
+    assert d_mixed.kind == "blocked"
+
+    d_ok = await resolve_and_validate_external_target_async(
+        "https://tiles.openfreemap.org/styles/liberty",
+        render_origin="http://caddy",
+        allowed_external_hosts=allowed,
+    )
+    assert d_ok.kind == "external_https"
+    assert d_ok.target is not None
+    assert d_ok.target.host == "tiles.openfreemap.org"
+    assert d_ok.target.port == 443
+    assert d_ok.target.resolved_ip == "93.184.216.34"
+
+    # Pinned backend connects to resolved_ip without calling getaddrinfo again,
+    # verifies peer IP before TLS handshake, and preserves SNI server_hostname.
+    class FakeSock:
+        def __init__(self, peer_ip: str) -> None:
+            self._peer_ip = peer_ip
+
+        def getpeername(self) -> tuple[str, int]:
+            return (self._peer_ip, 443)
+
+    class FakeStream(httpcore.AsyncNetworkStream):
+        def __init__(self, peer_ip: str | None) -> None:
+            self.peer_ip = peer_ip
+            self.closed = False
+            self.tls_server_hostname: str | None = None
+            self.reads = 0
+
+        async def read(
+            self,
+            max_bytes: int,
+            timeout: float | None = None,  # noqa: ASYNC109
+        ) -> bytes:
+            _ = max_bytes, timeout
+            self.reads += 1
+            if self.reads == 1:
+                return b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: text/plain\r\n\r\nok"
+            return b""
+
+        async def write(
+            self,
+            buffer: bytes,
+            timeout: float | None = None,  # noqa: ASYNC109
+        ) -> None:
+            _ = buffer, timeout
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+        async def start_tls(
+            self,
+            ssl_context: ssl.SSLContext,
+            server_hostname: str | None = None,
+            timeout: float | None = None,  # noqa: ASYNC109
+        ) -> httpcore.AsyncNetworkStream:
+            _ = ssl_context, timeout
+            self.tls_server_hostname = server_hostname
+            return self
+
+        def get_extra_info(self, info: str) -> Any:
+            if info == "socket" and self.peer_ip is not None:
+                return FakeSock(self.peer_ip)
+            return None
+
+    class FakeInnerBackend(httpcore.AsyncNetworkBackend):
+        def __init__(self, peer_ip: str | None) -> None:
+            self.peer_ip = peer_ip
+            self.connect_calls: list[tuple[str, int]] = []
+            self.last_stream: FakeStream | None = None
+
+        async def connect_tcp(
+            self,
+            host: str,
+            port: int,
+            timeout: float | None = None,  # noqa: ASYNC109
+            local_address: str | None = None,
+            socket_options: Any = None,
+        ) -> httpcore.AsyncNetworkStream:
+            _ = timeout, local_address, socket_options
+            self.connect_calls.append((host, port))
+            stream = FakeStream(self.peer_ip)
+            self.last_stream = stream
+            return stream
+
+        async def connect_unix_socket(
+            self, *_args: Any, **_kwargs: Any
+        ) -> httpcore.AsyncNetworkStream:
+            raise AssertionError("unix socket must not be called")
+
+        async def sleep(self, seconds: float) -> None:
+            _ = seconds
+
+    dns_calls_before = len(dns_calls)
+    inner_ok = FakeInnerBackend("93.184.216.34")
+    transport_ok = PinnedSsrfAsyncTransport(network_backend=inner_ok, resolve_dns=True)
+    async with httpx.AsyncClient(transport=transport_ok, follow_redirects=False) as client:
+        with pin_external_target(d_ok.target):
+            resp = await client.get("https://tiles.openfreemap.org/styles/liberty")
+    assert resp.status_code == 200
+    assert resp.text == "ok"
+    # Connected directly to pinned IP without a second DNS lookup
+    assert len(dns_calls) == dns_calls_before
+    assert inner_ok.connect_calls == [("93.184.216.34", 443)]
+    assert inner_ok.last_stream is not None
+    assert inner_ok.last_stream.tls_server_hostname == "tiles.openfreemap.org"
+
+    # If connected socket peer IP is restricted (e.g., 169.254.169.254), abort BEFORE TLS
+    inner_bad_peer = FakeInnerBackend("169.254.169.254")
+    transport_bad_peer = PinnedSsrfAsyncTransport(network_backend=inner_bad_peer, resolve_dns=True)
+    async with httpx.AsyncClient(transport=transport_bad_peer, follow_redirects=False) as client:
+        with pin_external_target(d_ok.target):
+            with pytest.raises(httpx.ConnectError, match="restricted connected peer IP"):
+                await client.get("https://tiles.openfreemap.org/styles/liberty")
+    assert inner_bad_peer.last_stream is not None
+    assert inner_bad_peer.last_stream.closed is True
+    assert inner_bad_peer.last_stream.tls_server_hostname is None
+
+    # Direct backend checks: missing peer IP fails closed, unix socket fails closed
+    backend_no_peer = SsrfPinnedNetworkBackend(
+        inner=FakeInnerBackend(None),
+        resolve_dns=False,
+        require_verified_peer=True,
+    )
+    with pytest.raises(SsrfBlockedConnectError, match="Unable to verify"):
+        await backend_no_peer.connect_tcp("93.184.216.34", 443)
+    with pytest.raises(SsrfBlockedConnectError, match="Unix domain sockets"):
+        await backend_no_peer.connect_unix_socket("/var/run/docker.sock")

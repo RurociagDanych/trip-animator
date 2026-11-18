@@ -242,9 +242,9 @@ class InMemoryRenderDatabase:
                 if "UPDATE render_job_chunks" in sql and "SET status = 'cancelled'" in sql:
                     count = 0
                     for ch in db.chunks.values():
-                        if (
-                            ch["render_job_id"] == p["job_id"]
-                            and ch["status"] in ("queued", "running")
+                        if ch["render_job_id"] == p["job_id"] and ch["status"] in (
+                            "queued",
+                            "running",
                         ):
                             ch["status"] = "cancelled"
                             ch["lease_expires_at"] = None
@@ -367,8 +367,7 @@ class InMemoryRenderDatabase:
                             job["status"] = "failed"
                             job["lease_expires_at"] = None
                             job["error_message"] = (
-                                job["error_message"]
-                                or "Render job exceeded maximum retry attempts"
+                                job["error_message"] or "Render job exceeded maximum retry attempts"
                             )
                             reaped_jobs.append((job["id"], job["progress_pct"]))
                     return _MemoryCursor(reaped_jobs, rowcount=len(reaped_jobs))
@@ -504,9 +503,7 @@ class InMemoryRenderDatabase:
 
                 if "FROM project_photos" in sql:
                     photo_rows = [
-                        ph
-                        for ph in db.photos.get(p["project_id"], [])
-                        if ph.get("enabled", True)
+                        ph for ph in db.photos.get(p["project_id"], []) if ph.get("enabled", True)
                     ]
                     return _MemoryCursor(
                         [
@@ -1263,9 +1260,7 @@ def test_runner_loads_only_enabled_photos_into_manifest_and_ssrf_blocks_api(
         has_timestamps=True,
         has_elevation=True,
     )
-    df, summary = build_silver_dataframe(
-        parsed, trip_id=str(project_id), stage_id=str(stage_id)
-    )
+    df, summary = build_silver_dataframe(parsed, trip_id=str(project_id), stage_id=str(stage_id))
     silver_key = f"silver/{project_id}/{stage_id}.parquet"
     tmp_pq = tmp_path / "tmp.parquet"
     write_silver_parquet(df, tmp_pq)
@@ -1493,10 +1488,7 @@ def test_chunked_job_fanout_render_concat_notifications_and_failure(
         (120, 240, 15, True, {}),
         (240, 300, 15, True, {}),
     ]
-    assert (
-        store.get_bytes(f"outputs/{job_id}.mp4")
-        == b"CHUNK_0_120+CHUNK_120_240+CHUNK_240_300"
-    )
+    assert store.get_bytes(f"outputs/{job_id}.mp4") == b"CHUNK_0_120+CHUNK_120_240+CHUNK_240_300"
     # Intermediate chunk blobs are cleaned up after assembly
     for c_idx in range(3):
         try:
@@ -1597,22 +1589,24 @@ def test_chunked_job_uses_pre_serialized_manifest_without_rebuilding(
     photo_id = uuid.uuid4()
     thumb_key = f"photos/{project_id}/{photo_id}_thumb.webp"
     store.put_bytes(thumb_key, b"RIFFwebp-thumb", content_type="image/webp")
-    db.photos[project_id] = [{
-        "id": photo_id,
-        "project_id": project_id,
-        "thumb_object_key": thumb_key,
-        "width": 640,
-        "height": 480,
-        "caption": "Summit",
-        "taken_at_utc": None,
-        "lat": None,
-        "lon": None,
-        "matched_lat": None,
-        "matched_lon": None,
-        "matched_progress": None,
-        "match_method": "unmatched",
-        "enabled": True,
-    }]
+    db.photos[project_id] = [
+        {
+            "id": photo_id,
+            "project_id": project_id,
+            "thumb_object_key": thumb_key,
+            "width": 640,
+            "height": 480,
+            "caption": "Summit",
+            "taken_at_utc": None,
+            "lat": None,
+            "lon": None,
+            "matched_lat": None,
+            "matched_lon": None,
+            "matched_progress": None,
+            "match_method": "unmatched",
+            "enabled": True,
+        }
+    ]
 
     job_id = uuid.uuid4()
     db.jobs[job_id] = {

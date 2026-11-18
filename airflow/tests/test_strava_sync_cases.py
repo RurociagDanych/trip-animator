@@ -96,9 +96,7 @@ def test_strava_sync_429_too_many_requests_on_listing_raises(
         return httpx.Response(404)
 
     def client_factory():
-        return httpx.Client(
-            transport=httpx.MockTransport(handler), follow_redirects=False
-        )
+        return httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
 
     with airflow_harness.session_factory() as db:
         with pytest.raises(StravaUpstreamError, match=r"status=429"):
@@ -135,9 +133,7 @@ def test_strava_sync_429_too_many_requests_on_token_refresh_raises(
         return httpx.Response(404)
 
     def client_factory():
-        return httpx.Client(
-            transport=httpx.MockTransport(handler), follow_redirects=False
-        )
+        return httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
 
     with airflow_harness.session_factory() as db:
         with pytest.raises(StravaUpstreamError, match=r"status=429"):
@@ -195,9 +191,7 @@ def test_strava_sync_429_on_activity_detail_and_streams_resilient(
         return httpx.Response(404)
 
     def client_factory():
-        return httpx.Client(
-            transport=httpx.MockTransport(handler), follow_redirects=False
-        )
+        return httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
 
     with airflow_harness.session_factory() as db:
         result = sync_strava_connection(
@@ -343,7 +337,6 @@ def test_strava_sync_expired_token_refresh_lifecycle_and_errors(
         {"expires_at": 1234567890},  # missing access_token
         "string-not-dict",  # not a dict
     ]:
-
         payload = malformed
 
         def malformed_handler(req: httpx.Request, p: Any = payload) -> httpx.Response:
@@ -677,9 +670,7 @@ def test_strava_sync_malformed_empty_and_corrupt_streams(
         return httpx.Response(404)
 
     def client_factory():
-        return httpx.Client(
-            transport=httpx.MockTransport(handler), follow_redirects=False
-        )
+        return httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
 
     with airflow_harness.session_factory() as db:
         res = sync_strava_connection(
@@ -759,9 +750,7 @@ def test_strava_sync_project_reuse_and_summary_aggregation(
         return httpx.Response(404)
 
     def client_factory():
-        return httpx.Client(
-            transport=httpx.MockTransport(handler), follow_redirects=False
-        )
+        return httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
 
     with airflow_harness.session_factory() as db:
         res = sync_strava_connection(

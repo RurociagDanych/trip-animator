@@ -313,9 +313,7 @@ class StreamingVideoEncoder:
             self._proc.wait(timeout=5.0)
             if self._stderr_thread is not None:
                 self._stderr_thread.join(timeout=2.0)
-            raise EncoderError(
-                f"FFmpeg encoding exceeded timeout ({timeout_seconds}s)"
-            ) from exc
+            raise EncoderError(f"FFmpeg encoding exceeded timeout ({timeout_seconds}s)") from exc
 
         if self._stderr_thread is not None:
             self._stderr_thread.join(timeout=5.0)

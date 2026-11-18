@@ -5,9 +5,17 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   publication-security:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -33,8 +41,27 @@ jobs:
       - name: Exercise publication gate regressions
         run: python3 -m unittest discover -s scripts/tests -v
 
-  python-and-dbt:
+  python-lint-type:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install Python workspace
+        run: uv sync --all-packages --frozen
+      - name: Ruff lint
+        run: uv run ruff check apps packages airflow
+      - name: Ruff format check
+        run: uv run ruff format --check apps packages airflow
+      - name: Mypy typecheck
+        run: uv run mypy apps/api/src apps/worker/src packages/telemetry/src airflow/src
+
+  python-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       TEST_POSTGRES_URL: postgresql://trip:trip@127.0.0.1:5432/trip_test
     services:
@@ -56,23 +83,143 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
+          enable-cache: true
       - name: Install Python workspace
         run: uv sync --all-packages --frozen
-      - name: Ruff lint
-        run: uv run ruff check apps packages airflow
-      - name: Mypy typecheck
-        run: uv run mypy apps/api/src apps/worker/src packages/telemetry/src airflow/src
-      - name: Pytest suite
-        run: uv run pytest -ra
+      - name: Pytest suite (non-Postgres)
+        run: >-
+          uv run pytest --strict-markers -ra -m "not postgres"
+          packages/telemetry/tests apps/api/tests apps/worker/tests
+      - name: Pytest suite (Postgres integration, non-skipped)
+        shell: bash
+        run: |
+          set -euo pipefail
+          junit_xml="${RUNNER_TEMP}/pytest-postgres.xml"
+          uv run pytest -m postgres --strict-markers -ra --junitxml="$junit_xml" apps/api/tests apps/worker/tests
+          python3 -c '
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse(sys.argv[1]).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root.findall("testsuite"))
+          total = sum(int(s.attrib.get("tests", 0)) for s in suites)
+          skipped = sum(int(s.attrib.get("skipped", 0)) for s in suites)
+          failures = sum(int(s.attrib.get("failures", 0)) for s in suites)
+          errors = sum(int(s.attrib.get("errors", 0)) for s in suites)
+          print(f"Postgres tests: total={total} skipped={skipped} failures={failures} errors={errors}")
+          assert total >= 1, "No postgres tests executed"
+          assert skipped == 0, f"Postgres tests were skipped ({skipped})"
+          assert failures == 0 and errors == 0
+          ' "$junit_xml"
+
+  dbt-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install Python workspace
+        run: uv sync --all-packages --frozen
+      - name: Generate deterministic Silver Parquet fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          dbt_ci_dir="${RUNNER_TEMP}/dbt_ci"
+          mkdir -p "${dbt_ci_dir}/silver" "${dbt_ci_dir}/gold"
+          uv run python -c '
+          import sys
+          from datetime import UTC, datetime, timedelta
+          from pathlib import Path
+          from trip_telemetry import ParsedTrack, TrackPoint, build_silver_dataframe, write_silver_parquet
+          from trip_telemetry.ref_data import resolve_ref_data_dir
+
+          base_dir = Path(sys.argv[1])
+          silver_dir = base_dir / "silver"
+          resolve_ref_data_dir(base_dir / "ref", ensure_exists=True)
+
+          def make_track(base_dt: datetime, lat0: float, lon0: float, *, include_dwell: bool) -> ParsedTrack:
+              pts: list[TrackPoint] = []
+              for i in range(20):
+                  pts.append(
+                      TrackPoint(
+                          lat=lat0 + i * 0.0012,
+                          lon=lon0 + i * 0.0004,
+                          elev_m=1000.0 + i * 10.0,
+                          ts_utc=base_dt + timedelta(seconds=i * 60),
+                          hr_bpm=140 + (i % 15),
+                          cadence=85,
+                          watts=210 + (i % 30),
+                          segment_idx=0 if i < 12 else 1,
+                      )
+                  )
+              if include_dwell:
+                  pts[-1].moving = False
+                  for j in range(1, 4):
+                      pts.append(
+                          TrackPoint(
+                              lat=pts[-1].lat,
+                              lon=pts[-1].lon,
+                              elev_m=pts[-1].elev_m,
+                              ts_utc=base_dt + timedelta(seconds=19 * 60 + j * 60),
+                              moving=False,
+                              segment_idx=1,
+                          )
+                      )
+              return ParsedTrack(
+                  name="CI Fixture Stage",
+                  points=pts,
+                  point_count=len(pts),
+                  segment_count=2,
+                  has_timestamps=True,
+                  has_elevation=True,
+              )
+
+          df1, _ = build_silver_dataframe(
+              make_track(datetime(2024, 7, 1, 8, 0, 0, tzinfo=UTC), 0.120, 0.340, include_dwell=True),
+              trip_id="trip-ci",
+              stage_id="stage-ci-1",
+          )
+          df2, _ = build_silver_dataframe(
+              make_track(datetime(2024, 7, 2, 8, 0, 0, tzinfo=UTC), 0.220, 0.440, include_dwell=False),
+              trip_id="trip-ci",
+              stage_id="stage-ci-2",
+          )
+          write_silver_parquet(df1, silver_dir / "stage-ci-1.parquet")
+          write_silver_parquet(df2, silver_dir / "stage-ci-2.parquet")
+          ' "${dbt_ci_dir}"
       - name: dbt parse
         run: uv run dbt parse --project-dir dbt --profiles-dir dbt
-      - name: Airflow DAG integrity & task suite
+      - name: dbt build
+        shell: bash
         run: |
-          uv sync --project airflow --frozen
-          uv run --project airflow pytest airflow/tests -v
+          set -euo pipefail
+          dbt_ci_dir="${RUNNER_TEMP}/dbt_ci"
+          export DBT_DUCKDB_PATH="${dbt_ci_dir}/gold/trip_analytics.duckdb"
+          uv run dbt build \
+            --project-dir dbt \
+            --profiles-dir dbt \
+            --target-path "${dbt_ci_dir}/target" \
+            --log-path "${dbt_ci_dir}/logs" \
+            --vars "{\"silver_parquet_glob\": \"${dbt_ci_dir}/silver/*.parquet\", \"ref_data_dir\": \"${dbt_ci_dir}/ref\"}"
+
+  airflow-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install Airflow project
+        run: uv sync --project airflow --frozen
+      - name: Airflow DAG integrity & task suite
+        run: uv run --project airflow pytest --strict-markers -ra airflow/tests
 
   web:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -93,6 +240,7 @@ jobs:
 
   compose:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Validate Compose config
@@ -102,6 +250,7 @@ jobs:
 
   terraform:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3

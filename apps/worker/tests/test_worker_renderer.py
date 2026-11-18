@@ -159,6 +159,8 @@ async def test_ssrf_route_handler_blocks_unexpected_origins_and_caddy_api(
     import asyncio
     import socket
 
+    import httpx
+
     loop = asyncio.get_running_loop()
 
     async def fake_getaddrinfo(*_args: Any, **_kwargs: Any) -> list[Any]:
@@ -166,35 +168,63 @@ async def test_ssrf_route_handler_blocks_unexpected_origins_and_caddy_api(
 
     monkeypatch.setattr(loop, "getaddrinfo", fake_getaddrinfo)
 
-    handler = make_ssrf_route_handler(
-        render_origin="http://caddy",
-        allowed_external_hosts=frozenset({"tiles.openfreemap.org"}),
-        resolve_dns=True,
-    )
+    seen_external: list[tuple[str, str, str | None, str | None]] = []
 
-    ok_app = FakeRoute("http://caddy/assets/index.js")
-    await handler(ok_app)  # type: ignore[arg-type]
-    assert ok_app.continued is True
+    def _external_handler(request: httpx.Request) -> httpx.Response:
+        seen_external.append(
+            (
+                request.method,
+                str(request.url),
+                request.headers.get("host"),
+                request.extensions.get("sni_hostname"),
+            )
+        )
+        return httpx.Response(200, headers={"content-type": "application/json"}, content=b"{}")
 
-    ok_render = FakeRoute("http://caddy/render/job-1")
-    await handler(ok_render)  # type: ignore[arg-type]
-    assert ok_render.continued is True
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_external_handler),
+        follow_redirects=False,
+    ) as client:
+        handler = make_ssrf_route_handler(
+            render_origin="http://caddy",
+            allowed_external_hosts=frozenset({"tiles.openfreemap.org"}),
+            resolve_dns=True,
+            http_client=client,
+        )
 
-    bad_caddy_api = FakeRoute("http://caddy/api/v1/projects")
-    await handler(bad_caddy_api)  # type: ignore[arg-type]
-    assert bad_caddy_api.aborted_reason == "blockedbyclient"
+        ok_app = FakeRoute("http://caddy/assets/index.js")
+        await handler(ok_app)  # type: ignore[arg-type]
+        assert ok_app.continued is True
 
-    ok_tiles = FakeRoute("https://tiles.openfreemap.org/styles/liberty")
-    await handler(ok_tiles)  # type: ignore[arg-type]
-    assert ok_tiles.continued is True
+        ok_render = FakeRoute("http://caddy/render/job-1")
+        await handler(ok_render)  # type: ignore[arg-type]
+        assert ok_render.continued is True
 
-    bad_metadata = FakeRoute("http://169.254.169.254/latest/meta-data/")
-    await handler(bad_metadata)  # type: ignore[arg-type]
-    assert bad_metadata.aborted_reason == "blockedbyclient"
+        bad_caddy_api = FakeRoute("http://caddy/api/v1/projects")
+        await handler(bad_caddy_api)  # type: ignore[arg-type]
+        assert bad_caddy_api.aborted_reason == "blockedbyclient"
 
-    bad_api = FakeRoute("http://api:8000/api/v1/projects")
-    await handler(bad_api)  # type: ignore[arg-type]
-    assert bad_api.aborted_reason == "blockedbyclient"
+        ok_tiles = FakeRoute("https://tiles.openfreemap.org/styles/liberty")
+        await handler(ok_tiles)  # type: ignore[arg-type]
+        assert ok_tiles.continued is False
+        assert ok_tiles.fulfilled is not None
+        assert ok_tiles.fulfilled["status"] == 200
+        assert seen_external == [
+            (
+                "GET",
+                "https://tiles.openfreemap.org/styles/liberty",
+                "tiles.openfreemap.org",
+                "tiles.openfreemap.org",
+            )
+        ]
+
+        bad_metadata = FakeRoute("http://169.254.169.254/latest/meta-data/")
+        await handler(bad_metadata)  # type: ignore[arg-type]
+        assert bad_metadata.aborted_reason == "blockedbyclient"
+
+        bad_api = FakeRoute("http://api:8000/api/v1/projects")
+        await handler(bad_api)  # type: ignore[arg-type]
+        assert bad_api.aborted_reason == "blockedbyclient"
 
 
 async def test_render_manifest_with_page_offloads_callbacks_and_finish_from_event_loop() -> None:
@@ -310,6 +340,8 @@ async def test_ssrf_route_handler_blocks_bypass_vectors_and_nxdomain_allows_ipv6
     import asyncio
     import socket
 
+    import httpx
+
     loop = asyncio.get_running_loop()
 
     async def fake_getaddrinfo(
@@ -336,41 +368,57 @@ async def test_ssrf_route_handler_blocks_bypass_vectors_and_nxdomain_allows_ipv6
             "https://rebind-v4mapped.openfreemap.org"
         ),
     )
-    handler = make_ssrf_route_handler(
-        render_origin=settings.render_base_url,
-        allowed_external_hosts=settings.allowed_external_hosts,
-        resolve_dns=True,
-    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _req: httpx.Response(
+                200,
+                headers={"content-type": "application/x-protobuf"},
+                content=b"tile",
+            )
+        ),
+        follow_redirects=False,
+    ) as client:
+        handler = make_ssrf_route_handler(
+            render_origin=settings.render_base_url,
+            allowed_external_hosts=settings.allowed_external_hosts,
+            resolve_dns=True,
+            http_client=client,
+        )
 
-    for blocked_url in (
-        "http://127.0.0.1/render/job-1",
-        "http://0.0.0.0/render/job-1",
-        "http://169.254.169.254/latest/meta-data/",
-        "https://100.64.0.1/tile.pbf",
-        "https://[::1]/tile.pbf",
-        "https://[::ffff:127.0.0.1]/tile.pbf",
-        "https://[fc00::1]/tile.pbf",
-        "https://[fe80::1]/tile.pbf",
-        "http://caddy/api/../api/v1/projects",
-        "http://caddy@127.0.0.1/render/job-1",
-        "https://tiles.openfreemap.org@127.0.0.1/tile.pbf",
-        "https://nxdomain.openfreemap.org/styles/liberty",
-        "https://rebind-v4mapped.openfreemap.org/styles/liberty",
-    ):
-        route = FakeRoute(blocked_url)
-        await handler(route)  # type: ignore[arg-type]
-        assert route.aborted_reason == "blockedbyclient", f"Expected block for {blocked_url}"
+        for blocked_url in (
+            "http://127.0.0.1/render/job-1",
+            "http://0.0.0.0/render/job-1",
+            "http://169.254.169.254/latest/meta-data/",
+            "https://100.64.0.1/tile.pbf",
+            "https://[::1]/tile.pbf",
+            "https://[::ffff:127.0.0.1]/tile.pbf",
+            "https://[fc00::1]/tile.pbf",
+            "https://[fe80::1]/tile.pbf",
+            "http://caddy/api/../api/v1/projects",
+            "http://caddy@127.0.0.1/render/job-1",
+            "https://tiles.openfreemap.org@127.0.0.1/tile.pbf",
+            "https://nxdomain.openfreemap.org/styles/liberty",
+            "https://rebind-v4mapped.openfreemap.org/styles/liberty",
+        ):
+            route = FakeRoute(blocked_url)
+            await handler(route)  # type: ignore[arg-type]
+            assert route.aborted_reason == "blockedbyclient", f"Expected block for {blocked_url}"
 
-    v6_route = FakeRoute("https://[2606:4700:4700::1111]:8443/tiles/0/0/0.pbf")
-    await handler(v6_route)  # type: ignore[arg-type]
-    assert v6_route.continued is True
+        v6_route = FakeRoute("https://[2606:4700:4700::1111]:8443/tiles/0/0/0.pbf")
+        await handler(v6_route)  # type: ignore[arg-type]
+        assert v6_route.continued is False
+        assert v6_route.fulfilled is not None
+        assert v6_route.fulfilled["status"] == 200
 
 
 async def test_render_manifest_with_page_png_cancellation_and_pageerror_handling() -> None:
-    # 1. build_chromium_launch_args includes --no-sandbox only when enabled.
+    # 1. build_chromium_launch_args includes --no-sandbox only when enabled and WebRTC guards.
     args_default = build_chromium_launch_args(WorkerSettings(chromium_no_sandbox=False))
     assert "--no-sandbox" not in args_default
     assert "--use-angle=swiftshader" in args_default
+    assert "--disable-features=WebRtcHideLocalIpsWithMdns" in args_default
+    assert "--enforce-webrtc-ip-permission-check" in args_default
+    assert "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" in args_default
     args_no_sandbox = build_chromium_launch_args(WorkerSettings(chromium_no_sandbox=True))
     assert "--no-sandbox" in args_no_sandbox
 
@@ -474,9 +522,7 @@ async def test_virtual_photo_route_and_ssrf_first_tile_cache(
 
     loop = asyncio.get_running_loop()
 
-    async def fake_getaddrinfo(
-        host: Any, _port: Any, **_kwargs: Any
-    ) -> list[Any]:
+    async def fake_getaddrinfo(host: Any, _port: Any, **_kwargs: Any) -> list[Any]:
         if host == "rebind.openfreemap.org":
             return [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::ffff:127.0.0.1", 443, 0, 0))]
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
@@ -654,9 +700,7 @@ def test_warm_playwright_browser_reuses_browser_isolates_context_and_recycles_af
         for idx in range(3):
             out_mp4 = tmp_path / f"out_{idx}.mp4"
             browser = host.run_coro(host.acquire_browser())
-            host.run_coro(
-                render_manifest_to_mp4(manifest, out_mp4, settings, browser=browser)
-            )
+            host.run_coro(render_manifest_to_mp4(manifest, out_mp4, settings, browser=browser))
 
         # Renders 1 & 2 shared browser #1; render 3 recycled into browser #2
         assert len(launch_records) == 2
@@ -755,3 +799,84 @@ def test_warm_playwright_browser_crash_recovery(
         assert res == tmp_path / "ok.mp4"
         assert len(launched_browsers) == 2
         assert launched_browsers[1].is_connected() is True
+
+
+async def test_ssrf_route_handler_external_without_tile_cache_blocks_redirects_and_rebinding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+    import socket
+
+    import httpx
+
+    loop = asyncio.get_running_loop()
+    dns_round = {"n": 0}
+
+    async def fake_getaddrinfo(*_args: Any, **_kwargs: Any) -> list[Any]:
+        dns_round["n"] += 1
+        if dns_round["n"] == 3:
+            # 3rd request simulates DNS rebinding to link-local metadata IP
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 443))]
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+
+    monkeypatch.setattr(loop, "getaddrinfo", fake_getaddrinfo)
+
+    seen_requests: list[tuple[str, str]] = []
+
+    def transport_fn(request: httpx.Request) -> httpx.Response:
+        seen_requests.append((request.method, str(request.url)))
+        if "redir" in str(request.url):
+            return httpx.Response(302, headers={"location": "http://127.0.0.1/admin"})
+        return httpx.Response(200, headers={"content-type": "application/json"}, content=b'{"v":1}')
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(transport_fn),
+        follow_redirects=False,
+    ) as client:
+        handler = make_ssrf_route_handler(
+            render_origin="http://caddy",
+            allowed_external_hosts=frozenset({"tiles.openfreemap.org"}),
+            resolve_dns=True,
+            tile_cache=None,
+            http_client=client,
+        )
+
+        # 1. External GET with tile_cache=None uses fulfill(), never continue_()
+        get_route = FakeRoute("https://tiles.openfreemap.org/styles/liberty", method="GET")
+        await handler(get_route)  # type: ignore[arg-type]
+        assert get_route.continued is False
+        assert get_route.fulfilled is not None
+        assert get_route.fulfilled["status"] == 200
+        assert get_route.fulfilled["body"] == b'{"v":1}'
+
+        # 2. External HEAD with tile_cache=None uses fulfill() with empty body
+        head_route = FakeRoute("https://tiles.openfreemap.org/styles/liberty", method="HEAD")
+        await handler(head_route)  # type: ignore[arg-type]
+        assert head_route.continued is False
+        assert head_route.fulfilled is not None
+        assert head_route.fulfilled["status"] == 200
+        assert head_route.fulfilled["body"] == b""
+
+        # 3. DNS rebinding on 3rd lookup is aborted before HTTP fetch
+        rebind_route = FakeRoute("https://tiles.openfreemap.org/rebinding.pbf", method="GET")
+        await handler(rebind_route)  # type: ignore[arg-type]
+        assert rebind_route.aborted_reason == "blockedbyclient"
+        assert rebind_route.continued is False
+
+        # 4. 3xx redirect with tile_cache=None is aborted
+        redir_route = FakeRoute("https://tiles.openfreemap.org/redir", method="GET")
+        await handler(redir_route)  # type: ignore[arg-type]
+        assert redir_route.aborted_reason == "blockedbyclient"
+        assert redir_route.continued is False
+
+        # 5. Non-GET/HEAD external methods are aborted
+        post_route = FakeRoute("https://tiles.openfreemap.org/mutate", method="POST")
+        await handler(post_route)  # type: ignore[arg-type]
+        assert post_route.aborted_reason == "blockedbyclient"
+        assert post_route.continued is False
+
+    assert seen_requests == [
+        ("GET", "https://tiles.openfreemap.org/styles/liberty"),
+        ("HEAD", "https://tiles.openfreemap.org/styles/liberty"),
+        ("GET", "https://tiles.openfreemap.org/redir"),
+    ]

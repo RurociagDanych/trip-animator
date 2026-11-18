@@ -81,6 +81,7 @@ class Settings(BaseSettings):
     metrics_token: str = ""
 
     rate_limit_login_max: int = 10
+    rate_limit_login_account_max: int = 10
     rate_limit_login_window_s: int = 60
     rate_limit_gpx_max: int = 20
     rate_limit_gpx_window_s: int = 60

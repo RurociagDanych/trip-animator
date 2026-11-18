@@ -74,9 +74,7 @@ class AppHarness:
             db.refresh(user)
             return user
 
-    def login_client(
-        self, email: str, password: str | None = None
-    ) -> tuple[TestClient, str]:
+    def login_client(self, email: str, password: str | None = None) -> tuple[TestClient, str]:
         pw = password or _DEFAULT_PW
         client = TestClient(self.app)
         resp = client.post("/api/v1/auth/login", json={"email": email, "password": pw})

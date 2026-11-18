@@ -351,9 +351,7 @@ def export_project_tracks(
                 )
                 if cur_seg is None or seg_idx != cur_seg:
                     if cur_line:
-                        lines.append(
-                            cur_line if len(cur_line) >= 2 else [cur_line[0], cur_line[0]]
-                        )
+                        lines.append(cur_line if len(cur_line) >= 2 else [cur_line[0], cur_line[0]])
                     cur_seg = seg_idx
                     cur_line = [coord]
                 else:
@@ -403,8 +401,7 @@ def export_project_tracks(
 
     xml_lines: list[str] = [
         '<?xml version="1.0" encoding="UTF-8"?>',
-        '<gpx version="1.1" creator="Trip Animator" '
-        'xmlns="http://www.topografix.com/GPX/1/1">',
+        '<gpx version="1.1" creator="Trip Animator" xmlns="http://www.topografix.com/GPX/1/1">',
         "  <metadata>",
         f"    <name>{xml_escape(project.title)}</name>",
         "  </metadata>",

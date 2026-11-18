@@ -111,9 +111,7 @@ class ObjectStore(Protocol):
         range_header: str | None = None,
         chunk_size: int = _STREAM_CHUNK_BYTES,
     ) -> ObjectStream: ...
-    def copy(
-        self, src_key: str, dst_key: str, *, content_type: str | None = None
-    ) -> None: ...
+    def copy(self, src_key: str, dst_key: str, *, content_type: str | None = None) -> None: ...
     def delete(self, key: str) -> None: ...
 
 
@@ -201,9 +199,7 @@ class LocalObjectStore:
             is_partial=is_partial,
         )
 
-    def copy(
-        self, src_key: str, dst_key: str, *, content_type: str | None = None
-    ) -> None:
+    def copy(self, src_key: str, dst_key: str, *, content_type: str | None = None) -> None:
         _ = content_type
         src = self.resolve_existing_path(src_key)
         dst = self._safe_path(dst_key)
@@ -327,9 +323,7 @@ class S3ObjectStore:
             is_partial=is_partial,
         )
 
-    def copy(
-        self, src_key: str, dst_key: str, *, content_type: str | None = None
-    ) -> None:
+    def copy(self, src_key: str, dst_key: str, *, content_type: str | None = None) -> None:
         extra_args: dict[str, Any] | None = None
         if content_type:
             extra_args = {

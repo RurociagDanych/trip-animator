@@ -101,8 +101,7 @@ def _make_gpx_with_start(name: str, start_iso: str, lat0: float = 0.1, lon0: flo
         lon = lon0 + idx * 0.002
         ele = 1000.0 + idx * 25.0
         pts.append(
-            f'<trkpt lat="{lat:.4f}" lon="{lon:.4f}">'
-            f"<ele>{ele:.1f}</ele><time>{ts}</time></trkpt>"
+            f'<trkpt lat="{lat:.4f}" lon="{lon:.4f}"><ele>{ele:.1f}</ele><time>{ts}</time></trkpt>'
         )
     xml = (
         '<?xml version="1.0" encoding="UTF-8"?>'

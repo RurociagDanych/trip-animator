@@ -690,9 +690,7 @@ def test_full_idor_cross_user_and_unauthenticated_matrix(
         == 404
     )
     assert (
-        alice.get(
-            f"/api/v1/projects/{proj_a2}/telemetry/geometry?stage_id={stage_a1}"
-        ).status_code
+        alice.get(f"/api/v1/projects/{proj_a2}/telemetry/geometry?stage_id={stage_a1}").status_code
         == 404
     )
 
@@ -763,9 +761,7 @@ def test_csrf_and_cors_origin_enforcement(
             headers={"X-CSRF-Token": bob_csrf},
             **(kwargs or {}),
         )
-        assert cross_user.status_code == 403, (
-            f"Bob CSRF {method} {path}: {cross_user.status_code}"
-        )
+        assert cross_user.status_code == 403, f"Bob CSRF {method} {path}: {cross_user.status_code}"
 
     # CORS preflight and simple origin checks
     anon = TestClient(h.app)
@@ -957,3 +953,60 @@ def test_create_db_engine_applies_pool_params_on_postgres_and_skips_sqlite(
     assert sqlite_kw["connect_args"] == {"check_same_thread": False}
     for pool_key in ("pool_size", "max_overflow", "pool_timeout", "pool_recycle"):
         assert pool_key not in sqlite_kw
+
+
+async def test_login_dual_ip_and_normalized_account_rate_limit(
+    make_harness: HarnessFactory,
+) -> None:
+    import hashlib
+
+    from trip_api.db import RateLimitRecord
+
+    h = make_harness(
+        rate_limit_login_max=20,
+        rate_limit_login_account_max=3,
+        rate_limit_login_window_s=60,
+    )
+    h.create_user("target.user@example.com", "target-secret-password-123")
+    h.create_user("other.user@example.com", "other-secret-password-123")
+
+    proxied_app: Any = ProxyHeadersMiddleware(cast(Any, h.app), trusted_hosts=["127.0.0.1"])
+    transport = httpx.ASGITransport(app=proxied_app, client=("127.0.0.1", 54321))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        for idx, email_variant in enumerate(
+            (
+                "  TARGET.USER@Example.COM ",
+                "target.user@example.com",
+                "Target.User@example.com",
+            )
+        ):
+            res = await client.post(
+                "/api/v1/auth/login",
+                json={"email": email_variant, "password": "wrong-password"},
+                headers={"X-Forwarded-For": f"198.51.100.{idx + 1}"},
+            )
+            assert res.status_code == 401
+
+        # Rotating to a fresh IP still hits the normalized account rate limit -> 429
+        acct_blocked = await client.post(
+            "/api/v1/auth/login",
+            json={"email": "target.user@example.com", "password": "target-secret-password-123"},
+            headers={"X-Forwarded-For": "198.51.100.99"},
+        )
+        assert acct_blocked.status_code == 429
+        assert "retry-after" in acct_blocked.headers
+
+        # Another account from the same IP is unaffected
+        other_ok = await client.post(
+            "/api/v1/auth/login",
+            json={"email": "other.user@example.com", "password": "other-secret-password-123"},
+            headers={"X-Forwarded-For": "198.51.100.99"},
+        )
+        assert other_ok.status_code == 200
+
+    expected_hash = hashlib.sha256(b"target.user@example.com").hexdigest()[:32]
+    with h.session_factory() as db:
+        keys = [r.bucket_key for r in db.scalars(select(RateLimitRecord)).all()]
+    assert f"login:acct:{expected_hash}" in keys
+    assert any(k.startswith("login:ip:") for k in keys)
+    assert all("target.user@example.com" not in k for k in keys)

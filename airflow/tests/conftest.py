@@ -69,9 +69,7 @@ class FakeObjectStore:
             raise FileNotFoundError(clean)
         return self.blobs[clean]
 
-    def copy(
-        self, src_key: str, dst_key: str, *, content_type: str | None = None
-    ) -> None:
+    def copy(self, src_key: str, dst_key: str, *, content_type: str | None = None) -> None:
         _ = content_type
         clean_dst = dst_key.lstrip("/")
         self.blobs[clean_dst] = self.get_bytes(src_key)
@@ -89,9 +87,7 @@ class FakeObjectStore:
     def list_keys_with_mtime(self, prefix: str = "") -> dict[str, datetime | None]:
         clean = prefix.lstrip("/")
         return {
-            k: self.mtimes.get(k)
-            for k in sorted(self.blobs)
-            if not clean or k.startswith(clean)
+            k: self.mtimes.get(k) for k in sorted(self.blobs) if not clean or k.startswith(clean)
         }
 
 

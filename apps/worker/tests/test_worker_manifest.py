@@ -702,9 +702,7 @@ def test_single_pass_fetchnumpy_kpis_virtual_photo_urls_and_color_segments(
         )
         for i in range(50)
     ]
-    key, _, _ = _write_stage_parquet(
-        store, project_id=project_id, stage_id=stage_id, points=points
-    )
+    key, _, _ = _write_stage_parquet(store, project_id=project_id, stage_id=stage_id, points=points)
     pq_path = store.resolve_existing_path(key)
     kpis, sampled = query_stage_kpis_and_manifest_points(pq_path, max_points=20)
     assert kpis["point_count"] == 50

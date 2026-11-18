@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -80,14 +81,22 @@ def login(
     settings: AppSettings,
 ) -> SessionInfoOut:
     client_ip = get_client_ip(request)
+    email = body.email.strip().lower()
+    email_hash = hashlib.sha256(email.encode("utf-8")).hexdigest()[:32]
+
     check_rate_limit(
         db,
-        bucket_key=f"login:{client_ip}",
+        bucket_key=f"login:ip:{client_ip}",
         limit=settings.rate_limit_login_max,
         window_seconds=settings.rate_limit_login_window_s,
     )
+    check_rate_limit(
+        db,
+        bucket_key=f"login:acct:{email_hash}",
+        limit=settings.rate_limit_login_account_max,
+        window_seconds=settings.rate_limit_login_window_s,
+    )
 
-    email = body.email.strip().lower()
     user = db.scalar(select(User).where(User.email == email))
     if user is None:
         verify_password(_DUMMY_ARGON2_HASH, body.password)

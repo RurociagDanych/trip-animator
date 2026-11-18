@@ -1460,6 +1460,7 @@ def _finalize_chunked_job(
         heartbeat_interval_s=heartbeat_interval_s,
     ) as lease:
         try:
+
             def _load_for_finalize(
                 conn: DbConnection,
             ) -> tuple[bool, RenderManifest | None, list[tuple[int, int, int, str]]]:
@@ -1474,9 +1475,7 @@ def _finalize_chunked_job(
                 )
                 if cancelled or manifest is None:
                     return (True, None, [])
-                chunk_rows = conn.execute(
-                    LOAD_SUCCEEDED_CHUNKS_SQL, {"job_id": job.id}
-                ).fetchall()
+                chunk_rows = conn.execute(LOAD_SUCCEEDED_CHUNKS_SQL, {"job_id": job.id}).fetchall()
                 conn.commit()
                 chunks_meta = [
                     (int(r[0]), int(r[1]), int(r[2]), str(r[3]))
@@ -1673,6 +1672,7 @@ def process_claimed_chunk(
         heartbeat_interval_s=heartbeat_interval_s,
     ) as lease:
         try:
+
             def _load_inputs(
                 conn: DbConnection,
             ) -> tuple[bool, ClaimedJob | None, RenderManifest | None, dict[str, bytes]]:
@@ -1885,6 +1885,7 @@ def process_claimed_job(
         try:
             total_frames_spec = _compute_spec_total_frames(job.spec_json)
             if total_frames_spec > settings.chunk_threshold_frames:
+
                 def _prepare_chunked(
                     conn: DbConnection,
                 ) -> tuple[bool, bool]:

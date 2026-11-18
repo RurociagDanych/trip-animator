@@ -52,7 +52,7 @@ services:
       - backend
 
   minio:
-    image: rustfs/rustfs:latest
+    image: rustfs/rustfs:1.0.5
     env_file:
       - path: ../.env
         required: false
@@ -163,7 +163,7 @@ services:
         required: false
     environment:
       <<: *app-env
-      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1,::1,172.30.0.10}
       GOLD_OUTPUT_DIR: /data/gold
       STRAVA_VERIFY_TOKEN: ${STRAVA_VERIFY_TOKEN:-}
       STRAVA_WEBHOOK_SUBSCRIPTION_ID: ${STRAVA_WEBHOOK_SUBSCRIPTION_ID:-}
@@ -299,7 +299,7 @@ services:
       - edge
 
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2.11.9-alpine
     env_file:
       - path: ../.env
         required: false
@@ -326,7 +326,8 @@ services:
       - no-new-privileges:true
     restart: unless-stopped
     networks:
-      - edge
+      edge:
+        ipv4_address: 172.30.0.10
 
   airflow-init:
     profiles: ["airflow"]
@@ -469,3 +470,6 @@ networks:
     driver: bridge
   edge:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/28

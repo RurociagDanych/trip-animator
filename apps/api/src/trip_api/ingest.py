@@ -156,8 +156,12 @@ def _refresh_access_token_if_needed(
         )
         return None
 
-    dialect = db.bind.dialect.name if db.bind is not None else ""
-    stmt = select(OAuthConnection).where(OAuthConnection.id == conn.id)
+    dialect = db.get_bind().dialect.name
+    stmt = (
+        select(OAuthConnection)
+        .where(OAuthConnection.id == conn.id)
+        .execution_options(populate_existing=True)
+    )
     if dialect == "postgresql":
         stmt = stmt.with_for_update()
     locked_conn = db.scalar(stmt) or conn
@@ -476,9 +480,7 @@ def process_pending_ingest_jobs(
                 throttled_owners.add(job.external_owner_id)
                 if int(job.attempt_count or 0) < max_attempts:
                     job.status = "queued"
-                    job.lease_expires_at = current_time + timedelta(
-                        seconds=retry_backoff_seconds
-                    )
+                    job.lease_expires_at = current_time + timedelta(seconds=retry_backoff_seconds)
                     job.error_message = "Strava rate limit (429); retrying after backoff"
                     db.commit()
                     deferred += 1
@@ -523,9 +525,7 @@ def process_pending_ingest_jobs(
                 throttled_owners.add(job.external_owner_id)
                 if int(job.attempt_count or 0) < max_attempts:
                     job.status = "queued"
-                    job.lease_expires_at = current_time + timedelta(
-                        seconds=retry_backoff_seconds
-                    )
+                    job.lease_expires_at = current_time + timedelta(seconds=retry_backoff_seconds)
                     job.error_message = "Strava streams rate limit (429); retrying after backoff"
                     db.commit()
                     deferred += 1
@@ -733,9 +733,7 @@ def replay_outdated_silver_stages(
     outdated = list(
         db.scalars(
             select(Stage)
-            .where(
-                (Stage.etl_version < target_etl_version) | (Stage.bronze_sha256.is_(None))
-            )
+            .where((Stage.etl_version < target_etl_version) | (Stage.bronze_sha256.is_(None)))
             .order_by(Stage.created_at.asc())
             .limit(batch_size)
         ).all()

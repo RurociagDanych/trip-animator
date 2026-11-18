@@ -81,9 +81,7 @@ def upgrade() -> None:
     op.create_index(
         op.f("ix_oauth_states_session_id"), "oauth_states", ["session_id"], unique=False
     )
-    op.create_index(
-        op.f("ix_oauth_states_state_hash"), "oauth_states", ["state_hash"], unique=True
-    )
+    op.create_index(op.f("ix_oauth_states_state_hash"), "oauth_states", ["state_hash"], unique=True)
     op.create_index(op.f("ix_oauth_states_user_id"), "oauth_states", ["user_id"], unique=False)
 
     op.create_table(

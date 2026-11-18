@@ -53,9 +53,7 @@ def _query_gold_countries_and_stages(
         con = duckdb.connect(str(gold_db_path), read_only=True)
         tables = {
             str(r[0])
-            for r in con.execute(
-                "SELECT table_name FROM information_schema.tables"
-            ).fetchall()
+            for r in con.execute("SELECT table_name FROM information_schema.tables").fetchall()
         }
         if "mart_stage_geo_context" in tables:
             cols = {
@@ -155,9 +153,7 @@ def _query_gold_heatmap_cells(
         con = duckdb.connect(str(gold_db_path), read_only=True)
         tables = {
             str(r[0])
-            for r in con.execute(
-                "SELECT table_name FROM information_schema.tables"
-            ).fetchall()
+            for r in con.execute("SELECT table_name FROM information_schema.tables").fetchall()
         }
         if "mart_spatial_coverage_h3" not in tables:
             return []
@@ -401,9 +397,7 @@ def get_career_analytics(
     year: Annotated[int | None, Query(ge=1970, le=2100)] = None,
     activity_type: ActivityType | None = None,
 ) -> CareerAnalyticsOut:
-    projects = list(
-        db.scalars(select(Project).where(Project.owner_user_id == auth.user.id)).all()
-    )
+    projects = list(db.scalars(select(Project).where(Project.owner_user_id == auth.user.id)).all())
     if not projects:
         return CareerAnalyticsOut(
             total_projects=0,
@@ -416,9 +410,7 @@ def get_career_analytics(
     project_by_id = {p.id: p for p in projects}
     owned_ids_str = [str(p.id) for p in projects]
     stages = list(
-        db.scalars(
-            select(Stage).where(Stage.project_id.in_(list(project_by_id.keys())))
-        ).all()
+        db.scalars(select(Stage).where(Stage.project_id.in_(list(project_by_id.keys())))).all()
     )
 
     matched_project_ids: set[uuid.UUID] = set()
@@ -599,11 +591,7 @@ def get_analytics_heatmap(
                     max_lons.append(float(fb[2]))
                     max_lats.append(float(fb[3]))
 
-        bbox = (
-            [min(min_lons), min(min_lats), max(max_lons), max(max_lats)]
-            if min_lons
-            else None
-        )
+        bbox = [min(min_lons), min(min_lats), max(max_lons), max(max_lats)] if min_lons else None
 
         act_counts: Counter[str] = Counter()
         for st in filtered_stages:

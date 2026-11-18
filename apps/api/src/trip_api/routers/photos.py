@@ -23,7 +23,7 @@ from trip_telemetry import (
     solve_camera_clock_skew,
 )
 
-from trip_api.db import ProjectPhoto
+from trip_api.db import Project, ProjectPhoto
 from trip_api.deps import AppSettings, CsrfAuth, CurrentAuth, DbSession, StoreDep, ensure_utc
 from trip_api.rate_limit import check_rate_limit
 from trip_api.schemas import (
@@ -475,6 +475,33 @@ async def upload_project_photo(
         await asyncio.to_thread(
             store.put_bytes, thumb_key, processed.thumb_bytes, content_type="image/webp"
         )
+
+        # Lock parent project row on Postgres right before authoritative quota check + insert
+        is_postgres = db.get_bind().dialect.name == "postgresql"
+        lock_stmt = select(Project).where(
+            Project.id == project.id,
+            Project.owner_user_id == auth.user.id,
+        )
+        if is_postgres:
+            lock_stmt = lock_stmt.with_for_update()
+        locked_project = db.scalar(lock_stmt)
+        if locked_project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        authoritative_count = int(
+            db.scalar(
+                select(func.count())
+                .select_from(ProjectPhoto)
+                .where(ProjectPhoto.project_id == project.id)
+            )
+            or 0
+        )
+        if authoritative_count >= MAX_PHOTOS_PER_PROJECT:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Maximum of {MAX_PHOTOS_PER_PROJECT} photos per project reached",
+            )
+
         photo = ProjectPhoto(
             id=photo_id,
             project_id=project.id,
@@ -512,6 +539,7 @@ async def upload_project_photo(
         db.commit()
         db.refresh(photo)
     except Exception:
+        db.rollback()
         for k in (object_key, thumb_key):
             try:
                 await asyncio.to_thread(store.delete, k)

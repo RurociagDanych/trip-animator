@@ -26,9 +26,7 @@ def _load_dagbag(tmp_path: Path, monkeypatch: Any) -> Any:
     return DagBag(dag_folder=str(dag_folder), include_examples=False)
 
 
-def test_all_three_dags_load_without_errors_or_cycles(
-    tmp_path: Path, monkeypatch: Any
-) -> None:
+def test_all_three_dags_load_without_errors_or_cycles(tmp_path: Path, monkeypatch: Any) -> None:
     dagbag = _load_dagbag(tmp_path, monkeypatch)
     assert dagbag.import_errors == {}
 
@@ -82,9 +80,10 @@ def test_dag_schedules_tasks_edges_and_zero_secret_literals(
         "sync_strava_connection",
         "summarize_strava_sync",
     }
-    assert "sync_strava_connection" in strava_dag.get_task(
-        "has_active_strava_connections"
-    ).downstream_task_ids
+    assert (
+        "sync_strava_connection"
+        in strava_dag.get_task("has_active_strava_connections").downstream_task_ids
+    )
     assert strava_dag.get_task("sync_strava_connection").downstream_task_ids == {
         "summarize_strava_sync"
     }

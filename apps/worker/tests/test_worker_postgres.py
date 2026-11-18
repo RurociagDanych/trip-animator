@@ -398,9 +398,7 @@ def test_postgres_skip_locked_multi_worker_claim(pg: _PgHarness, tmp_path: Path)
 
     # Worker A starts a claim transaction and holds the row lock on job1 without committing.
     with pg.connect() as conn_a, pg.connect() as conn_b:
-        row_a = conn_a.execute(
-            CLAIM_JOB_SQL, {"max_attempts": 3, "lease_seconds": 60}
-        ).fetchone()
+        row_a = conn_a.execute(CLAIM_JOB_SQL, {"max_attempts": 3, "lease_seconds": 60}).fetchone()
         assert row_a is not None
         assert uuid.UUID(str(row_a[0])) == job1_id
 
@@ -632,9 +630,7 @@ def test_postgres_lease_renewal_during_long_post_render(
     )
     cf = default_conn_factory(settings)
     with cf() as claim_conn:
-        claimed = claim_next_job(
-            claim_conn, max_attempts=3, lease_seconds=settings.lease_seconds
-        )
+        claimed = claim_next_job(claim_conn, max_attempts=3, lease_seconds=settings.lease_seconds)
     assert claimed is not None and claimed.id == job_id
 
     observed_short_lease: list[datetime] = []

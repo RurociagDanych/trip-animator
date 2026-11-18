@@ -369,17 +369,19 @@ def test_strava_oauth_refresh_reconnect_error_paths_and_disconnect_resilience(
     state3 = str(client.get("/api/v1/strava/connect").json()["state"])
     h.app.state.http_client_factory = lambda: httpx.AsyncClient(
         transport=httpx.MockTransport(
-            lambda req: httpx.Response(
-                200,
-                json={
-                    "access_token": "reconnected-access",
-                    "refresh_token": "reconnected-refresh",
-                    "expires_at": int((datetime.now(UTC) + timedelta(hours=6)).timestamp()),
-                    "athlete": {"id": 666777},
-                },
+            lambda req: (
+                httpx.Response(
+                    200,
+                    json={
+                        "access_token": "reconnected-access",
+                        "refresh_token": "reconnected-refresh",
+                        "expires_at": int((datetime.now(UTC) + timedelta(hours=6)).timestamp()),
+                        "athlete": {"id": 666777},
+                    },
+                )
+                if req.url.path == "/oauth/token"
+                else httpx.Response(500)
             )
-            if req.url.path == "/oauth/token"
-            else httpx.Response(500)
         ),
         follow_redirects=False,
     )
@@ -539,9 +541,7 @@ def test_render_jobs_idempotency_sse_cancel_and_downloads(
     assert c_resp.status_code == 200
     assert c_resp.json()["status"] == "cancelled"
     assert (
-        client.post(
-            f"/api/v1/renders/{job_id}/cancel", headers={"X-CSRF-Token": csrf}
-        ).status_code
+        client.post(f"/api/v1/renders/{job_id}/cancel", headers={"X-CSRF-Token": csrf}).status_code
         == 409
     )
 
@@ -775,11 +775,11 @@ def test_strava_webhook_subscription_id_fail_closed_and_rate_limit(
             == 200
         )
 
-    # 3. Subscription ID enforcement + rate limiting + deauth edge cases
+    # 3. Both subscription_id and verify_token configured -> BOTH must match (no token bypass)
     sub_h = make_harness(
         strava_verify_token="verify-secret",
         strava_webhook_subscription_id=778899,
-        rate_limit_strava_webhook_max=6,
+        rate_limit_strava_webhook_max=8,
         rate_limit_strava_webhook_window_s=60,
     )
     user = sub_h.create_user("subwh@example.com")
@@ -788,10 +788,10 @@ def test_strava_webhook_subscription_id_fail_closed_and_rate_limit(
     _seed_strava_connection(sub_h, other_user.id, athlete_id="999888")
 
     c_sub = TestClient(sub_h.app)
-    # Missing subscription_id -> 403 (req 1)
+    # Missing subscription_id even with valid token -> 403 (req 1)
     assert (
         c_sub.post(
-            "/api/v1/strava/webhook",
+            "/api/v1/strava/webhook?verify_token=verify-secret",
             json={
                 "object_type": "athlete",
                 "aspect_type": "update",
@@ -804,7 +804,7 @@ def test_strava_webhook_subscription_id_fail_closed_and_rate_limit(
     # Boolean/wrong subscription_id -> 403 (req 2)
     assert (
         c_sub.post(
-            "/api/v1/strava/webhook",
+            "/api/v1/strava/webhook?verify_token=verify-secret",
             json={
                 "subscription_id": True,
                 "object_type": "athlete",
@@ -815,7 +815,21 @@ def test_strava_webhook_subscription_id_fail_closed_and_rate_limit(
         ).status_code
         == 403
     )
-    # Matching subscription_id with wrong optional token -> 403 (req 3)
+    # Matching subscription_id with MISSING token -> 403 (req 3)
+    assert (
+        c_sub.post(
+            "/api/v1/strava/webhook",
+            json={
+                "subscription_id": 778899,
+                "object_type": "athlete",
+                "aspect_type": "update",
+                "owner_id": 444555,
+                "updates": {"authorized": "false"},
+            },
+        ).status_code
+        == 403
+    )
+    # Matching subscription_id with wrong token -> 403 (req 4)
     assert (
         c_sub.post(
             "/api/v1/strava/webhook?verify_token=wrong",
@@ -829,10 +843,10 @@ def test_strava_webhook_subscription_id_fail_closed_and_rate_limit(
         ).status_code
         == 403
     )
-    # Non-deauth event (authorized=true or object_type=activity) preserves connections (req 4)
+    # Non-deauth event with matching subscription_id + valid token preserves connections (req 5)
     assert (
         c_sub.post(
-            "/api/v1/strava/webhook",
+            "/api/v1/strava/webhook?verify_token=verify-secret",
             json={
                 "subscription_id": 778899,
                 "object_type": "athlete",
@@ -843,10 +857,10 @@ def test_strava_webhook_subscription_id_fail_closed_and_rate_limit(
         ).status_code
         == 200
     )
-    # Boolean owner_id ignored safely (req 5)
+    # Boolean owner_id ignored safely with valid token (req 6)
     assert (
         c_sub.post(
-            "/api/v1/strava/webhook",
+            "/api/v1/strava/webhook?verify_token=verify-secret",
             json={
                 "subscription_id": 778899,
                 "object_type": "athlete",
@@ -857,9 +871,10 @@ def test_strava_webhook_subscription_id_fail_closed_and_rate_limit(
         ).status_code
         == 200
     )
-    # Matching subscription_id succeeds and deauthorizes athlete 444555 only (req 6)
+    # Matching subscription_id + valid token deauthorizes athlete 444555 only (req 7)
     ok_resp = c_sub.post(
         "/api/v1/strava/webhook",
+        headers={"X-Strava-Verify-Token": "verify-secret"},
         json={
             "subscription_id": 778899,
             "object_type": "athlete",
@@ -876,13 +891,52 @@ def test_strava_webhook_subscription_id_fail_closed_and_rate_limit(
             select(AuditEvent).where(AuditEvent.event_type == "strava.webhook_deauthorize")
         )
 
-    # 7th request hits webhook rate limit -> 429
+    # Matching subscription_id + valid token succeeds on req 8, then 9th hits rate limit -> 429
+    assert (
+        c_sub.post(
+            "/api/v1/strava/webhook?verify_token=verify-secret",
+            json={"subscription_id": 778899, "object_type": "activity", "aspect_type": "create"},
+        ).status_code
+        == 200
+    )
     limited = c_sub.post(
-        "/api/v1/strava/webhook",
+        "/api/v1/strava/webhook?verify_token=verify-secret",
         json={"subscription_id": 778899, "object_type": "activity", "aspect_type": "create"},
     )
     assert limited.status_code == 429
     assert "retry-after" in limited.headers
+
+    # 4. Subscription-ID-only mode (strava_verify_token=""): matching subscription_id succeeds
+    sub_only = make_harness(
+        strava_verify_token="",
+        strava_webhook_subscription_id=556677,
+        rate_limit_strava_webhook_max=10,
+    )
+    sub_only_user = sub_only.create_user("subonly@example.com")
+    _seed_strava_connection(sub_only, sub_only_user.id, athlete_id="121212")
+    c_sub_only = TestClient(sub_only.app)
+    assert (
+        c_sub_only.post(
+            "/api/v1/strava/webhook",
+            json={"subscription_id": 999999, "object_type": "activity", "aspect_type": "create"},
+        ).status_code
+        == 403
+    )
+    assert (
+        c_sub_only.post(
+            "/api/v1/strava/webhook",
+            json={
+                "subscription_id": 556677,
+                "object_type": "athlete",
+                "aspect_type": "update",
+                "owner_id": 121212,
+                "updates": {"authorized": "false"},
+            },
+        ).status_code
+        == 200
+    )
+    with sub_only.session_factory() as db:
+        assert db.scalars(select(OAuthConnection)).all() == []
 
 
 def test_strava_batch_25_items_rate_limit_and_partial_404_429_handling(
@@ -1305,9 +1359,7 @@ def test_render_download_streaming_ranges_and_s3_404(
 
     # Unsatisfiable ranges return 416
     for bad_hdr in ("bytes=999999-", "bytes=10-5", "bytes=-0"):
-        bad_range = client.get(
-            f"/api/v1/renders/{job_id}/download", headers={"Range": bad_hdr}
-        )
+        bad_range = client.get(f"/api/v1/renders/{job_id}/download", headers={"Range": bad_hdr})
         assert bad_range.status_code == 416
         assert bad_range.headers["content-range"] == f"bytes */{len(mp4_bytes)}"
 
@@ -1396,9 +1448,7 @@ def test_try_copy_cached_render_artifacts_uses_store_copy(tmp_path: Path) -> Non
         def get_bytes(self, key: str) -> bytes:
             raise AssertionError(f"get_bytes should not be called during zero-copy: {key}")
 
-        def copy(
-            self, src_key: str, dst_key: str, *, content_type: str | None = None
-        ) -> None:
+        def copy(self, src_key: str, dst_key: str, *, content_type: str | None = None) -> None:
             self.copy_calls.append((src_key, dst_key, content_type))
             super().copy(src_key, dst_key, content_type=content_type)
 

@@ -126,7 +126,22 @@ async def _get_valid_access_token(
     if ensure_utc(conn.expires_at) > datetime.now(UTC) + timedelta(seconds=60):
         return decrypt_secret(conn.access_token_enc, key, aad=aad)
 
-    refresh_token = decrypt_secret(conn.refresh_token_enc, key, aad=aad)
+    is_postgres = db.get_bind().dialect.name == "postgresql"
+    stmt = (
+        select(OAuthConnection)
+        .where(OAuthConnection.id == conn.id)
+        .execution_options(populate_existing=True)
+    )
+    if is_postgres:
+        stmt = stmt.with_for_update()
+    locked_conn = db.scalar(stmt)
+    if locked_conn is None:
+        raise HTTPException(status_code=400, detail="Strava account is not connected")
+
+    if ensure_utc(locked_conn.expires_at) > datetime.now(UTC) + timedelta(seconds=60):
+        return decrypt_secret(locked_conn.access_token_enc, key, aad=aad)
+
+    refresh_token = decrypt_secret(locked_conn.refresh_token_enc, key, aad=aad)
     resp = await _strava_request(
         client_factory,
         settings,
@@ -147,9 +162,9 @@ async def _get_valid_access_token(
     new_refresh = str(payload.get("refresh_token") or refresh_token)
     expires_epoch = int(payload["expires_at"])
 
-    conn.access_token_enc = encrypt_secret(new_access, key, aad=aad)
-    conn.refresh_token_enc = encrypt_secret(new_refresh, key, aad=aad)
-    conn.expires_at = datetime.fromtimestamp(expires_epoch, tz=UTC)
+    locked_conn.access_token_enc = encrypt_secret(new_access, key, aad=aad)
+    locked_conn.refresh_token_enc = encrypt_secret(new_refresh, key, aad=aad)
+    locked_conn.expires_at = datetime.fromtimestamp(expires_epoch, tz=UTC)
     db.commit()
     return new_access
 
@@ -356,9 +371,7 @@ async def strava_disconnect(
         except Exception:
             logger.warning("Best-effort Strava upstream deauthorization skipped or failed")
         db.delete(conn)
-        db.add(
-            AuditEvent(user_id=auth.user.id, event_type="strava.disconnected", metadata_json={})
-        )
+        db.add(AuditEvent(user_id=auth.user.id, event_type="strava.disconnected", metadata_json={}))
         db.commit()
 
     return StravaDisconnectOut(connected=False)
@@ -423,12 +436,9 @@ def strava_webhook_event(
         None,
     )
     if expected_token:
-        if provided_token is not None:
-            if not hmac.compare_digest(
-                expected_token.encode("utf-8"), provided_token.encode("utf-8")
-            ):
-                raise HTTPException(status_code=403, detail="Webhook verification failed")
-        elif expected_sub_id is None:
+        if provided_token is None or not hmac.compare_digest(
+            expected_token.encode("utf-8"), provided_token.encode("utf-8")
+        ):
             raise HTTPException(status_code=403, detail="Webhook verification failed")
 
     object_type = payload.get("object_type")

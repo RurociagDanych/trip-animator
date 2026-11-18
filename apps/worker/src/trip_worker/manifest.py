@@ -270,11 +270,7 @@ def _downsample_manifest_points(
             while src_idx < len(points):
                 cur = points[src_idx]
                 src_idx += 1
-                if (
-                    cur.segment_idx == spt.segment_idx
-                    and cur.lat == spt.lat
-                    and cur.lon == spt.lon
-                ):
+                if cur.segment_idx == spt.segment_idx and cur.lat == spt.lat and cur.lon == spt.lon:
                     matched_indices.append(src_idx - 1)
                     break
 
@@ -424,9 +420,7 @@ def vectorized_lttb_indices(
         return sorted(must_keep | set(extras))
     step = (len(extras) - 1) / (need - 1) if need > 1 else 0.0
     chosen_extras = (
-        {extras[round(i * step)] for i in range(need)}
-        if need > 1
-        else {extras[len(extras) // 2]}
+        {extras[round(i * step)] for i in range(need)} if need > 1 else {extras[len(extras) // 2]}
     )
     return sorted(must_keep | chosen_extras)
 
@@ -1034,7 +1028,9 @@ def build_render_manifest(
                     asset_url = f"https://render-assets.local/{photo_id_str}"
             else:
                 data_uri = ""
-                asset_url = None if embed_photo_data_uris else f"https://render-assets.local/{photo_id_str}"
+                asset_url = (
+                    None if embed_photo_data_uris else f"https://render-assets.local/{photo_id_str}"
+                )
             manifest_photos.append(
                 ManifestPhoto(
                     id=photo_id_str,

@@ -127,9 +127,7 @@ def create_app(
 
     @application.exception_handler(StarletteHTTPException)
     async def http_exception_handler(_: Request, exc: StarletteHTTPException) -> JSONResponse:
-        safe_title = (
-            "Internal server error" if exc.status_code >= 500 else str(exc.detail)
-        )
+        safe_title = "Internal server error" if exc.status_code >= 500 else str(exc.detail)
         return _problem_response(
             status_code=exc.status_code,
             title=safe_title,
@@ -223,12 +221,8 @@ def create_app(
                     key = str(status_val)
                     if key in render_counts:
                         render_counts[key] = int(count_val)
-                projects_total = int(
-                    db.scalar(select(func.count()).select_from(Project)) or 0
-                )
-                stages_total = int(
-                    db.scalar(select(func.count()).select_from(Stage)) or 0
-                )
+                projects_total = int(db.scalar(select(func.count()).select_from(Project)) or 0)
+                stages_total = int(db.scalar(select(func.count()).select_from(Stage)) or 0)
                 sessions_active = int(
                     db.scalar(
                         select(func.count())
