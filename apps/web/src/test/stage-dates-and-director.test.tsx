@@ -14,11 +14,13 @@ import { setCsrfToken } from "../lib/api/client";
 import {
   createDefaultRenderSpecV2,
   type ClimbHighlightOut,
+  type StageCameraOverride,
   type StageOut,
 } from "../lib/api/types";
 import { generateClimbSpotlightKeyframes } from "../lib/geo/director";
 import { formatStageCalendarDate, formatStageTimeWindow } from "../lib/geo/format";
 import type { TimelineStage } from "../lib/geo/timeline";
+import { useEditorStore } from "../lib/state/editor-store";
 
 function makeStage(overrides: Partial<StageOut> = {}): StageOut {
   return {
@@ -393,5 +395,236 @@ describe("Climb Spotlight removal from InspectorPanel & smooth legacy director k
         expect(kf.bearing_offset_deg).toBe(0);
       }
     }
+  });
+});
+
+describe("Per-stage camera focus UI, InspectorPanel climb tag duration, and editor store", () => {
+  afterEach(() => {
+    useEditorStore.getState().resetEditor();
+  });
+
+  it("renders StageSidebar focus badge, preset pills (Auto, Close, Street Focus, Custom), and target zoom / pace sliders", async () => {
+    const stage1 = makeStage({ id: "stage-focus-ui", name: "Downtown Walk" });
+    let currentSpec = createDefaultRenderSpecV2();
+    const calls: { stageId: string; override: StageCameraOverride | null }[] = [];
+    const onOverride = vi.fn((stageId: string, override: StageCameraOverride | null) => {
+      calls.push({ stageId, override });
+      const nextOverrides = { ...currentSpec.stage_camera_overrides };
+      if (override === null || override.focus_mode === "auto") {
+        delete nextOverrides[stageId];
+      } else {
+        nextOverrides[stageId] = override;
+      }
+      currentSpec = { ...currentSpec, stage_camera_overrides: nextOverrides };
+    });
+
+    const renderSidebar = (activeTab: "stages" | "edit", spec = currentSpec) => {
+      const rootRoute = createRootRoute({
+        component: () => (
+          <StageSidebar
+            projectId="proj-1"
+            stages={[stage1]}
+            selectedStageId={stage1.id}
+            spec={spec}
+            activeTab={activeTab}
+            stravaConnected={false}
+            onSelectStage={vi.fn()}
+            onStageColorChange={vi.fn()}
+            onStageTransitionChange={vi.fn()}
+            onStageCameraOverrideChange={onOverride}
+            onStagesMutated={vi.fn()}
+            onOpenStravaModal={vi.fn()}
+          />
+        ),
+      });
+      const router = createRouter({
+        routeTree: rootRoute,
+        history: createMemoryHistory({ initialEntries: ["/"] }),
+      });
+      return render(<RouterProvider router={router} />);
+    };
+
+    const firstRender = renderSidebar("edit");
+    const section = await screen.findByTestId("stage-camera-focus-section");
+    expect(section).toBeInTheDocument();
+
+    // Click Street Focus preset
+    fireEvent.click(screen.getByRole("button", { name: /Street Focus/i }));
+    expect(calls[calls.length - 1]).toEqual({
+      stageId: stage1.id,
+      override: {
+        focus_mode: "street",
+        target_zoom: 15.8,
+        speed_multiplier: 0.45,
+        transition_margin: 0.02,
+      },
+    });
+
+    // Click Close preset
+    fireEvent.click(screen.getByRole("button", { name: /Close/i }));
+    expect(calls[calls.length - 1]).toEqual({
+      stageId: stage1.id,
+      override: {
+        focus_mode: "close",
+        target_zoom: 13.8,
+        speed_multiplier: 0.7,
+        transition_margin: 0.02,
+      },
+    });
+
+    // Click Custom preset
+    fireEvent.click(screen.getByRole("button", { name: /Custom/i }));
+    expect(calls[calls.length - 1]?.override?.focus_mode).toBe("custom");
+
+    // Adjust target zoom slider -> custom with updated zoom
+    const zoomSlider = screen.getByLabelText("Stage target zoom");
+    fireEvent.change(zoomSlider, { target: { value: "16.2" } });
+    expect(calls[calls.length - 1]?.override).toMatchObject({
+      focus_mode: "custom",
+      target_zoom: 16.2,
+    });
+
+    // Adjust playback pace slider -> custom with updated speed
+    const speedSlider = screen.getByLabelText("Stage playback speed");
+    fireEvent.change(speedSlider, { target: { value: "0.5" } });
+    expect(calls[calls.length - 1]?.override).toMatchObject({
+      focus_mode: "custom",
+      speed_multiplier: 0.5,
+    });
+
+    // Click Auto preset -> clears override (null)
+    fireEvent.click(screen.getByRole("button", { name: /^Auto\s+1×$/i }));
+    expect(calls[calls.length - 1]).toEqual({ stageId: stage1.id, override: null });
+
+    firstRender.unmount();
+
+    // Render Stages tab with Street Focus override -> badge displayed on card
+    const streetSpec = createDefaultRenderSpecV2();
+    streetSpec.stage_camera_overrides = {
+      [stage1.id]: {
+        focus_mode: "street",
+        target_zoom: 15.8,
+        speed_multiplier: 0.45,
+        transition_margin: 0.02,
+      },
+    };
+    renderSidebar("stages", streetSpec);
+    const badge = await screen.findByTestId(`stage-focus-badge-${stage1.id}`);
+    expect(badge).toHaveTextContent("Street · 0.45×");
+  });
+
+  it("renders InspectorPanel climb tag display duration slider and Always toggle when show_climb_callouts is enabled", () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const onUpdateSpec = vi.fn();
+    const spec = createDefaultRenderSpecV2();
+    spec.show_climb_callouts = true;
+    spec.climb_callout_duration_s = 4.0;
+
+    const { rerender } = render(
+      <QueryClientProvider client={qc}>
+        <InspectorPanel
+          projectId="proj-1"
+          section="route"
+          spec={spec}
+          stageCount={1}
+          onSelectSection={vi.fn()}
+          onUpdateSpec={onUpdateSpec}
+          onUpdateHud={vi.fn()}
+          onFlushSave={async () => true}
+        />
+      </QueryClientProvider>,
+    );
+
+    const controls = screen.getByTestId("climb-callout-duration-controls");
+    expect(controls).toHaveTextContent("Tag display duration");
+    expect(controls).toHaveTextContent("4s");
+
+    const slider = screen.getByLabelText("Climb tag display duration");
+    fireEvent.change(slider, { target: { value: "7.5" } });
+    expect(onUpdateSpec).toHaveBeenCalledWith({ climb_callout_duration_s: 7.5 });
+
+    const alwaysBtn = screen.getByRole("button", { name: "Always" });
+    expect(alwaysBtn).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(alwaysBtn);
+    expect(onUpdateSpec).toHaveBeenCalledWith({ climb_callout_duration_s: 0 });
+
+    // When duration is 0 (Always), clicking Always restores 4.0s
+    rerender(
+      <QueryClientProvider client={qc}>
+        <InspectorPanel
+          projectId="proj-1"
+          section="route"
+          spec={{ ...spec, climb_callout_duration_s: 0 }}
+          stageCount={1}
+          onSelectSection={vi.fn()}
+          onUpdateSpec={onUpdateSpec}
+          onUpdateHud={vi.fn()}
+          onFlushSave={async () => true}
+        />
+      </QueryClientProvider>,
+    );
+    expect(screen.getByRole("button", { name: "Always" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Always" }));
+    expect(onUpdateSpec).toHaveBeenCalledWith({ climb_callout_duration_s: 4.0 });
+
+    // Hidden when show_climb_callouts is false
+    rerender(
+      <QueryClientProvider client={qc}>
+        <InspectorPanel
+          projectId="proj-1"
+          section="route"
+          spec={{ ...spec, show_climb_callouts: false }}
+          stageCount={1}
+          onSelectSection={vi.fn()}
+          onUpdateSpec={onUpdateSpec}
+          onUpdateHud={vi.fn()}
+          onFlushSave={async () => true}
+        />
+      </QueryClientProvider>,
+    );
+    expect(screen.queryByTestId("climb-callout-duration-controls")).not.toBeInTheDocument();
+  });
+
+  it("manages stage_camera_overrides with undo/redo and prunes deleted stages in useEditorStore", () => {
+    const store = useEditorStore.getState();
+    const s1 = makeStage({ id: "s-keep" });
+    const s2 = makeStage({ id: "s-remove", stage_order: 1 });
+    store.setStages([s1, s2]);
+
+    store.setStageCameraOverride("s-keep", {
+      focus_mode: "street",
+      target_zoom: 15.8,
+      speed_multiplier: 0.45,
+      transition_margin: 0.02,
+    });
+    store.setStageCameraOverride("s-remove", {
+      focus_mode: "close",
+      target_zoom: 13.8,
+      speed_multiplier: 0.7,
+      transition_margin: 0.02,
+    });
+
+    expect(useEditorStore.getState().spec.stage_camera_overrides["s-keep"]?.focus_mode).toBe("street");
+    expect(useEditorStore.getState().spec.stage_camera_overrides["s-remove"]?.focus_mode).toBe("close");
+    expect(useEditorStore.getState().hasUnsavedChanges).toBe(true);
+
+    // Prune deleted stage on setStages
+    useEditorStore.getState().setStages([s1]);
+    expect(useEditorStore.getState().spec.stage_camera_overrides["s-remove"]).toBeUndefined();
+    expect(useEditorStore.getState().spec.stage_camera_overrides["s-keep"]?.focus_mode).toBe("street");
+
+    // Undo restores prior snapshot before s-remove override
+    useEditorStore.getState().undo();
+    expect(useEditorStore.getState().spec.stage_camera_overrides["s-remove"]).toBeUndefined();
+    expect(useEditorStore.getState().spec.stage_camera_overrides["s-keep"]?.focus_mode).toBe("street");
+
+    // Setting auto removes entry
+    useEditorStore.getState().setStageCameraOverride("s-keep", {
+      focus_mode: "auto",
+      target_zoom: null,
+      speed_multiplier: 1.0,
+      transition_margin: 0.02,
+    });
+    expect(useEditorStore.getState().spec.stage_camera_overrides["s-keep"]).toBeUndefined();
   });
 });

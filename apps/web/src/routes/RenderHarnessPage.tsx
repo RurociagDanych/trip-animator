@@ -145,6 +145,9 @@ export function RenderHarnessPage() {
     };
   }, []);
 
+  const hasStageCameraOverrides =
+    Object.keys(manifest.spec.stage_camera_overrides ?? {}).length > 0;
+
   // Register deterministic window.__TRIP_RENDERER__ contract
   useEffect(() => {
     const readyPromise = (async () => {
@@ -170,7 +173,8 @@ export function RenderHarnessPage() {
           changed &&
           (manifest.spec.camera_mode === "follow-marker" ||
             manifest.spec.camera_preset !== "flat" ||
-            (manifest.spec.camera_keyframes?.length ?? 0) > 0);
+            (manifest.spec.camera_keyframes?.length ?? 0) > 0 ||
+            hasStageCameraOverrides);
         if (canvasControllerRef.current) {
           await canvasControllerRef.current.waitForFrameSettle(cameraChanged);
         }
@@ -185,6 +189,7 @@ export function RenderHarnessPage() {
     manifest.spec.camera_mode,
     manifest.spec.camera_preset,
     manifest.spec.camera_keyframes?.length,
+    hasStageCameraOverrides,
   ]);
 
   const totalStats = useMemo(

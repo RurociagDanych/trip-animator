@@ -33,6 +33,14 @@ export type DirectorPreset = "none" | "expedition-doc" | "climb-spotlight" | "so
 export type PhotoCardStyle = "corner" | "polaroid" | "cinematic";
 export type PalettePreset = "alpine-dawn" | "topo-emerald" | "stage-by-stage";
 export type ClimbCategory = "HC" | "Cat 1" | "Cat 2" | "Cat 3" | "Cat 4";
+export type StageFocusMode = "auto" | "close" | "street" | "custom";
+
+export interface StageCameraOverride {
+  focus_mode: StageFocusMode;
+  target_zoom: number | null;
+  speed_multiplier: number;
+  transition_margin: number;
+}
 
 export type StatisticMetric =
   | "date"
@@ -198,6 +206,7 @@ export interface RenderSpecV2 {
   pause_on_photo: boolean;
   stage_colors: Record<string, string>;
   stage_transitions: Record<string, TransitionIcon>;
+  stage_camera_overrides: Record<string, StageCameraOverride>;
   statistics_panel: StatisticsPanelConfig;
   is_preview: boolean;
   color_by: ColorByMode;
@@ -209,6 +218,7 @@ export interface RenderSpecV2 {
   show_transfer_arcs: boolean;
   show_finale_poster: boolean;
   show_climb_callouts: boolean;
+  climb_callout_duration_s: number;
   photo_card_style: PhotoCardStyle;
   telemetry_smoothing: number;
 }
@@ -886,6 +896,7 @@ export function createDefaultRenderSpecV2(): RenderSpecV2 {
     pause_on_photo: false,
     stage_colors: {},
     stage_transitions: {},
+    stage_camera_overrides: {},
     statistics_panel: createDefaultStatisticsPanelConfig(),
     is_preview: false,
     color_by: "stage",
@@ -897,6 +908,7 @@ export function createDefaultRenderSpecV2(): RenderSpecV2 {
     show_transfer_arcs: true,
     show_finale_poster: false,
     show_climb_callouts: true,
+    climb_callout_duration_s: 4.0,
     photo_card_style: "corner",
     telemetry_smoothing: 5,
   };
@@ -920,12 +932,57 @@ const VALID_DIRECTOR_PRESET_SET = new Set<DirectorPreset>([
 ]);
 const VALID_PHOTO_CARD_STYLE_SET = new Set<PhotoCardStyle>(["corner", "polaroid", "cinematic"]);
 const VALID_STATISTIC_METRIC_SET = new Set<StatisticMetric>(ALL_STATISTIC_METRICS);
+const VALID_STAGE_FOCUS_MODE_SET = new Set<StageFocusMode>(["auto", "close", "street", "custom"]);
 
 function clampFinite(value: unknown, min: number, max: number, fallback: number): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return fallback;
   }
   return Math.min(max, Math.max(min, value));
+}
+
+function normalizeStageCameraOverride(rawOverride: unknown): StageCameraOverride | null {
+  if (!rawOverride || typeof rawOverride !== "object") {
+    return null;
+  }
+  const ov = rawOverride as Partial<StageCameraOverride>;
+  const focusMode: StageFocusMode =
+    typeof ov.focus_mode === "string" &&
+    VALID_STAGE_FOCUS_MODE_SET.has(ov.focus_mode as StageFocusMode)
+      ? (ov.focus_mode as StageFocusMode)
+      : "auto";
+  const transitionMargin = clampFinite(ov.transition_margin, 0.005, 0.25, 0.02);
+  let targetZoom: number | null =
+    typeof ov.target_zoom === "number" && Number.isFinite(ov.target_zoom)
+      ? clampFinite(ov.target_zoom, 3.0, 18.0, 15.8)
+      : null;
+  let speedMultiplier = clampFinite(ov.speed_multiplier, 0.2, 4.0, 1.0);
+
+  if (focusMode === "street") {
+    if (targetZoom === null) {
+      targetZoom = 15.8;
+    }
+    if (speedMultiplier === 1.0) {
+      speedMultiplier = 0.45;
+    }
+  } else if (focusMode === "close") {
+    if (targetZoom === null) {
+      targetZoom = 13.8;
+    }
+    if (speedMultiplier === 1.0) {
+      speedMultiplier = 0.7;
+    }
+  } else if (focusMode === "auto") {
+    targetZoom = null;
+    speedMultiplier = 1.0;
+  }
+
+  return {
+    focus_mode: focusMode,
+    target_zoom: targetZoom,
+    speed_multiplier: speedMultiplier,
+    transition_margin: transitionMargin,
+  };
 }
 
 function normalizeCameraKeyframe(raw: unknown): CameraKeyframe | null {
@@ -1009,6 +1066,21 @@ export function normalizeRenderSpecV2(raw?: Partial<RenderSpecV2> | null): Rende
   const telemetrySmoothing = Math.round(
     clampFinite(raw.telemetry_smoothing, 1, 31, defaults.telemetry_smoothing),
   );
+  const climbCalloutDurationS = clampFinite(
+    raw.climb_callout_duration_s,
+    0,
+    30,
+    defaults.climb_callout_duration_s,
+  );
+  const stageCameraOverrides: Record<string, StageCameraOverride> = {};
+  if (raw.stage_camera_overrides && typeof raw.stage_camera_overrides === "object") {
+    for (const [stageId, rawOverride] of Object.entries(raw.stage_camera_overrides)) {
+      const normalizedOverride = normalizeStageCameraOverride(rawOverride);
+      if (normalizedOverride) {
+        stageCameraOverrides[stageId] = normalizedOverride;
+      }
+    }
+  }
   const cameraKeyframes = Array.isArray(raw.camera_keyframes)
     ? raw.camera_keyframes
         .slice(0, 40)
@@ -1060,10 +1132,12 @@ export function normalizeRenderSpecV2(raw?: Partial<RenderSpecV2> | null): Rende
       typeof raw.show_climb_callouts === "boolean"
         ? raw.show_climb_callouts
         : defaults.show_climb_callouts,
+    climb_callout_duration_s: climbCalloutDurationS,
     photo_card_style: photoCardStyle,
     telemetry_smoothing: telemetrySmoothing,
     stage_colors: raw.stage_colors ? { ...raw.stage_colors } : {},
     stage_transitions: raw.stage_transitions ? { ...raw.stage_transitions } : {},
+    stage_camera_overrides: stageCameraOverrides,
     statistics_panel: {
       ...panelDefaults,
       ...(rawPanel ?? {}),

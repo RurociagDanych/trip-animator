@@ -225,9 +225,7 @@ describe("Component tests: InspectorPanel, StageSidebar, ExportPanel, Statistics
 
       render(<RouterProvider router={router} />);
 
-      // Select Edit tab for stage properties & color picker
-      fireEvent.click(await screen.findByRole("tab", { name: "Edit" }));
-
+      // Inline stage editor is rendered below the selected stage in the Stages tab
       // Color swatch and custom stage color picker
       fireEvent.click(await screen.findByRole("button", { name: "Color #14b8a6" }));
       expect(onStageColorChange).toHaveBeenCalledWith("stage-1", "#14b8a6");

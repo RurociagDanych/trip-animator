@@ -8,7 +8,16 @@ from typing import Annotated, Literal
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, StringConstraints, model_validator
-from trip_telemetry.schemas import ActivityType, RenderSpecV2
+from trip_telemetry.schemas import (
+    ActivityType,
+    RenderSpecV2,
+)
+from trip_telemetry.schemas import (
+    StageCameraOverride as StageCameraOverride,
+)
+from trip_telemetry.schemas import (
+    StageFocusMode as StageFocusMode,
+)
 
 ProjectTitleStr = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=160)
@@ -598,11 +607,15 @@ class AnalyticsHeatmapOut(BaseModel):
 
 
 def validate_stage_maps_against_project(spec: RenderSpecV2, valid_stage_ids: set[str]) -> None:
-    """Reject stage_colors or stage_transitions referencing foreign or missing stage UUIDs."""
+    """Reject stage maps referencing foreign or missing stage UUIDs."""
     bad_colors = set(spec.stage_colors.keys()) - valid_stage_ids
     bad_transitions = set(spec.stage_transitions.keys()) - valid_stage_ids
-    if bad_colors or bad_transitions:
+    bad_overrides = set(spec.stage_camera_overrides.keys()) - valid_stage_ids
+    if bad_colors or bad_transitions or bad_overrides:
         raise HTTPException(
             status_code=422,
-            detail="stage_colors or stage_transitions contain stage IDs not in this project",
+            detail=(
+                "stage_colors, stage_transitions, or stage_camera_overrides "
+                "contain stage IDs not in this project"
+            ),
         )

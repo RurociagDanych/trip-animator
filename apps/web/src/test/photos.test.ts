@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
   createDefaultRenderSpecV2,
+  normalizeRenderSpecV2,
   type CameraKeyframe,
   type ManifestPhoto,
   type ProjectPhotoOut,
 } from "../lib/api/types";
-import { sampleKeyframeSpeedMultiplier } from "../lib/geo/camera";
+import {
+  computeStageProgressSpans,
+  evaluateStageCameraFocus,
+  sampleCombinedSpeedMultiplier,
+  sampleKeyframeSpeedMultiplier,
+} from "../lib/geo/camera";
 import {
   evaluateTimelineSchedule,
   matchPhotosToTimeline,
@@ -406,6 +412,158 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
       const tr = progressRatioToTimeRatio(matched, pausedSpec, target, 20, false);
       const ev = evaluateTimelineSchedule([stage], matched, pausedSpec, tr * 20, 20, false);
       expect(ev.progressRatio).toBeCloseTo(target, 4);
+    }
+  });
+
+  it("warps per-stage speed smoothly in evaluateTimelineSchedule and round-trips progressRatioToTimeRatio with stages", () => {
+    const stageA: TimelineStage = {
+      id: "stage-fast",
+      name: "Stage Alpha",
+      dayIndex: 1,
+      stageOrder: 0,
+      activityType: "cycling",
+      color: "#38bdf8",
+      transition: "none",
+      distanceM: 10_000,
+      elevationGainM: 100,
+      movingSeconds: 1000,
+      elapsedSeconds: 1000,
+      hasTimestamps: true,
+      points: [
+        makePoint(0.1, 0.1, 0, 0, "2040-04-12T08:00:00Z"),
+        makePoint(0.2, 0.1, 10_000, 1000, "2040-04-12T08:16:40Z"),
+      ],
+    };
+    const stageB: TimelineStage = {
+      id: "stage-street",
+      name: "Stage Beta",
+      dayIndex: 1,
+      stageOrder: 1,
+      activityType: "walking",
+      color: "#14b8a6",
+      transition: "none",
+      distanceM: 10_000,
+      elevationGainM: 50,
+      movingSeconds: 1000,
+      elapsedSeconds: 1000,
+      hasTimestamps: true,
+      points: [
+        {
+          ...makePoint(0.2, 0.1, 0, 0, "2040-04-12T09:00:00Z"),
+          globalDistM: 10_000,
+          globalElapsedS: 1000,
+        },
+        {
+          ...makePoint(0.25, 0.12, 10_000, 1000, "2040-04-12T09:16:40Z"),
+          globalDistM: 20_000,
+          globalElapsedS: 2000,
+        },
+      ],
+    };
+    const stageC: TimelineStage = {
+      id: "stage-tail",
+      name: "Stage Gamma",
+      dayIndex: 2,
+      stageOrder: 2,
+      activityType: "cycling",
+      color: "#f59e0b",
+      transition: "none",
+      distanceM: 10_000,
+      elevationGainM: 120,
+      movingSeconds: 1000,
+      elapsedSeconds: 1000,
+      hasTimestamps: true,
+      points: [
+        {
+          ...makePoint(0.25, 0.12, 0, 0, "2040-04-13T08:00:00Z"),
+          globalDistM: 20_000,
+          globalElapsedS: 2000,
+        },
+        {
+          ...makePoint(0.35, 0.12, 10_000, 1000, "2040-04-13T08:16:40Z"),
+          globalDistM: 30_000,
+          globalElapsedS: 3000,
+        },
+      ],
+    };
+
+    const stages = [stageA, stageB, stageC];
+    const spec = normalizeRenderSpecV2({
+      duration_seconds: 30,
+      intro_hold_seconds: 1,
+      outro_hold_seconds: 1,
+      stage_camera_overrides: {
+        "stage-street": {
+          focus_mode: "street",
+          target_zoom: null,
+          speed_multiplier: 1.0,
+          transition_margin: 0.02,
+        },
+      },
+      climb_callout_duration_s: 5.5,
+    });
+
+    expect(spec.climb_callout_duration_s).toBe(5.5);
+    expect(spec.stage_camera_overrides["stage-street"]).toEqual({
+      focus_mode: "street",
+      target_zoom: 15.8,
+      speed_multiplier: 0.45,
+      transition_margin: 0.02,
+    });
+
+    const spans = computeStageProgressSpans(stages, spec);
+    expect(spans).toHaveLength(3);
+    expect(spans[0]!.startProgress).toBeCloseTo(0, 6);
+    expect(spans[1]!.startProgress).toBeCloseTo(1 / 3, 6);
+    expect(spans[2]!.startProgress).toBeCloseTo(2 / 3, 6);
+    expect(spans[2]!.endProgress).toBeCloseTo(1, 6);
+
+    // Smooth focus weight ramps 0 -> 0.5 at boundary -> 1 inside stage-street -> 0 in stage-tail
+    const inA = evaluateStageCameraFocus(stages, spec, 0.15);
+    const atEnterBoundary = evaluateStageCameraFocus(stages, spec, 1 / 3);
+    const inB = evaluateStageCameraFocus(stages, spec, 0.5);
+    const atExitBoundary = evaluateStageCameraFocus(stages, spec, 2 / 3);
+    const inC = evaluateStageCameraFocus(stages, spec, 0.85);
+
+    expect(inA.focusWeight).toBeCloseTo(0, 6);
+    expect(inA.targetZoom).toBeNull();
+    expect(inA.speedMultiplier).toBeCloseTo(1.0, 6);
+
+    expect(atEnterBoundary.focusWeight).toBeCloseTo(0.5, 4);
+    expect(atEnterBoundary.targetZoom).toBeCloseTo(15.8, 4);
+    expect(atEnterBoundary.speedMultiplier).toBeCloseTo(0.725, 4);
+
+    expect(inB.focusWeight).toBeCloseTo(1.0, 6);
+    expect(inB.targetZoom).toBeCloseTo(15.8, 6);
+    expect(inB.speedMultiplier).toBeCloseTo(0.45, 6);
+    expect(sampleCombinedSpeedMultiplier(stages, spec, 0.5)).toBeCloseTo(0.45, 6);
+
+    expect(atExitBoundary.focusWeight).toBeCloseTo(0.5, 4);
+    expect(inC.focusWeight).toBeCloseTo(0, 6);
+    expect(inC.speedMultiplier).toBeCloseTo(1.0, 6);
+
+    // Stage B runs at 0.45x speed, so it gets more wall-clock duration than Stage A (1.0x)
+    const tEnterB = progressRatioToTimeRatio([], spec, 1 / 3, 30, false, stages) * 30;
+    const tExitB = progressRatioToTimeRatio([], spec, 2 / 3, 30, false, stages) * 30;
+    const tEnd = 29; // duration 30 - outro 1
+    const durA = tEnterB - 1; // minus intro 1
+    const durB = tExitB - tEnterB;
+    const durC = tEnd - tExitB;
+    expect(durB).toBeGreaterThan(durA * 1.8);
+    expect(durC).toBeCloseTo(durA, 1);
+
+    // Monotonicity and exact round-trip inversion with stages
+    let prevProgress = -1;
+    for (let t = 0; t <= 30; t += 0.5) {
+      const res = evaluateTimelineSchedule(stages, [], spec, t, 30, false);
+      expect(res.progressRatio).toBeGreaterThanOrEqual(prevProgress - 1e-9);
+      prevProgress = res.progressRatio;
+    }
+
+    for (const target of [0.08, 0.25, 0.34, 0.5, 0.67, 0.85, 0.96]) {
+      const timeRatio = progressRatioToTimeRatio([], spec, target, 30, false, stages);
+      const evaluated = evaluateTimelineSchedule(stages, [], spec, timeRatio * 30, 30, false);
+      expect(evaluated.progressRatio).toBeCloseTo(target, 4);
     }
   });
 });

@@ -30,6 +30,7 @@ TimelineMode = Literal["distance", "recorded-time"]
 CameraMode = Literal["fit-track", "follow-marker"]
 CameraPreset = Literal["flat", "dynamic-3d", "drone-orbit"]
 FollowZoomMode = Literal["adaptive", "fixed"]
+StageFocusMode = Literal["auto", "close", "street", "custom"]
 VisibilityMode = Literal["full", "traversed", "trail"]
 UnitsMode = Literal["metric", "imperial"]
 TransitionIcon = Literal["none", "bed", "meal", "coffee", "tent", "transport"]
@@ -706,6 +707,41 @@ class CameraKeyframe(BaseModel):
         return self
 
 
+class StageCameraOverride(BaseModel):
+    """Per-stage camera zoom focus and playback speed override."""
+
+    focus_mode: StageFocusMode = "auto"
+    target_zoom: float | None = Field(default=None, ge=3.0, le=18.0)
+    speed_multiplier: float = Field(default=1.0, ge=0.2, le=4.0)
+    transition_margin: float = Field(default=0.02, ge=0.005, le=0.25)
+
+    @model_validator(mode="after")
+    def validate_finite_and_mode_defaults(self) -> "StageCameraOverride":
+        for field_name in ("speed_multiplier", "transition_margin"):
+            val = getattr(self, field_name)
+            if not isinstance(val, (int, float)) or not math.isfinite(float(val)):
+                raise ValueError(f"StageCameraOverride.{field_name} must be a finite number")
+        if self.target_zoom is not None and (
+            not isinstance(self.target_zoom, (int, float))
+            or not math.isfinite(float(self.target_zoom))
+        ):
+            raise ValueError("StageCameraOverride.target_zoom must be a finite number")
+        if self.focus_mode == "street":
+            if self.target_zoom is None:
+                self.target_zoom = 15.8
+            if self.speed_multiplier == 1.0:
+                self.speed_multiplier = 0.45
+        elif self.focus_mode == "close":
+            if self.target_zoom is None:
+                self.target_zoom = 13.8
+            if self.speed_multiplier == 1.0:
+                self.speed_multiplier = 0.7
+        elif self.focus_mode == "auto":
+            self.target_zoom = None
+            self.speed_multiplier = 1.0
+        return self
+
+
 class RenderSpecV2(BaseModel):
     """Immutable versioned animation specification shared by UI, API, and Worker."""
 
@@ -738,6 +774,7 @@ class RenderSpecV2(BaseModel):
     elevation_chart_overlay: bool = False
     stage_colors: dict[str, str] = Field(default_factory=dict)
     stage_transitions: dict[str, TransitionIcon] = Field(default_factory=dict)
+    stage_camera_overrides: dict[str, StageCameraOverride] = Field(default_factory=dict)
     statistics_panel: StatisticsPanelConfig = Field(default_factory=StatisticsPanelConfig)
     is_preview: bool = False
 
@@ -751,6 +788,7 @@ class RenderSpecV2(BaseModel):
     show_transfer_arcs: bool = True
     show_finale_poster: bool = False
     show_climb_callouts: bool = True
+    climb_callout_duration_s: float = Field(default=4.0, ge=0.0, le=30.0)
     photo_card_style: PhotoCardStyle = "corner"
     telemetry_smoothing: int = Field(default=5, ge=1, le=31)
 
@@ -771,6 +809,7 @@ class RenderSpecV2(BaseModel):
             "outro_hold_seconds",
             "photo_display_seconds",
             "terrain_exaggeration",
+            "climb_callout_duration_s",
         ):
             val = getattr(self, field_name)
             if not isinstance(val, (int, float)) or not math.isfinite(float(val)):

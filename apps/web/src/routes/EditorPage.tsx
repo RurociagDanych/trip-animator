@@ -76,6 +76,22 @@ export function EditorPage() {
   const [auditDrawerOpen, setAuditDrawerOpen] = useState(false);
   const autosaveTimerRef = useRef<number | null>(null);
 
+  // Prevent browsers (notably Firefox) from attempting native file:/// navigation
+  // when a user drags and drops a local image/track outside a dedicated dropzone.
+  useEffect(() => {
+    const preventFileNavigation = (event: DragEvent) => {
+      if (event.dataTransfer?.types && Array.from(event.dataTransfer.types).includes("Files")) {
+        event.preventDefault();
+      }
+    };
+    window.addEventListener("dragover", preventFileNavigation);
+    window.addEventListener("drop", preventFileNavigation);
+    return () => {
+      window.removeEventListener("dragover", preventFileNavigation);
+      window.removeEventListener("drop", preventFileNavigation);
+    };
+  }, []);
+
   const title = useEditorStore((s) => s.title);
   const revision = useEditorStore((s) => s.revision);
   const stages = useEditorStore((s) => s.stages);
@@ -99,6 +115,7 @@ export function EditorPage() {
   const updateStatisticsPanel = useEditorStore((s) => s.updateStatisticsPanel);
   const setStageColor = useEditorStore((s) => s.setStageColor);
   const setStageTransition = useEditorStore((s) => s.setStageTransition);
+  const setStageCameraOverride = useEditorStore((s) => s.setStageCameraOverride);
   const selectStage = useEditorStore((s) => s.selectStage);
   const setInspectorSection = useEditorStore((s) => s.setInspectorSection);
   const setSidebarTab = useEditorStore((s) => s.setSidebarTab);
@@ -775,6 +792,7 @@ export function EditorPage() {
           onPhotosMutated={refreshPhotos}
           onStageColorChange={setStageColor}
           onStageTransitionChange={setStageTransition}
+          onStageCameraOverrideChange={setStageCameraOverride}
           onOpenStravaModal={() => {
             void sessionQuery.refetch();
             setStravaModalOpen(true);

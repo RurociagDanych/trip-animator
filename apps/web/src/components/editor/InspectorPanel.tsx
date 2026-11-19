@@ -406,6 +406,53 @@ export function InspectorPanel({
                 />
               </label>
 
+              {spec.show_climb_callouts ? (
+                <div
+                  data-testid="climb-callout-duration-controls"
+                  className="space-y-1.5 rounded-md border border-border/70 bg-canvas/50 p-2.5"
+                >
+                  <div className="flex items-center justify-between gap-2 text-ink-muted">
+                    <span>Tag display duration</span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="tabular-telemetry text-ink">
+                        {spec.climb_callout_duration_s <= 0
+                          ? "Always"
+                          : `${spec.climb_callout_duration_s}s`}
+                      </span>
+                      <button
+                        type="button"
+                        aria-pressed={spec.climb_callout_duration_s <= 0}
+                        onClick={() =>
+                          onUpdateSpec({
+                            climb_callout_duration_s:
+                              spec.climb_callout_duration_s <= 0 ? 4.0 : 0,
+                          })
+                        }
+                        className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold transition-colors ${
+                          spec.climb_callout_duration_s <= 0
+                            ? "border-sky-accent bg-sky-accent/15 text-sky-accent"
+                            : "border-border bg-elevated text-ink-muted hover:text-ink"
+                        }`}
+                      >
+                        Always
+                      </button>
+                    </div>
+                  </div>
+                  <input
+                    type="range"
+                    aria-label="Climb tag display duration"
+                    min={0}
+                    max={15}
+                    step={0.5}
+                    value={Math.min(15, Math.max(0, spec.climb_callout_duration_s))}
+                    onChange={(e) =>
+                      onUpdateSpec({ climb_callout_duration_s: Number(e.currentTarget.value) })
+                    }
+                    className="w-full accent-sky-accent"
+                  />
+                </div>
+              ) : null}
+
               <label className="flex items-center justify-between cursor-pointer">
                 <span className="text-ink">Show transfer arcs (&gt;2 km gaps)</span>
                 <input

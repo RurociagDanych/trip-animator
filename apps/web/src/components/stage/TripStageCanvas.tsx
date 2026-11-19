@@ -30,7 +30,12 @@ import type {
   ResolutionPreset,
   TransitionIcon,
 } from "../../lib/api/types";
-import { computeCameraFrame, is3dCameraActive } from "../../lib/geo/camera";
+import {
+  computeCameraFrame,
+  evaluateStageCameraFocus,
+  is3dCameraActive,
+  smoothstep01,
+} from "../../lib/geo/camera";
 import {
   formatDateInTimeZone,
   formatDistance,
@@ -53,7 +58,11 @@ import {
   resolveMapStyleUrl,
   sanitizeMapStyle,
 } from "../../lib/geo/map-config";
-import type { ActivePhotoDisplay, MatchedPhoto } from "../../lib/geo/photos";
+import {
+  progressRatioToTimeRatio,
+  type ActivePhotoDisplay,
+  type MatchedPhoto,
+} from "../../lib/geo/photos";
 import {
   computeAdaptiveFollowCamera,
   evaluateTimeline,
@@ -722,6 +731,8 @@ export function TripStageCanvas({
   const loadedStyleRef = useRef<string | null>(null);
   const mapReadyPromiseRef = useRef<Promise<void>>(Promise.resolve());
   const fitAppliedBoundsRef = useRef<string | null>(null);
+  const fitCameraRef = useRef<FitCameraSnapshot | null>(null);
+  const fitFocusAppliedRef = useRef(false);
   const suppressMoveEventRef = useRef(false);
   const latestViewRef = useRef({ boundsKey: "", progressRatio: 0 });
   const [webglAvailable] = useState<boolean>(() => isWebGlSupported());
@@ -780,6 +791,77 @@ export function TripStageCanvas({
     );
   }, [spec.show_climb_callouts, spec.visibility_mode, mappedClimbs]);
 
+  const { activeClimbs, climbOpacityById } = useMemo(() => {
+    const opacities = new Map<string, number>();
+    if (!spec.show_climb_callouts || reachedClimbs.length === 0) {
+      return { activeClimbs: [] as ClimbProgressMarker[], climbOpacityById: opacities };
+    }
+    const dur = Number.isFinite(spec.climb_callout_duration_s)
+      ? spec.climb_callout_duration_s
+      : 4.0;
+    if (dur <= 0) {
+      for (const c of reachedClimbs) {
+        opacities.set(c.id, 1);
+      }
+      return { activeClimbs: reachedClimbs, climbOpacityById: opacities };
+    }
+
+    const totalDurationS =
+      typeof durationS === "number" && Number.isFinite(durationS) && durationS > 0
+        ? durationS
+        : spec.duration_seconds;
+    const effectivePreview = isPreview || spec.is_preview;
+    const toActiveTimeS = (p: number) => {
+      const clampedP = Math.min(1 - 1e-6, Math.max(1e-6, Number.isFinite(p) ? p : 0));
+      return (
+        progressRatioToTimeRatio(
+          matchedPhotos,
+          spec,
+          clampedP,
+          totalDurationS,
+          effectivePreview,
+          stages,
+        ) * totalDurationS
+      );
+    };
+
+    const currentTimeS = toActiveTimeS(evaluated.progressRatio);
+    const fadeIn = Math.min(0.25, dur * 0.25);
+    const fadeOut = Math.min(0.45, dur * 0.35);
+    const visible: ClimbProgressMarker[] = [];
+
+    for (const climb of reachedClimbs) {
+      if (!climb.reached) {
+        continue;
+      }
+      const summitTimeS = toActiveTimeS(climb.summitProgress);
+      const elapsed = currentTimeS - summitTimeS;
+      if (elapsed < -1e-6 || elapsed > dur) {
+        continue;
+      }
+      const clampedElapsed = Math.max(0, elapsed);
+      let opacity = 1;
+      if (fadeIn > 1e-6 && clampedElapsed < fadeIn) {
+        opacity = 0.25 + 0.75 * smoothstep01(clampedElapsed / fadeIn);
+      } else if (fadeOut > 1e-6 && clampedElapsed > dur - fadeOut) {
+        opacity = smoothstep01((dur - clampedElapsed) / fadeOut);
+      }
+      if (opacity > 0.01) {
+        visible.push(climb);
+        opacities.set(climb.id, opacity);
+      }
+    }
+    return { activeClimbs: visible, climbOpacityById: opacities };
+  }, [
+    spec,
+    reachedClimbs,
+    durationS,
+    isPreview,
+    matchedPhotos,
+    stages,
+    evaluated.progressRatio,
+  ]);
+
   const hasActiveChapterCard = Boolean(
     spec.show_chapter_cards && evaluated.chapterCard && evaluated.chapterCard.opacity > 0.01,
   );
@@ -787,9 +869,15 @@ export function TripStageCanvas({
     spec.show_finale_poster && evaluated.progressRatio >= 0.999 && stages.length > 0,
   );
 
+  const stageFocus = useMemo(
+    () => evaluateStageCameraFocus(stages, spec, evaluated.progressRatio),
+    [stages, spec, evaluated.progressRatio],
+  );
+
   const adaptiveFollow = useMemo(
     () =>
-      spec.camera_mode === "follow-marker"
+      spec.camera_mode === "follow-marker" ||
+      (stageFocus.focusWeight > 0 && stageFocus.targetZoom !== null)
         ? computeAdaptiveFollowCamera(stages, spec, evaluated.progressRatio, {
             viewportWidth: viewportSize.width,
             viewportHeight: viewportSize.height,
@@ -804,6 +892,8 @@ export function TripStageCanvas({
       stages,
       evaluated.progressRatio,
       evaluated.bounds,
+      stageFocus.focusWeight,
+      stageFocus.targetZoom,
       viewportSize.width,
       viewportSize.height,
       durationS,
@@ -828,21 +918,91 @@ export function TripStageCanvas({
   );
 
   const keyframeZoomOffset = Number.isFinite(cameraFrame.zoomOffset) ? cameraFrame.zoomOffset! : 0;
-  const effectiveFollowZoom = adaptiveFollow
+  const baseFollowZoom = adaptiveFollow
     ? Math.min(18, Math.max(3, adaptiveFollow.zoom + keyframeZoomOffset))
     : null;
+  const effectiveFollowZoom =
+    baseFollowZoom !== null
+      ? stageFocus.focusWeight > 0 && stageFocus.targetZoom !== null
+        ? Math.min(
+            18,
+            Math.max(
+              3,
+              baseFollowZoom + (stageFocus.targetZoom - baseFollowZoom) * stageFocus.focusWeight,
+            ),
+          )
+        : baseFollowZoom
+      : null;
+
+  const effectiveFollowCenter = useMemo<[number, number]>(() => {
+    if (!adaptiveFollow) {
+      return evaluated.markerPosition;
+    }
+    if (
+      stageFocus.focusWeight > 0 &&
+      stageFocus.targetZoom !== null &&
+      Number.isFinite(evaluated.markerPosition[0]) &&
+      Number.isFinite(evaluated.markerPosition[1]) &&
+      Math.abs(evaluated.markerPosition[1]) <= 90
+    ) {
+      const w = stageFocus.focusWeight;
+      return [
+        adaptiveFollow.center[0] + (evaluated.markerPosition[0] - adaptiveFollow.center[0]) * w,
+        adaptiveFollow.center[1] + (evaluated.markerPosition[1] - adaptiveFollow.center[1]) * w,
+      ];
+    }
+    return adaptiveFollow.center;
+  }, [adaptiveFollow, evaluated.markerPosition, stageFocus.focusWeight, stageFocus.targetZoom]);
+
+  const blendedFitCamera = useMemo<ProjectedCameraSnapshot | null>(() => {
+    if (spec.camera_mode !== "fit-track" || !fitCamera) {
+      return null;
+    }
+    if (
+      stageFocus.focusWeight > 1e-4 &&
+      stageFocus.targetZoom !== null &&
+      Number.isFinite(evaluated.markerPosition[0]) &&
+      Number.isFinite(evaluated.markerPosition[1]) &&
+      Math.abs(evaluated.markerPosition[1]) <= 90
+    ) {
+      const w = stageFocus.focusWeight;
+      return {
+        center: [
+          fitCamera.center[0] + (evaluated.markerPosition[0] - fitCamera.center[0]) * w,
+          fitCamera.center[1] + (evaluated.markerPosition[1] - fitCamera.center[1]) * w,
+        ],
+        zoom: Math.min(18, Math.max(2, fitCamera.zoom + (stageFocus.targetZoom - fitCamera.zoom) * w)),
+        pitch: cameraFrame.pitch,
+        bearing: cameraFrame.bearing,
+      };
+    }
+    return {
+      center: fitCamera.center,
+      zoom: fitCamera.zoom,
+      pitch: fitCamera.pitch,
+      bearing: fitCamera.bearing,
+    };
+  }, [
+    spec.camera_mode,
+    fitCamera,
+    stageFocus.focusWeight,
+    stageFocus.targetZoom,
+    evaluated.markerPosition,
+    cameraFrame.pitch,
+    cameraFrame.bearing,
+  ]);
 
   const fitClimbTargets = useMemo(() => {
     if (
       spec.camera_mode !== "fit-track" ||
       spec.show_climb_callouts === false ||
-      !fitCamera ||
-      reachedClimbs.length === 0
+      !blendedFitCamera ||
+      activeClimbs.length === 0
     ) {
       return undefined;
     }
     const targets: { id: string; screenX: number; screenY: number }[] = [];
-    for (const climb of reachedClimbs) {
+    for (const climb of activeClimbs) {
       if (
         !Number.isFinite(climb.summitPosition[0]) ||
         !Number.isFinite(climb.summitPosition[1]) ||
@@ -852,10 +1012,10 @@ export function TripStageCanvas({
       }
       const scr = projectLngLatToScreen(
         climb.summitPosition,
-        fitCamera.center,
-        fitCamera.zoom,
-        fitCamera.pitch,
-        fitCamera.bearing,
+        blendedFitCamera.center,
+        blendedFitCamera.zoom,
+        blendedFitCamera.pitch,
+        blendedFitCamera.bearing,
         viewportSize.width,
         viewportSize.height,
       );
@@ -867,8 +1027,8 @@ export function TripStageCanvas({
   }, [
     spec.camera_mode,
     spec.show_climb_callouts,
-    fitCamera,
-    reachedClimbs,
+    blendedFitCamera,
+    activeClimbs,
     viewportSize.width,
     viewportSize.height,
   ]);
@@ -886,16 +1046,17 @@ export function TripStageCanvas({
         hasActivePhoto: Boolean(activePhoto && activePhoto.photo.src),
         hasActiveChapterCard,
         hasActiveFinalePoster,
-        climbMarkers: reachedClimbs,
+        climbMarkers: activeClimbs,
         climbCalloutTargets: fitClimbTargets,
-        followCamera: adaptiveFollow
-          ? {
-              center: adaptiveFollow.center,
-              zoom: effectiveFollowZoom ?? adaptiveFollow.zoom,
-              pitch: cameraFrame.pitch,
-              bearing: cameraFrame.bearing,
-            }
-          : undefined,
+        followCamera:
+          spec.camera_mode === "follow-marker" && adaptiveFollow
+            ? {
+                center: effectiveFollowCenter,
+                zoom: effectiveFollowZoom ?? adaptiveFollow.zoom,
+                pitch: cameraFrame.pitch,
+                bearing: cameraFrame.bearing,
+              }
+            : undefined,
         travelDurationS,
         measuredHudUnscaled: renderMode === "interactive" ? measuredHudSize : null,
       }),
@@ -910,9 +1071,10 @@ export function TripStageCanvas({
       activePhoto,
       hasActiveChapterCard,
       hasActiveFinalePoster,
-      reachedClimbs,
+      activeClimbs,
       fitClimbTargets,
       adaptiveFollow,
+      effectiveFollowCenter,
       effectiveFollowZoom,
       cameraFrame.pitch,
       cameraFrame.bearing,
@@ -956,22 +1118,22 @@ export function TripStageCanvas({
   }, [manualCamera, boundsKey, spec.camera_mode, evaluated.progressRatio]);
 
   const activeFitCamera = useMemo<ProjectedCameraSnapshot | null>(() => {
-    if (spec.camera_mode !== "fit-track" || !fitCamera || fitCamera.boundsKey !== boundsKey) {
+    if (
+      spec.camera_mode !== "fit-track" ||
+      !fitCamera ||
+      !blendedFitCamera ||
+      fitCamera.boundsKey !== boundsKey
+    ) {
       return null;
     }
-    return {
-      center: fitCamera.center,
-      zoom: fitCamera.zoom,
-      pitch: fitCamera.pitch,
-      bearing: fitCamera.bearing,
-    };
-  }, [spec.camera_mode, fitCamera, boundsKey]);
+    return blendedFitCamera;
+  }, [spec.camera_mode, fitCamera, blendedFitCamera, boundsKey]);
 
   const activeFollowCamera = useMemo<ProjectedCameraSnapshot | null>(() => {
     if (spec.camera_mode !== "follow-marker") {
       return null;
     }
-    const center = adaptiveFollow?.center ?? evaluated.markerPosition;
+    const center = effectiveFollowCenter;
     if (
       !Array.isArray(center) ||
       center.length < 2 ||
@@ -994,8 +1156,7 @@ export function TripStageCanvas({
     };
   }, [
     spec.camera_mode,
-    adaptiveFollow,
-    evaluated.markerPosition,
+    effectiveFollowCenter,
     effectiveFollowZoom,
     cameraFrame.pitch,
     cameraFrame.bearing,
@@ -1185,6 +1346,8 @@ export function TripStageCanvas({
     return () => {
       cancelled = true;
       fitAppliedBoundsRef.current = null;
+      fitCameraRef.current = null;
+      fitFocusAppliedRef.current = false;
       map.off("move", handleManualMove);
       try {
         map.removeControl(overlay as unknown as maplibregl.IControl);
@@ -1273,24 +1436,35 @@ export function TripStageCanvas({
     );
 
     const hasValidBounds = evaluated.bounds.every(Number.isFinite);
-    const targetCenter = adaptiveFollow?.center ?? evaluated.markerPosition;
+    const targetCenter = effectiveFollowCenter;
     const hasValidMarker =
       Array.isArray(targetCenter) &&
       targetCenter.length >= 2 &&
       Number.isFinite(targetCenter[0]) &&
       Number.isFinite(targetCenter[1]) &&
       Math.abs(targetCenter[1]) <= 90;
+    const hasValidRawMarker =
+      Array.isArray(evaluated.markerPosition) &&
+      evaluated.markerPosition.length >= 2 &&
+      Number.isFinite(evaluated.markerPosition[0]) &&
+      Number.isFinite(evaluated.markerPosition[1]) &&
+      Math.abs(evaluated.markerPosition[1]) <= 90;
 
     try {
       suppressMoveEventRef.current = true;
       if (spec.camera_mode === "fit-track") {
+        const zeroPadding = { top: 0, bottom: 0, left: 0, right: 0 };
+        let baseFit =
+          fitCameraRef.current && fitCameraRef.current.boundsKey === boundsKey
+            ? fitCameraRef.current
+            : null;
         if (hasValidBounds && fitAppliedBoundsRef.current !== boundsKey) {
           fitAppliedBoundsRef.current = boundsKey;
+          fitFocusAppliedRef.current = false;
           const bounds: [[number, number], [number, number]] = [
             [evaluated.bounds[0], evaluated.bounds[1]],
             [evaluated.bounds[2], evaluated.bounds[3]],
           ];
-          const zeroPadding = { top: 0, bottom: 0, left: 0, right: 0 };
           const mapEl = typeof map.getContainer === "function" ? map.getContainer() : null;
           const canvasW = Math.max(120, mapEl?.clientWidth || viewportSize.width);
           const canvasH = Math.max(120, mapEl?.clientHeight || viewportSize.height);
@@ -1371,7 +1545,7 @@ export function TripStageCanvas({
           const resolvedZoom =
             typeof mapZoom === "number" && Number.isFinite(mapZoom) ? mapZoom : fallbackZoom;
           if (resolvedCenter && resolvedZoom !== null && Number.isFinite(resolvedZoom)) {
-            setFitCamera({
+            const nextFit: FitCameraSnapshot = {
               boundsKey,
               center: resolvedCenter,
               zoom: resolvedZoom,
@@ -1383,11 +1557,50 @@ export function TripStageCanvas({
                 typeof mapBearing === "number" && Number.isFinite(mapBearing)
                   ? mapBearing
                   : cameraFrame.bearing,
-            });
+            };
+            fitCameraRef.current = nextFit;
+            baseFit = nextFit;
+            setFitCamera(nextFit);
           }
+        }
+
+        if (
+          stageFocus.focusWeight > 1e-4 &&
+          stageFocus.targetZoom !== null &&
+          baseFit !== null &&
+          hasValidRawMarker
+        ) {
+          const w = stageFocus.focusWeight;
+          const blendedCenter: [number, number] = [
+            baseFit.center[0] + (evaluated.markerPosition[0] - baseFit.center[0]) * w,
+            baseFit.center[1] + (evaluated.markerPosition[1] - baseFit.center[1]) * w,
+          ];
+          const blendedZoom = Math.min(
+            18,
+            Math.max(2, baseFit.zoom + (stageFocus.targetZoom - baseFit.zoom) * w),
+          );
+          map.jumpTo({
+            center: blendedCenter,
+            zoom: blendedZoom,
+            pitch: cameraFrame.pitch,
+            bearing: cameraFrame.bearing,
+            padding: zeroPadding,
+          });
+          fitFocusAppliedRef.current = true;
+        } else if (fitFocusAppliedRef.current && baseFit !== null) {
+          map.jumpTo({
+            center: baseFit.center,
+            zoom: baseFit.zoom,
+            pitch: baseFit.pitch,
+            bearing: baseFit.bearing,
+            padding: zeroPadding,
+          });
+          fitFocusAppliedRef.current = false;
         }
       } else {
         fitAppliedBoundsRef.current = null;
+        fitCameraRef.current = null;
+        fitFocusAppliedRef.current = false;
         setFitCamera((prev) => (prev !== null ? null : prev));
         const followZoom = effectiveFollowZoom ?? 11.5;
         if (hasValidMarker && Number.isFinite(followZoom)) {
@@ -1412,8 +1625,10 @@ export function TripStageCanvas({
     reachedClimbs,
     stages,
     fullCurtainData,
-    adaptiveFollow,
+    effectiveFollowCenter,
     effectiveFollowZoom,
+    stageFocus.focusWeight,
+    stageFocus.targetZoom,
     keyframeZoomOffset,
     layout.fitPadding,
     layout.followPadding,
@@ -1455,6 +1670,8 @@ export function TripStageCanvas({
     [matchedPhotos],
   );
 
+  const hasStageCameraOverrides = Object.keys(spec.stage_camera_overrides ?? {}).length > 0;
+
   // Expose deterministic settlement controller for window.__TRIP_RENDERER__
   useImperativeHandle(
     controllerRef,
@@ -1487,7 +1704,8 @@ export function TripStageCanvas({
           cameraChanged ||
           spec.camera_mode === "follow-marker" ||
           spec.camera_preset !== "flat" ||
-          (spec.camera_keyframes?.length ?? 0) > 0
+          (spec.camera_keyframes?.length ?? 0) > 0 ||
+          hasStageCameraOverrides
         ) {
           await new Promise<void>((resolve) => {
             const timeout = window.setTimeout(resolve, 1200);
@@ -1500,7 +1718,13 @@ export function TripStageCanvas({
         await awaitNextAnimationFrames(1);
       },
     }),
-    [spec.camera_mode, spec.camera_preset, spec.camera_keyframes?.length, photoUrlsKey],
+    [
+      spec.camera_mode,
+      spec.camera_preset,
+      spec.camera_keyframes?.length,
+      hasStageCameraOverrides,
+      photoUrlsKey,
+    ],
   );
 
   const miniElevation = useMemo(
@@ -1521,6 +1745,13 @@ export function TripStageCanvas({
       ? { width: `${exactSize.width}px`, height: `${exactSize.height}px` }
       : undefined;
 
+  const displayedFollowZoom =
+    spec.camera_mode === "follow-marker"
+      ? effectiveFollowZoom
+      : stageFocus.focusWeight > 1e-4 && stageFocus.targetZoom !== null && blendedFitCamera
+        ? blendedFitCamera.zoom
+        : null;
+
   return (
     <div
       ref={wrapperRef}
@@ -1530,7 +1761,7 @@ export function TripStageCanvas({
       data-camera-preset={spec.camera_preset}
       data-visibility-mode={spec.visibility_mode}
       data-resolution={spec.resolution}
-      data-follow-zoom={effectiveFollowZoom !== null ? effectiveFollowZoom.toFixed(3) : undefined}
+      data-follow-zoom={displayedFollowZoom !== null ? displayedFollowZoom.toFixed(3) : undefined}
       data-hud-slot={layout.hud?.slot ?? spec.statistics_panel.position}
       data-job-id={jobId}
       className={wrapperClass}
@@ -1595,7 +1826,7 @@ export function TripStageCanvas({
 
           {spec.show_climb_callouts !== false && layout.climbCallouts.length > 0
             ? (() => {
-                const climbById = new Map(reachedClimbs.map((c) => [c.id, c]));
+                const climbById = new Map(activeClimbs.map((c) => [c.id, c]));
                 const renderedSlots = layout.climbCallouts.filter((slot) => climbById.has(slot.id));
                 if (renderedSlots.length === 0) return null;
                 return (
@@ -1614,6 +1845,7 @@ export function TripStageCanvas({
                           slot.rect.y + slot.rect.height,
                           Math.max(slot.rect.y, slot.anchorY),
                         );
+                        const opacity = climbOpacityById.get(slot.id) ?? 1;
                         return (
                           <line
                             key={slot.id}
@@ -1624,12 +1856,14 @@ export function TripStageCanvas({
                             y2={edgeY}
                             stroke="rgba(251, 146, 60, 0.85)"
                             strokeWidth="1.5"
+                            style={{ opacity: Number(opacity.toFixed(3)) }}
                           />
                         );
                       })}
                     </svg>
                     {renderedSlots.map((slot) => {
                       const climb = climbById.get(slot.id)!;
+                      const opacity = climbOpacityById.get(slot.id) ?? 1;
                       return (
                         <div
                           key={slot.id}
@@ -1640,6 +1874,7 @@ export function TripStageCanvas({
                             top: `${slot.rect.y}px`,
                             width: `${slot.rect.width}px`,
                             height: `${slot.rect.height}px`,
+                            opacity: Number(opacity.toFixed(3)),
                           }}
                         >
                           <div className="inline-flex w-full items-center gap-1 rounded border border-orange-400/60 bg-canvas/92 px-1.5 py-0.5 text-[9px] font-semibold text-ink shadow-md backdrop-blur-sm">

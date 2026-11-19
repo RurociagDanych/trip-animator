@@ -5,6 +5,7 @@ import {
   type ProjectDetailOut,
   type ProjectShareOut,
   type RenderSpecV2,
+  type StageCameraOverride,
   type StageOut,
   type StatisticsPanelConfig,
   type TransitionIcon,
@@ -27,6 +28,9 @@ function cloneSpec(spec: RenderSpecV2): RenderSpecV2 {
     ...spec,
     stage_colors: { ...spec.stage_colors },
     stage_transitions: { ...spec.stage_transitions },
+    stage_camera_overrides: Object.fromEntries(
+      Object.entries(spec.stage_camera_overrides ?? {}).map(([k, v]) => [k, { ...v }]),
+    ),
     camera_keyframes: (spec.camera_keyframes ?? []).map((kf) => ({ ...kf })),
     statistics_panel: {
       ...spec.statistics_panel,
@@ -101,6 +105,11 @@ export interface EditorState {
   updateStatisticsPanel: (patch: Partial<StatisticsPanelConfig>, coalesceKey?: string) => void;
   setStageColor: (stageId: string, colorHex: string) => void;
   setStageTransition: (stageId: string, transition: TransitionIcon) => void;
+  setStageCameraOverride: (
+    stageId: string,
+    override: StageCameraOverride | null,
+    coalesceKey?: string,
+  ) => void;
   setStages: (stages: StageOut[]) => void;
   selectStage: (stageId: string | null) => void;
   setInspectorSection: (section: InspectorSection) => void;
@@ -145,7 +154,8 @@ function inferSpecCoalesceKey(patch: Partial<RenderSpecV2>): string | null {
       key === "track_color" ||
       key === "marker_color" ||
       key === "terrain_exaggeration" ||
-      key === "telemetry_smoothing"
+      key === "telemetry_smoothing" ||
+      key === "climb_callout_duration_s"
     ) {
       return `spec:${key}`;
     }
@@ -297,6 +307,24 @@ export const useEditorStore = create<EditorState>((set) => ({
       hasUnsavedChanges: true,
     })),
 
+  setStageCameraOverride: (stageId, override, coalesceKey) =>
+    set((state) => {
+      const nextOverrides = { ...(state.spec.stage_camera_overrides ?? {}) };
+      if (override === null || override.focus_mode === "auto") {
+        delete nextOverrides[stageId];
+      } else {
+        nextOverrides[stageId] = { ...override };
+      }
+      return {
+        ...pushUndoHistory(state, coalesceKey ?? `stage-camera:${stageId}`),
+        spec: {
+          ...state.spec,
+          stage_camera_overrides: nextOverrides,
+        },
+        hasUnsavedChanges: true,
+      };
+    }),
+
   setStages: (stages) =>
     set((state) => {
       const validIds = new Set(stages.map((s) => s.id));
@@ -306,6 +334,9 @@ export const useEditorStore = create<EditorState>((set) => ({
       const cleanTransitions = Object.fromEntries(
         Object.entries(state.spec.stage_transitions).filter(([id]) => validIds.has(id)),
       );
+      const cleanOverrides = Object.fromEntries(
+        Object.entries(state.spec.stage_camera_overrides ?? {}).filter(([id]) => validIds.has(id)),
+      );
       const selectedExists = stages.some((s) => s.id === state.selectedStageId);
       return {
         stages,
@@ -314,6 +345,7 @@ export const useEditorStore = create<EditorState>((set) => ({
           ...state.spec,
           stage_colors: cleanColors,
           stage_transitions: cleanTransitions,
+          stage_camera_overrides: cleanOverrides,
         },
       };
     }),

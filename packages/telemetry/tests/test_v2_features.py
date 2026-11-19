@@ -17,6 +17,8 @@ from trip_telemetry import (
     CameraKeyframe,
     PhotoAlignmentInput,
     RenderSpecV2,
+    StageCameraOverride,
+    StageFocusMode,
     StageTrackInput,
     TerrariumDemProvider,
     TrackParseError,
@@ -185,6 +187,73 @@ def test_render_spec_v2_new_fields_and_keyframe_validation() -> None:
         CameraKeyframe(progress=0.5, pitch_deg=float("nan"))
     with pytest.raises(ValueError):
         RenderSpecV2(terrain_exaggeration=float("inf"))
+
+
+def test_stage_camera_override_and_climb_callout_duration_validation() -> None:
+    # Mode defaults: street -> 15.8 / 0.45, close -> 13.8 / 0.7, auto -> None / 1.0
+    street_mode: StageFocusMode = "street"
+    street = StageCameraOverride(focus_mode=street_mode)
+    assert street.target_zoom == pytest.approx(15.8)
+    assert street.speed_multiplier == pytest.approx(0.45)
+    assert street.transition_margin == pytest.approx(0.02)
+
+    street_tuned = StageCameraOverride(
+        focus_mode="street",
+        target_zoom=16.4,
+        speed_multiplier=0.55,
+    )
+    assert street_tuned.target_zoom == pytest.approx(16.4)
+    assert street_tuned.speed_multiplier == pytest.approx(0.55)
+
+    close = StageCameraOverride(focus_mode="close")
+    assert close.target_zoom == pytest.approx(13.8)
+    assert close.speed_multiplier == pytest.approx(0.7)
+
+    custom = StageCameraOverride(
+        focus_mode="custom",
+        target_zoom=14.5,
+        speed_multiplier=0.6,
+        transition_margin=0.05,
+    )
+    assert custom.focus_mode == "custom"
+    assert custom.target_zoom == pytest.approx(14.5)
+    assert custom.speed_multiplier == pytest.approx(0.6)
+    assert custom.transition_margin == pytest.approx(0.05)
+
+    auto = StageCameraOverride(focus_mode="auto", target_zoom=16.0, speed_multiplier=0.5)
+    assert auto.target_zoom is None
+    assert auto.speed_multiplier == pytest.approx(1.0)
+
+    # Bounds and finiteness checks for StageCameraOverride
+    for bad_zoom in (2.9, 18.1, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            StageCameraOverride(focus_mode="custom", target_zoom=bad_zoom)
+    for bad_speed in (0.19, 4.01, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            StageCameraOverride(focus_mode="custom", speed_multiplier=bad_speed)
+    for bad_margin in (0.004, 0.26, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            StageCameraOverride(focus_mode="custom", transition_margin=bad_margin)
+
+    # RenderSpecV2 defaults, stage_camera_overrides, and climb_callout_duration_s bounds
+    default_spec = RenderSpecV2()
+    assert default_spec.stage_camera_overrides == {}
+    assert default_spec.climb_callout_duration_s == pytest.approx(4.0)
+
+    configured = RenderSpecV2(
+        climb_callout_duration_s=0.0,
+        stage_camera_overrides={"stage-1": street, "stage-2": custom},
+    )
+    assert configured.climb_callout_duration_s == 0.0
+    assert configured.stage_camera_overrides["stage-1"].target_zoom == pytest.approx(15.8)
+    assert configured.stage_camera_overrides["stage-2"].speed_multiplier == pytest.approx(0.6)
+
+    max_callout = RenderSpecV2(climb_callout_duration_s=30.0)
+    assert max_callout.climb_callout_duration_s == pytest.approx(30.0)
+
+    for bad_duration in (-0.1, 30.1, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            RenderSpecV2(climb_callout_duration_s=bad_duration)
 
 
 def test_fit_tcx_and_multitrack_gpx_parsers() -> None:

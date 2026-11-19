@@ -1015,3 +1015,135 @@ def test_telemetry_missing_stage_and_corrupt_parquet_errors(
     assert err_resp.status_code == 500
     assert err_resp.json()["title"] == "Internal server error"
     assert "traceback" not in err_resp.text.lower()
+
+
+def test_stage_camera_overrides_and_climb_callout_duration_api_lifecycle(
+    harness: AppHarness,
+    sample_gpx: bytes,
+) -> None:
+    harness.create_user("camera@example.com")
+    client, csrf = harness.login_client("camera@example.com")
+
+    proj_resp = client.post(
+        "/api/v1/projects",
+        json={"title": "Camera Focus Tour"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert proj_resp.status_code == 201
+    proj_id = proj_resp.json()["id"]
+
+    stage1 = client.post(
+        f"/api/v1/projects/{proj_id}/gpx",
+        files={"file": ("day1.gpx", sample_gpx, "application/gpx+xml")},
+        data={"day_index": "1", "name": "Stage One"},
+        headers={"X-CSRF-Token": csrf},
+    ).json()
+    stage2 = client.post(
+        f"/api/v1/projects/{proj_id}/gpx",
+        files={"file": ("day2.gpx", sample_gpx, "application/gpx+xml")},
+        data={"day_index": "2", "name": "Stage Two"},
+        headers={"X-CSRF-Token": csrf},
+    ).json()
+    s1_id = stage1["id"]
+    s2_id = stage2["id"]
+    foreign_stage_id = str(uuid.uuid4())
+
+    # PATCH rejects foreign stage UUID in stage_camera_overrides with HTTP 422
+    bad_patch = client.patch(
+        f"/api/v1/projects/{proj_id}",
+        json={
+            "revision": 1,
+            "settings": {
+                "stage_camera_overrides": {
+                    foreign_stage_id: {"focus_mode": "street"},
+                },
+            },
+        },
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert bad_patch.status_code == 422
+    assert "stage_camera_overrides" in bad_patch.text
+
+    # POST /renders rejects foreign stage UUID in stage_camera_overrides with HTTP 422
+    bad_render = client.post(
+        f"/api/v1/projects/{proj_id}/renders",
+        json={
+            "stage_camera_overrides": {
+                foreign_stage_id: {"focus_mode": "close"},
+            },
+        },
+        headers={
+            "X-CSRF-Token": csrf,
+            "Idempotency-Key": "render-foreign-override-1",
+        },
+    )
+    assert bad_render.status_code == 422
+    assert "stage_camera_overrides" in bad_render.text
+
+    # PATCH accepts valid project stage IDs and applies preset defaults + climb_callout_duration_s
+    good_patch = client.patch(
+        f"/api/v1/projects/{proj_id}",
+        json={
+            "revision": 1,
+            "settings": {
+                "climb_callout_duration_s": 6.5,
+                "stage_camera_overrides": {
+                    s1_id: {"focus_mode": "street"},
+                    s2_id: {
+                        "focus_mode": "custom",
+                        "target_zoom": 14.5,
+                        "speed_multiplier": 0.6,
+                        "transition_margin": 0.04,
+                    },
+                },
+            },
+        },
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert good_patch.status_code == 200, good_patch.text
+    patched_settings = good_patch.json()["settings"]
+    assert patched_settings["climb_callout_duration_s"] == pytest.approx(6.5)
+    assert patched_settings["stage_camera_overrides"][s1_id] == {
+        "focus_mode": "street",
+        "target_zoom": 15.8,
+        "speed_multiplier": 0.45,
+        "transition_margin": 0.02,
+    }
+    assert patched_settings["stage_camera_overrides"][s2_id] == {
+        "focus_mode": "custom",
+        "target_zoom": 14.5,
+        "speed_multiplier": 0.6,
+        "transition_margin": 0.04,
+    }
+
+    # POST /renders accepts valid project stage IDs in stage_camera_overrides
+    good_render = client.post(
+        f"/api/v1/projects/{proj_id}/renders",
+        json={
+            "climb_callout_duration_s": 0.0,
+            "stage_camera_overrides": {
+                s1_id: {"focus_mode": "close"},
+            },
+        },
+        headers={
+            "X-CSRF-Token": csrf,
+            "Idempotency-Key": "render-valid-override-1",
+        },
+    )
+    assert good_render.status_code == 202, good_render.text
+    render_spec = good_render.json()["spec"]
+    assert render_spec["climb_callout_duration_s"] == 0.0
+    assert render_spec["stage_camera_overrides"][s1_id]["target_zoom"] == pytest.approx(13.8)
+    assert render_spec["stage_camera_overrides"][s1_id]["speed_multiplier"] == pytest.approx(0.7)
+
+    # DELETE stage prunes its stage_camera_overrides entry while keeping other stages intact
+    del_resp = client.delete(
+        f"/api/v1/projects/{proj_id}/stages/{s1_id}",
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert del_resp.status_code == 204
+    detail = client.get(f"/api/v1/projects/{proj_id}").json()
+    remaining_overrides = detail["settings"]["stage_camera_overrides"]
+    assert s1_id not in remaining_overrides
+    assert s2_id in remaining_overrides
+    assert remaining_overrides[s2_id]["focus_mode"] == "custom"

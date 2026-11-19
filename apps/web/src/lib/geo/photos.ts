@@ -1,5 +1,4 @@
 import type {
-  CameraKeyframe,
   ManifestPhoto,
   PhotoCardStyle,
   PhotoMatchMethod,
@@ -7,7 +6,7 @@ import type {
   PublicPhotoOut,
   RenderSpecV2,
 } from "../api/types";
-import { sampleKeyframeSpeedMultiplier } from "./camera";
+import { computeStageProgressSpans, sampleCombinedSpeedMultiplier } from "./camera";
 import { clamp01, haversineMeters, type TimelinePoint, type TimelineStage } from "./timeline";
 
 export type PhotoInput = ProjectPhotoOut | PublicPhotoOut | ManifestPhoto;
@@ -412,50 +411,80 @@ function computeDisplayEnvelope(
 }
 
 const SPEED_LUT_STEPS = 512;
+const MAX_SPEED_LUT_CACHE_ENTRIES = 32;
 
 interface SpeedCurveLut {
   cumTime: Float64Array;
   dp: number;
 }
 
-interface CachedSpeedLutEntry {
-  sig: string;
-  lut: SpeedCurveLut | null;
+const SPEED_LUT_CACHE = new Map<string, SpeedCurveLut | null>();
+
+function computeSpeedCurveSig(
+  stages: readonly TimelineStage[],
+  spec: Pick<RenderSpecV2, "camera_keyframes" | "timeline_mode" | "stage_camera_overrides">,
+): string {
+  const kfSig = (spec.camera_keyframes ?? [])
+    .map((kf) => `${kf.progress}:${kf.speed_multiplier}`)
+    .join("|");
+  const overrides = spec.stage_camera_overrides ?? {};
+  const hasStageOverrides = stages.length > 0 && Object.keys(overrides).length > 0;
+  if (!hasStageOverrides) {
+    return `${spec.timeline_mode}::${kfSig}`;
+  }
+  const spans = computeStageProgressSpans(stages, spec);
+  const stageSig = spans
+    .map((span) => {
+      const ov = overrides[span.stageId];
+      const ovSig = ov
+        ? `${ov.focus_mode}:${ov.target_zoom ?? "n"}:${ov.speed_multiplier}:${ov.transition_margin}`
+        : "auto";
+      return `${span.stageId}@${span.startProgress.toFixed(6)}-${span.endProgress.toFixed(6)}=${ovSig}`;
+    })
+    .join(",");
+  return `${spec.timeline_mode}::${kfSig}::${stageSig}`;
 }
 
-const SPEED_LUT_CACHE = new WeakMap<readonly CameraKeyframe[], CachedSpeedLutEntry>();
-
-function computeKeyframesSig(keyframes: readonly CameraKeyframe[]): string {
-  return keyframes.map((kf) => `${kf.progress}:${kf.speed_multiplier}`).join("|");
+function setSpeedLutCache(sig: string, lut: SpeedCurveLut | null): void {
+  if (SPEED_LUT_CACHE.has(sig)) {
+    SPEED_LUT_CACHE.delete(sig);
+  } else if (SPEED_LUT_CACHE.size >= MAX_SPEED_LUT_CACHE_ENTRIES) {
+    const oldestKey = SPEED_LUT_CACHE.keys().next().value;
+    if (oldestKey !== undefined) {
+      SPEED_LUT_CACHE.delete(oldestKey);
+    }
+  }
+  SPEED_LUT_CACHE.set(sig, lut);
 }
 
-function getSpeedCurveLut(keyframes: readonly CameraKeyframe[] | undefined): SpeedCurveLut | null {
-  if (!keyframes || keyframes.length === 0) {
+function getSpeedCurveLut(
+  stages: readonly TimelineStage[],
+  spec: Pick<RenderSpecV2, "camera_keyframes" | "timeline_mode" | "stage_camera_overrides">,
+): SpeedCurveLut | null {
+  const hasKeyframes = (spec.camera_keyframes?.length ?? 0) > 0;
+  const hasStageOverrides =
+    stages.length > 0 && Object.keys(spec.stage_camera_overrides ?? {}).length > 0;
+  if (!hasKeyframes && !hasStageOverrides) {
     return null;
   }
-  const sig = computeKeyframesSig(keyframes);
-  const cached = SPEED_LUT_CACHE.get(keyframes);
-  if (cached && cached.sig === sig) {
-    return cached.lut;
+
+  const sig = computeSpeedCurveSig(stages, spec);
+  if (SPEED_LUT_CACHE.has(sig)) {
+    return SPEED_LUT_CACHE.get(sig) ?? null;
   }
 
-  const sorted = [...keyframes].sort(
-    (a, b) =>
-      (Number.isFinite(a.progress) ? a.progress : 0) -
-      (Number.isFinite(b.progress) ? b.progress : 0),
-  );
   let minSpeed = Infinity;
   let maxSpeed = -Infinity;
   const speeds = new Float64Array(SPEED_LUT_STEPS + 1);
   for (let i = 0; i <= SPEED_LUT_STEPS; i++) {
-    const s = sampleKeyframeSpeedMultiplier(sorted, i / SPEED_LUT_STEPS);
+    const s = sampleCombinedSpeedMultiplier(stages, spec, i / SPEED_LUT_STEPS);
     speeds[i] = s;
     if (s < minSpeed) minSpeed = s;
     if (s > maxSpeed) maxSpeed = s;
   }
 
   if (maxSpeed - minSpeed < 1e-6) {
-    SPEED_LUT_CACHE.set(keyframes, { sig, lut: null });
+    setSpeedLutCache(sig, null);
     return null;
   }
 
@@ -471,7 +500,7 @@ function getSpeedCurveLut(keyframes: readonly CameraKeyframe[] | undefined): Spe
 
   const total = cumTime[SPEED_LUT_STEPS]!;
   if (!(total > 0) || !Number.isFinite(total)) {
-    SPEED_LUT_CACHE.set(keyframes, { sig, lut: null });
+    setSpeedLutCache(sig, null);
     return null;
   }
   for (let i = 1; i < SPEED_LUT_STEPS; i++) {
@@ -480,7 +509,7 @@ function getSpeedCurveLut(keyframes: readonly CameraKeyframe[] | undefined): Spe
   cumTime[SPEED_LUT_STEPS] = 1;
 
   const lut: SpeedCurveLut = { cumTime, dp };
-  SPEED_LUT_CACHE.set(keyframes, { sig, lut });
+  setSpeedLutCache(sig, lut);
   return lut;
 }
 
@@ -530,7 +559,7 @@ function travelFractionToProgress(lut: SpeedCurveLut | null, tau: number): numbe
  * speed_multiplier timeline warping, and capped pause_on_photo timeline warping with preview holdScale parity.
  */
 export function evaluateTimelineSchedule(
-  _stages: readonly TimelineStage[],
+  stages: readonly TimelineStage[],
   matchedPhotos: readonly MatchedPhoto[],
   spec: RenderSpecV2,
   currentTimeS: number,
@@ -553,7 +582,7 @@ export function evaluateTimelineSchedule(
     : [];
 
   const desiredDisplayS = Math.max(0.2, (spec.photo_display_seconds ?? 3.0) * holdScale);
-  const speedLut = getSpeedCurveLut(spec.camera_keyframes);
+  const speedLut = getSpeedCurveLut(stages, spec);
 
   // Non-paused schedule when pause_on_photo is off or no matched photos exist
   if (!spec.pause_on_photo || stops.length === 0) {
@@ -690,6 +719,7 @@ export function progressRatioToTimeRatio(
   targetProgressRatio: number,
   durationS: number,
   isPreview: boolean,
+  stages: readonly TimelineStage[] = [],
 ): number {
   const target = clamp01(targetProgressRatio);
   if (target <= 0) return 0;
@@ -708,7 +738,7 @@ export function progressRatioToTimeRatio(
     ? matchedPhotos.filter((p): p is MatchedPhoto & { matchedProgress: number } => p.matchedProgress !== null)
     : [];
 
-  const speedLut = getSpeedCurveLut(spec.camera_keyframes);
+  const speedLut = getSpeedCurveLut(stages, spec);
 
   if (!spec.pause_on_photo || stops.length === 0) {
     return clamp01(

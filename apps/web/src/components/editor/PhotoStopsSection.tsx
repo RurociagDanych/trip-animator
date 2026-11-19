@@ -257,16 +257,23 @@ export function PhotoStopsSection({
             inputRef.current?.click();
           }
         }}
+        onDragEnter={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setIsDragOver(true);
+        }}
         onDragOver={(e) => {
           e.preventDefault();
+          e.stopPropagation();
           setIsDragOver(true);
         }}
         onDragLeave={() => setIsDragOver(false)}
         onDrop={(e) => {
           e.preventDefault();
+          e.stopPropagation();
           setIsDragOver(false);
           if (e.dataTransfer.files.length > 0) {
-            void handlePhotoFiles(e.dataTransfer.files);
+            void handlePhotoFiles(Array.from(e.dataTransfer.files));
           }
         }}
         className={`cursor-pointer rounded-md border border-dashed p-2.5 text-center transition-colors ${

@@ -10,6 +10,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Coffee,
+  Focus,
   GripVertical,
   Layers,
   Loader2,
@@ -30,6 +31,8 @@ import type {
   PalettePreset,
   ProjectPhotoOut,
   RenderSpecV2,
+  StageCameraOverride,
+  StageFocusMode,
   StageOut,
   TransitionIcon,
 } from "../../lib/api/types";
@@ -69,6 +72,38 @@ const TRANSITION_OPTIONS: readonly { value: TransitionIcon; label: string }[] = 
   { value: "transport", label: "Transport" },
 ];
 
+const STAGE_FOCUS_PRESETS: readonly {
+  mode: StageFocusMode;
+  label: string;
+  hint: string;
+}[] = [
+  { mode: "auto", label: "Auto", hint: "1×" },
+  { mode: "close", label: "Close", hint: "Zoom 13.8 · 0.7×" },
+  { mode: "street", label: "Street Focus", hint: "Zoom 15.8 · 0.45×" },
+  { mode: "custom", label: "Custom", hint: "Manual zoom & pace" },
+];
+
+function formatSpeedMultiplier(speed: number): string {
+  if (!Number.isFinite(speed)) {
+    return "1×";
+  }
+  return `${Number(speed.toFixed(2))}×`;
+}
+
+function formatStageFocusBadge(override: StageCameraOverride): string {
+  const speedLabel = formatSpeedMultiplier(override.speed_multiplier);
+  if (override.focus_mode === "street") {
+    return `Street · ${speedLabel}`;
+  }
+  if (override.focus_mode === "close") {
+    return `Close · ${speedLabel}`;
+  }
+  if (override.target_zoom !== null && Number.isFinite(override.target_zoom)) {
+    return `Zoom ${override.target_zoom.toFixed(1)} · ${speedLabel}`;
+  }
+  return `Pace ${speedLabel}`;
+}
+
 interface UploadQueueItem {
   key: string;
   filename: string;
@@ -94,6 +129,7 @@ export interface StageSidebarProps {
   onPhotosMutated?: () => Promise<void> | void;
   onStageColorChange: (stageId: string, colorHex: string) => void;
   onStageTransitionChange: (stageId: string, transition: TransitionIcon) => void;
+  onStageCameraOverrideChange?: (stageId: string, override: StageCameraOverride | null) => void;
   onOpenStravaModal: () => void;
 }
 
@@ -132,6 +168,7 @@ export function StageSidebar({
   onPhotosMutated,
   onStageColorChange,
   onStageTransitionChange,
+  onStageCameraOverrideChange,
   onOpenStravaModal,
 }: StageSidebarProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -485,16 +522,16 @@ export function StageSidebar({
       <div
         role="tablist"
         aria-label="Sidebar sections"
-        className="grid grid-cols-3 border-b border-border bg-canvas/50 p-1"
+        className="grid grid-cols-2 border-b border-border bg-canvas/50 p-1"
       >
         {(
           [
             { id: "stages", label: `Stages (${stages.length})` },
-            { id: "edit", label: "Edit" },
             { id: "photos", label: `Photos (${photos.length})` },
           ] as const
         ).map((tab) => {
-          const active = activeTab === tab.id;
+          const effectiveTab = activeTab === "photos" ? "photos" : "stages";
+          const active = effectiveTab === tab.id;
           return (
             <button
               key={tab.id}
@@ -512,9 +549,14 @@ export function StageSidebar({
         })}
       </div>
 
-      <div className="flex-1 space-y-3 overflow-y-auto p-3">
-        {activeTab === "stages" ? (
-          <>
+      {activeTab !== "photos" ? (
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div
+            data-testid="stages-list-pane"
+            className={`min-h-0 flex-1 space-y-3 overflow-y-auto p-3 ${
+              selectedStage ? "basis-1/2" : ""
+            }`}
+          >
             {/* Track Dropzone (.gpx,.fit,.tcx) + Strava Import */}
             <div className="space-y-2">
               <div
@@ -528,16 +570,23 @@ export function StageSidebar({
                     fileInputRef.current?.click();
                   }
                 }}
+                onDragEnter={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setIsDragOver(true);
+                }}
                 onDragOver={(e) => {
                   e.preventDefault();
+                  e.stopPropagation();
                   setIsDragOver(true);
                 }}
                 onDragLeave={() => setIsDragOver(false)}
                 onDrop={(e) => {
                   e.preventDefault();
+                  e.stopPropagation();
                   setIsDragOver(false);
                   if (e.dataTransfer.files.length > 0) {
-                    void handleTrackFiles(e.dataTransfer.files);
+                    void handleTrackFiles(Array.from(e.dataTransfer.files));
                   }
                 }}
                 className={`cursor-pointer rounded-md border border-dashed p-3 text-center transition-colors ${
@@ -779,6 +828,9 @@ export function StageSidebar({
                             const isSelected = selectedStageId === stage.id;
                             const colorHex = spec.stage_colors[stage.id] ?? spec.track_color;
                             const transitionIcon = spec.stage_transitions[stage.id] ?? "none";
+                            const cameraOverride = spec.stage_camera_overrides?.[stage.id];
+                            const hasFocusBadge =
+                              cameraOverride !== undefined && cameraOverride.focus_mode !== "auto";
                             const visualIdx = visualIndexById.get(stage.id) ?? 0;
                             const stageDurationS =
                               stage.elapsed_seconds > 0
@@ -796,7 +848,10 @@ export function StageSidebar({
                                 draggable
                                 onDragStart={() => setDragStageId(stage.id)}
                                 onDragOver={(e) => e.preventDefault()}
-                                onDrop={() => void handleDropReorder(stage.id)}
+                                onDrop={(e) => {
+                                  e.preventDefault();
+                                  void handleDropReorder(stage.id);
+                                }}
                                 className={`rounded-md border transition-colors ${
                                   isSelected
                                     ? "border-sky-accent bg-elevated"
@@ -858,13 +913,22 @@ export function StageSidebar({
                                       </div>
                                     ) : null}
 
-                                    <div className="tabular-telemetry mt-1.5 flex items-center gap-2.5 text-[11px] text-ink-muted">
+                                    <div className="tabular-telemetry mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-ink-muted">
                                       <span>{formatDistance(stage.distance_m, spec.units)}</span>
                                       <span>+{formatElevation(stage.elevation_gain_m, spec.units)}</span>
                                       {transitionIcon !== "none" ? (
                                         <span className="inline-flex items-center gap-1 text-amber-accent">
                                           <TransitionBadgeIcon icon={transitionIcon} />
                                           <span>{transitionIcon}</span>
+                                        </span>
+                                      ) : null}
+                                      {hasFocusBadge && cameraOverride ? (
+                                        <span
+                                          data-testid={`stage-focus-badge-${stage.id}`}
+                                          className="inline-flex items-center gap-1 rounded border border-sky-accent/40 bg-sky-accent/10 px-1.5 py-0.5 text-[10px] font-medium text-sky-accent"
+                                        >
+                                          <Focus className="h-2.5 w-2.5" aria-hidden="true" />
+                                          <span>{formatStageFocusBadge(cameraOverride)}</span>
                                         </span>
                                       ) : null}
                                     </div>
@@ -997,20 +1061,27 @@ export function StageSidebar({
                 ) : null}
               </div>
             )}
-          </>
-        ) : null}
+          </div>
 
-        {activeTab === "edit" ? (
-          <div className="space-y-3">
-            {actionError ? (
-              <div
-                role="alert"
-                className="rounded-md border border-coral-accent/40 bg-coral-accent/10 px-2.5 py-2 text-[11px] text-ink"
-              >
-                {actionError}
+          {selectedStage ? (
+            <div
+              data-testid="inline-stage-editor-pane"
+              className="min-h-0 flex-1 basis-1/2 space-y-3 overflow-y-auto border-t border-border bg-canvas/35 p-3"
+            >
+              <div className="flex items-center justify-between gap-2 border-b border-border/70 pb-2">
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-sky-accent">
+                  Edit stage
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onSelectStage(null)}
+                  aria-label="Deselect stage"
+                  title="Deselect stage"
+                  className="rounded p-1 text-ink-muted hover:bg-elevated hover:text-ink"
+                >
+                  <X className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
               </div>
-            ) : null}
-            {selectedStage ? (
               <StageEditorForm
                 key={`${selectedStage.id}-${selectedStage.name}-${selectedStage.day_index}-${selectedStage.activity_type ?? "cycling"}-${selectedStage.trim_start_s ?? "n"}-${selectedStage.trim_end_s ?? "n"}`}
                 stage={selectedStage}
@@ -1021,16 +1092,13 @@ export function StageSidebar({
                 onDelete={() => void handleDeleteStage(selectedStage.id)}
                 onStageColorChange={onStageColorChange}
                 onStageTransitionChange={onStageTransitionChange}
+                onStageCameraOverrideChange={onStageCameraOverrideChange}
               />
-            ) : (
-              <div className="rounded-md border border-border bg-canvas/40 p-4 text-center text-xs text-ink-muted">
-                Select a stage from the Stages tab to edit its properties, color, or trim bounds.
-              </div>
-            )}
-          </div>
-        ) : null}
-
-        {activeTab === "photos" ? (
+            </div>
+          ) : null}
+        </div>
+      ) : (
+        <div className="flex-1 space-y-3 overflow-y-auto p-3">
           <PhotoStopsSection
             projectId={projectId}
             photos={photos}
@@ -1040,8 +1108,8 @@ export function StageSidebar({
             onTogglePinMode={onTogglePinMode}
             onPhotosMutated={onPhotosMutated}
           />
-        ) : null}
-      </div>
+        </div>
+      )}
     </aside>
   );
 }
@@ -1061,6 +1129,7 @@ interface StageEditorFormProps {
   onDelete: () => void;
   onStageColorChange: (stageId: string, colorHex: string) => void;
   onStageTransitionChange: (stageId: string, transition: TransitionIcon) => void;
+  onStageCameraOverrideChange?: (stageId: string, override: StageCameraOverride | null) => void;
 }
 
 function StageEditorForm({
@@ -1072,6 +1141,7 @@ function StageEditorForm({
   onDelete,
   onStageColorChange,
   onStageTransitionChange,
+  onStageCameraOverrideChange,
 }: StageEditorFormProps) {
   const [draftName, setDraftName] = useState(stage.name);
   const [draftDay, setDraftDay] = useState(String(stage.day_index));
@@ -1084,6 +1154,46 @@ function StageEditorForm({
   const [draftTrimEnd, setDraftTrimEnd] = useState(
     stage.trim_end_s !== null ? String(stage.trim_end_s) : "",
   );
+
+  const currentOverride = spec.stage_camera_overrides?.[stage.id];
+  const focusMode: StageFocusMode = currentOverride?.focus_mode ?? "auto";
+  const targetZoom: number | null = currentOverride?.target_zoom ?? null;
+  const speedMultiplier: number = currentOverride?.speed_multiplier ?? 1.0;
+  const transitionMargin: number = currentOverride?.transition_margin ?? 0.02;
+
+  function applyFocusPreset(mode: StageFocusMode) {
+    if (!onStageCameraOverrideChange) {
+      return;
+    }
+    if (mode === "auto") {
+      onStageCameraOverrideChange(stage.id, null);
+      return;
+    }
+    if (mode === "close") {
+      onStageCameraOverrideChange(stage.id, {
+        focus_mode: "close",
+        target_zoom: 13.8,
+        speed_multiplier: 0.7,
+        transition_margin: transitionMargin,
+      });
+      return;
+    }
+    if (mode === "street") {
+      onStageCameraOverrideChange(stage.id, {
+        focus_mode: "street",
+        target_zoom: 15.8,
+        speed_multiplier: 0.45,
+        transition_margin: transitionMargin,
+      });
+      return;
+    }
+    onStageCameraOverrideChange(stage.id, {
+      focus_mode: "custom",
+      target_zoom: targetZoom ?? 15.0,
+      speed_multiplier: speedMultiplier,
+      transition_margin: transitionMargin,
+    });
+  }
 
   return (
     <form
@@ -1220,6 +1330,150 @@ function StageEditorForm({
             onChange={(e) => onStageColorChange(stage.id, e.currentTarget.value)}
             className="h-6 w-7 cursor-pointer rounded border border-border bg-transparent p-0"
           />
+        </div>
+      </div>
+
+      <div
+        data-testid="stage-camera-focus-section"
+        className="space-y-2.5 border-t border-border/70 pt-2.5"
+      >
+        <div className="flex items-center justify-between text-[11px] text-ink-muted">
+          <span className="inline-flex items-center gap-1 font-medium text-ink">
+            <Focus className="h-3 w-3 text-sky-accent" aria-hidden="true" />
+            <span>Camera focus &amp; pace</span>
+          </span>
+          {focusMode !== "auto" ? (
+            <span className="tabular-telemetry text-[10px] text-sky-accent">
+              {formatStageFocusBadge({
+                focus_mode: focusMode,
+                target_zoom: targetZoom,
+                speed_multiplier: speedMultiplier,
+                transition_margin: transitionMargin,
+              })}
+            </span>
+          ) : null}
+        </div>
+
+        <div
+          role="group"
+          aria-label="Stage camera focus presets"
+          className="grid grid-cols-2 gap-1.5"
+        >
+          {STAGE_FOCUS_PRESETS.map((preset) => {
+            const active = focusMode === preset.mode;
+            return (
+              <button
+                key={preset.mode}
+                type="button"
+                aria-pressed={active}
+                onClick={() => applyFocusPreset(preset.mode)}
+                className={`rounded-md border px-2 py-1.5 text-left transition-colors ${
+                  active
+                    ? "border-sky-accent bg-sky-accent/15 text-ink"
+                    : "border-border bg-elevated/60 text-ink-muted hover:text-ink"
+                }`}
+              >
+                <div className="text-[11px] font-semibold leading-tight">{preset.label}</div>
+                <div className="tabular-telemetry mt-0.5 text-[9px] leading-tight opacity-75">
+                  {preset.hint}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="space-y-2 rounded-md border border-border/70 bg-elevated/35 p-2">
+          <div className="space-y-1">
+            <div className="flex items-center justify-between gap-2 text-[11px] text-ink-muted">
+              <span>Target zoom</span>
+              <div className="flex items-center gap-1.5">
+                <span className="tabular-telemetry text-ink">
+                  {targetZoom !== null ? targetZoom.toFixed(1) : "Auto"}
+                </span>
+                <button
+                  type="button"
+                  data-testid="stage-target-zoom-auto-toggle"
+                  aria-label="Toggle automatic target zoom"
+                  aria-pressed={targetZoom === null}
+                  onClick={() => {
+                    if (!onStageCameraOverrideChange) return;
+                    if (targetZoom !== null) {
+                      if (Math.abs(speedMultiplier - 1.0) < 1e-6) {
+                        onStageCameraOverrideChange(stage.id, null);
+                      } else {
+                        onStageCameraOverrideChange(stage.id, {
+                          focus_mode: "custom",
+                          target_zoom: null,
+                          speed_multiplier: speedMultiplier,
+                          transition_margin: transitionMargin,
+                        });
+                      }
+                    } else {
+                      onStageCameraOverrideChange(stage.id, {
+                        focus_mode: "custom",
+                        target_zoom: 15.8,
+                        speed_multiplier: speedMultiplier,
+                        transition_margin: transitionMargin,
+                      });
+                    }
+                  }}
+                  className={`rounded border px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
+                    targetZoom === null
+                      ? "border-sky-accent bg-sky-accent/15 text-sky-accent"
+                      : "border-border bg-elevated text-ink-muted hover:text-ink"
+                  }`}
+                >
+                  Auto
+                </button>
+              </div>
+            </div>
+            <input
+              type="range"
+              aria-label="Stage target zoom"
+              min={10}
+              max={17.5}
+              step={0.1}
+              value={targetZoom ?? 14.0}
+              onChange={(e) => {
+                const nextZoom = Number(e.currentTarget.value);
+                onStageCameraOverrideChange?.(stage.id, {
+                  focus_mode: "custom",
+                  target_zoom: nextZoom,
+                  speed_multiplier: speedMultiplier,
+                  transition_margin: transitionMargin,
+                });
+              }}
+              className="w-full accent-sky-accent"
+            />
+            <div className="text-[10px] text-ink-muted/80">15.5+ = street level</div>
+          </div>
+
+          <div className="space-y-1">
+            <div className="flex items-center justify-between text-[11px] text-ink-muted">
+              <span>Playback pace</span>
+              <span className="tabular-telemetry text-ink">
+                {formatSpeedMultiplier(speedMultiplier)}
+              </span>
+            </div>
+            <input
+              type="range"
+              aria-label="Stage playback speed"
+              min={0.25}
+              max={3.0}
+              step={0.05}
+              value={speedMultiplier}
+              onChange={(e) => {
+                const nextSpeed = Number(e.currentTarget.value);
+                onStageCameraOverrideChange?.(stage.id, {
+                  focus_mode: "custom",
+                  target_zoom: targetZoom,
+                  speed_multiplier: nextSpeed,
+                  transition_margin: transitionMargin,
+                });
+              }}
+              className="w-full accent-sky-accent"
+            />
+          </div>
         </div>
       </div>
 

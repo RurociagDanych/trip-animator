@@ -414,8 +414,7 @@ describe("Login, Editor state, Stage reorder & Revision Conflict handling", () =
       expect(screen.queryByTestId("geometry-error-banner")).not.toBeInTheDocument();
     });
 
-    // Switch to Edit tab, select activity type icon and apply stage changes
-    fireEvent.click(screen.getByRole("tab", { name: "Edit" }));
+    // Select activity type icon in the inline stage editor and apply stage changes
     fireEvent.click(screen.getByRole("button", { name: "Hiking / Trekking" }));
     fireEvent.click(screen.getByRole("button", { name: "Apply stage changes" }));
     await waitFor(() => {

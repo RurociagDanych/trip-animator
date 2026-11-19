@@ -221,6 +221,7 @@ export function ShareViewPage() {
         Math.min(1, Math.max(0, targetProgress)),
         spec.duration_seconds,
         false,
+        timelineStages,
       ),
     );
   }

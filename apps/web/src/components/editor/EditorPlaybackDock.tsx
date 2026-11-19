@@ -136,10 +136,19 @@ export const EditorPlaybackDock = memo(function EditorPlaybackDock({
           ratio,
           effectiveDurationS,
           previewWatermark,
+          timelineStages,
         ),
       );
     },
-    [setPlaying, setCurrentTimeRatio, matchedPhotos, spec, effectiveDurationS, previewWatermark],
+    [
+      setPlaying,
+      setCurrentTimeRatio,
+      matchedPhotos,
+      spec,
+      effectiveDurationS,
+      previewWatermark,
+      timelineStages,
+    ],
   );
 
   return (

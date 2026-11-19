@@ -959,56 +959,75 @@ def _build_combined_track_table(
             trim_end_s=st.trim_end_s,
             table_name="_one_stage",
         )
-        rows = con.execute(
+        stats = con.execute(
             """
             SELECT
-                EPOCH_US(ts_utc)::BIGINT AS ts_us,
-                lat::DOUBLE,
-                lon::DOUBLE,
-                cum_dist_m::DOUBLE,
-                segment_idx::INTEGER
+                COUNT(*)::BIGINT,
+                COALESCE(FIRST(cum_dist_m ORDER BY seq ASC), 0.0)::DOUBLE,
+                COALESCE(LAST(cum_dist_m ORDER BY seq ASC), 0.0)::DOUBLE
             FROM _one_stage
-            ORDER BY seq ASC
             """
-        ).fetchall()
-        if not rows:
+        ).fetchone()
+        if not stats or int(stats[0]) == 0:
             continue
 
-        base_d = float(rows[0][3] or 0.0)
-        end_d = float(rows[-1][3] or base_d)
+        row_count = int(stats[0])
+        base_d = float(stats[1])
+        end_d = float(stats[2])
         stage_dist = max(end_d - base_d, 0.0)
 
-        insert_rows: list[tuple[Any, ...]] = []
-        wkt_points: list[str] = []
-        for ts_us, lat, lon, cum_d, seg_idx in rows:
-            g_dist = global_offset_m + max(float(cum_d or base_d) - base_d, 0.0)
-            insert_rows.append(
-                (
-                    global_idx,
-                    st.stage_id,
-                    st_idx,
-                    int(seg_idx or 0),
-                    _normalize_ts_utc(ts_us),
-                    float(lat),
-                    float(lon),
-                    g_dist,
-                )
-            )
-            wkt_points.append(f"{float(lon)} {float(lat)}")
-            global_idx += 1
-
-        con.executemany(
-            "INSERT INTO trip_pts VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            insert_rows,
-        )
-        if len(wkt_points) == 1:
-            wkt_points.append(wkt_points[0])
-        linestring_wkt = f"LINESTRING({', '.join(wkt_points)})"
         con.execute(
-            "INSERT INTO stage_lines VALUES (?, ?, ?, ?, ST_GeomFromText(?))",
-            [st.stage_id, st_idx, global_offset_m, stage_dist, linestring_wkt],
+            """
+            INSERT INTO trip_pts
+            SELECT
+                (? + ROW_NUMBER() OVER (ORDER BY seq ASC) - 1)::BIGINT AS global_idx,
+                ?::VARCHAR AS stage_id,
+                ?::INTEGER AS stage_order,
+                COALESCE(segment_idx, 0)::INTEGER AS segment_idx,
+                CAST(ts_utc AS TIMESTAMPTZ) AS ts_utc,
+                lat::DOUBLE AS lat,
+                lon::DOUBLE AS lon,
+                (? + GREATEST(COALESCE(cum_dist_m, ?)::DOUBLE - ?, 0.0))::DOUBLE AS global_dist_m
+            FROM _one_stage
+            ORDER BY seq ASC
+            """,
+            [global_idx, st.stage_id, st_idx, global_offset_m, base_d, base_d],
         )
 
+        if row_count == 1:
+            con.execute(
+                """
+                INSERT INTO stage_lines
+                SELECT
+                    ?::VARCHAR,
+                    ?::INTEGER,
+                    ?::DOUBLE,
+                    ?::DOUBLE,
+                    ST_MakeLine(
+                        ST_Point(lon::DOUBLE, lat::DOUBLE),
+                        ST_Point(lon::DOUBLE, lat::DOUBLE)
+                    )
+                FROM _one_stage
+                LIMIT 1
+                """,
+                [st.stage_id, st_idx, global_offset_m, stage_dist],
+            )
+        else:
+            con.execute(
+                """
+                INSERT INTO stage_lines
+                SELECT
+                    ?::VARCHAR,
+                    ?::INTEGER,
+                    ?::DOUBLE,
+                    ?::DOUBLE,
+                    ST_MakeLine(LIST(ST_Point(lon::DOUBLE, lat::DOUBLE) ORDER BY seq ASC))
+                FROM _one_stage
+                """,
+                [st.stage_id, st_idx, global_offset_m, stage_dist],
+            )
+
+        global_idx += row_count
         global_offset_m += stage_dist
 
     return global_offset_m

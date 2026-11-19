@@ -484,7 +484,7 @@ def delete_stage(
     sid_str = str(stage.id)
     settings_copy = dict(project.settings_json or {})
     changed_settings = False
-    for map_key in ("stage_colors", "stage_transitions"):
+    for map_key in ("stage_colors", "stage_transitions", "stage_camera_overrides"):
         raw_map = settings_copy.get(map_key)
         if isinstance(raw_map, dict) and sid_str in raw_map:
             updated_map = {k: v for k, v in raw_map.items() if k != sid_str}

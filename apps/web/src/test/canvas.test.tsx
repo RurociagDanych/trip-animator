@@ -565,4 +565,330 @@ describe("TripStageCanvas WebGL wiring (canvas.test.tsx)", () => {
     await settlePromise;
     expect(settled).toBe(true);
   });
+
+  it("smoothly blends street-level zoom and pan across stage boundaries in both follow-marker and fit-track modes without bearing jumps", () => {
+    const stage1: TimelineStage = {
+      id: "stage-focus-1",
+      name: "Approach Stage",
+      dayIndex: 1,
+      stageOrder: 0,
+      activityType: "cycling",
+      color: "#38bdf8",
+      transition: "none",
+      distanceM: 10_000,
+      elevationGainM: 150,
+      movingSeconds: 1800,
+      elapsedSeconds: 1800,
+      hasTimestamps: true,
+      points: [
+        makePoint(0.45, 0.22, 0, 0, 2),
+        makePoint(0.55, 0.25, 10_000, 1800, 3),
+      ],
+    };
+    const stage2: TimelineStage = {
+      id: "stage-focus-2",
+      name: "City Walk Stage",
+      dayIndex: 1,
+      stageOrder: 1,
+      activityType: "walking",
+      color: "#14b8a6",
+      transition: "none",
+      distanceM: 10_000,
+      elevationGainM: 40,
+      movingSeconds: 1800,
+      elapsedSeconds: 1800,
+      hasTimestamps: true,
+      points: [
+        { ...makePoint(0.55, 0.25, 0, 0, 1), globalDistM: 10_000, globalElapsedS: 1800 },
+        { ...makePoint(0.60, 0.26, 10_000, 1800, 1), globalDistM: 20_000, globalElapsedS: 3600 },
+      ],
+    };
+    const stage3: TimelineStage = {
+      id: "stage-focus-3",
+      name: "Return Stage",
+      dayIndex: 2,
+      stageOrder: 2,
+      activityType: "cycling",
+      color: "#f59e0b",
+      transition: "none",
+      distanceM: 10_000,
+      elevationGainM: 120,
+      movingSeconds: 1800,
+      elapsedSeconds: 1800,
+      hasTimestamps: true,
+      points: [
+        { ...makePoint(0.60, 0.26, 0, 0, 2), globalDistM: 20_000, globalElapsedS: 3600 },
+        { ...makePoint(0.70, 0.29, 10_000, 1800, 2), globalDistM: 30_000, globalElapsedS: 5400 },
+      ],
+    };
+    const multiStages = [stage1, stage2, stage3];
+
+    // 1. follow-marker mode
+    const followSpec = createDefaultRenderSpecV2();
+    followSpec.camera_mode = "follow-marker";
+    followSpec.camera_preset = "flat";
+    followSpec.stage_camera_overrides = {
+      "stage-focus-2": {
+        focus_mode: "street",
+        target_zoom: 15.8,
+        speed_multiplier: 0.45,
+        transition_margin: 0.02,
+      },
+    };
+
+    const { rerender } = render(
+      <TripStageCanvas
+        stages={multiStages}
+        spec={followSpec}
+        progressRatio={0.15}
+        durationS={30}
+        travelDurationS={30}
+        renderMode="deterministic"
+        exactSize={{ width: 1280, height: 720 }}
+      />,
+    );
+
+    const frame = screen.getByTestId("deterministic-map-frame");
+    const zoomInStage1 = Number(frame.getAttribute("data-follow-zoom"));
+    expect(zoomInStage1).toBeLessThan(14.5);
+
+    // Mid-boundary ramp (focusWeight = 0.5)
+    rerender(
+      <TripStageCanvas
+        stages={multiStages}
+        spec={followSpec}
+        progressRatio={1 / 3}
+        durationS={30}
+        travelDurationS={30}
+        renderMode="deterministic"
+        exactSize={{ width: 1280, height: 720 }}
+      />,
+    );
+    const zoomAtBoundary = Number(frame.getAttribute("data-follow-zoom"));
+    expect(zoomAtBoundary).toBeGreaterThan(zoomInStage1);
+    expect(zoomAtBoundary).toBeLessThan(15.8);
+
+    // Full street focus inside stage-focus-2 (focusWeight = 1)
+    rerender(
+      <TripStageCanvas
+        stages={multiStages}
+        spec={followSpec}
+        progressRatio={0.5}
+        durationS={30}
+        travelDurationS={30}
+        renderMode="deterministic"
+        exactSize={{ width: 1280, height: 720 }}
+      />,
+    );
+    const zoomInStage2 = Number(frame.getAttribute("data-follow-zoom"));
+    expect(zoomInStage2).toBeCloseTo(15.8, 3);
+
+    // Back to stage-focus-3 (focusWeight = 0)
+    rerender(
+      <TripStageCanvas
+        stages={multiStages}
+        spec={followSpec}
+        progressRatio={0.85}
+        durationS={30}
+        travelDurationS={30}
+        renderMode="deterministic"
+        exactSize={{ width: 1280, height: 720 }}
+      />,
+    );
+    const zoomInStage3 = Number(frame.getAttribute("data-follow-zoom"));
+    expect(zoomInStage3).toBeLessThan(14.5);
+
+    // Zero bearing jumps across all follow-marker frames
+    for (const call of mockState.jumpToCalls) {
+      if (call.bearing !== undefined) {
+        expect(call.bearing).toBe(0);
+      }
+    }
+
+    // 2. fit-track mode: smoothly zooms in to 15.8 during stage-focus-2 and restores fitCamera (10.5) afterward
+    mockState.jumpToCalls = [];
+    const fitSpec = { ...followSpec, camera_mode: "fit-track" as const };
+
+    rerender(
+      <TripStageCanvas
+        stages={multiStages}
+        spec={fitSpec}
+        progressRatio={0.15}
+        durationS={30}
+        travelDurationS={30}
+        renderMode="deterministic"
+        exactSize={{ width: 1280, height: 720 }}
+      />,
+    );
+    expect(frame.getAttribute("data-follow-zoom")).toBeNull();
+    expect(mockState.zoom).toBeCloseTo(10.5, 3);
+
+    rerender(
+      <TripStageCanvas
+        stages={multiStages}
+        spec={fitSpec}
+        progressRatio={1 / 3}
+        durationS={30}
+        travelDurationS={30}
+        renderMode="deterministic"
+        exactSize={{ width: 1280, height: 720 }}
+      />,
+    );
+    const fitMidZoom = Number(frame.getAttribute("data-follow-zoom"));
+    expect(fitMidZoom).toBeCloseTo((10.5 + 15.8) / 2, 2);
+    expect(mockState.zoom).toBeCloseTo(fitMidZoom, 2);
+
+    rerender(
+      <TripStageCanvas
+        stages={multiStages}
+        spec={fitSpec}
+        progressRatio={0.5}
+        durationS={30}
+        travelDurationS={30}
+        renderMode="deterministic"
+        exactSize={{ width: 1280, height: 720 }}
+      />,
+    );
+    expect(Number(frame.getAttribute("data-follow-zoom"))).toBeCloseTo(15.8, 3);
+    expect(mockState.zoom).toBeCloseTo(15.8, 3);
+
+    // Returning to stage-focus-3 restores fitCamera zoom and clears data-follow-zoom
+    rerender(
+      <TripStageCanvas
+        stages={multiStages}
+        spec={fitSpec}
+        progressRatio={0.85}
+        durationS={30}
+        travelDurationS={30}
+        renderMode="deterministic"
+        exactSize={{ width: 1280, height: 720 }}
+      />,
+    );
+    expect(frame.getAttribute("data-follow-zoom")).toBeNull();
+    expect(mockState.zoom).toBeCloseTo(10.5, 3);
+    for (const call of mockState.jumpToCalls) {
+      if (call.bearing !== undefined) {
+        expect(call.bearing).toBe(0);
+      }
+    }
+  });
+
+  it("fades climb callouts and leader lines in, holds, and removes them after climb_callout_duration_s, while keeping them permanently when duration is 0", () => {
+    const stage = makeStage();
+    const earlyClimb: ClimbHighlightOut = {
+      id: "climb-early",
+      stage_id: "stage-canvas-1",
+      name: "Fictional Early Ridge",
+      category: "Cat 2",
+      start_dist_m: 4000,
+      end_dist_m: 6000,
+      start_progress: 0.2,
+      end_progress: 0.3,
+      summit_progress: 0.3,
+      summit_lat: 0.238,
+      summit_lon: 0.51,
+      summit_elev_m: 1440,
+      distance_m: 2000,
+      elevation_gain_m: 160,
+      avg_grade_pct: 6.5,
+      max_grade_pct: 9.0,
+      fiets_score: 4.5,
+    };
+
+    // Active duration = 20s (intro=0, outro=0), so progress 0.3 => summitTimeS = 6.0s
+    const spec = createDefaultRenderSpecV2();
+    spec.camera_mode = "fit-track";
+    spec.duration_seconds = 20;
+    spec.intro_hold_seconds = 0;
+    spec.outro_hold_seconds = 0;
+    spec.show_climb_callouts = true;
+    spec.climb_callout_duration_s = 4.0;
+
+    // 1. Just after summit (elapsed = 0.05s -> fade-in opacity between 0.25 and 1)
+    const { rerender } = render(
+      <TripStageCanvas
+        stages={[stage]}
+        spec={spec}
+        progressRatio={0.3025}
+        durationS={20}
+        travelDurationS={20}
+        climbs={[earlyClimb]}
+        renderMode="deterministic"
+        exactSize={{ width: 1280, height: 720 }}
+      />,
+    );
+    const fadeInCallout = screen.getByTestId("climb-callout-climb-early");
+    const fadeInLeader = screen.getByTestId("climb-leader-climb-early");
+    const fadeInOpacity = parseFloat(fadeInCallout.style.opacity);
+    expect(fadeInOpacity).toBeGreaterThan(0.25);
+    expect(fadeInOpacity).toBeLessThan(1.0);
+    expect(parseFloat(fadeInLeader.style.opacity)).toBeCloseTo(fadeInOpacity, 2);
+
+    // 2. Mid-hold window (elapsed = 2.0s at p = 0.4 -> full opacity 1.0)
+    rerender(
+      <TripStageCanvas
+        stages={[stage]}
+        spec={spec}
+        progressRatio={0.4}
+        durationS={20}
+        travelDurationS={20}
+        climbs={[earlyClimb]}
+        renderMode="deterministic"
+        exactSize={{ width: 1280, height: 720 }}
+      />,
+    );
+    expect(parseFloat(screen.getByTestId("climb-callout-climb-early").style.opacity)).toBeCloseTo(1, 2);
+
+    // 3. Fade-out window (elapsed = 3.8s at p = 0.49 -> fading out < 1)
+    rerender(
+      <TripStageCanvas
+        stages={[stage]}
+        spec={spec}
+        progressRatio={0.49}
+        durationS={20}
+        travelDurationS={20}
+        climbs={[earlyClimb]}
+        renderMode="deterministic"
+        exactSize={{ width: 1280, height: 720 }}
+      />,
+    );
+    const fadeOutOpacity = parseFloat(screen.getByTestId("climb-callout-climb-early").style.opacity);
+    expect(fadeOutOpacity).toBeGreaterThan(0.01);
+    expect(fadeOutOpacity).toBeLessThan(0.8);
+
+    // 4. Expired after 4.0s (elapsed = 5.0s at p = 0.55 -> removed from DOM and layout solver)
+    rerender(
+      <TripStageCanvas
+        stages={[stage]}
+        spec={spec}
+        progressRatio={0.55}
+        durationS={20}
+        travelDurationS={20}
+        climbs={[earlyClimb]}
+        renderMode="deterministic"
+        exactSize={{ width: 1280, height: 720 }}
+      />,
+    );
+    expect(screen.queryByTestId("climb-callout-climb-early")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("climb-leader-climb-early")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("climb-callout-leaders")).not.toBeInTheDocument();
+
+    // 5. climb_callout_duration_s = 0 -> permanent visibility at p = 0.55 with opacity 1
+    const alwaysSpec = { ...spec, climb_callout_duration_s: 0 };
+    rerender(
+      <TripStageCanvas
+        stages={[stage]}
+        spec={alwaysSpec}
+        progressRatio={0.55}
+        durationS={20}
+        travelDurationS={20}
+        climbs={[earlyClimb]}
+        renderMode="deterministic"
+        exactSize={{ width: 1280, height: 720 }}
+      />,
+    );
+    expect(screen.getByTestId("climb-callout-climb-early")).toBeInTheDocument();
+    expect(screen.getByTestId("climb-leader-climb-early")).toBeInTheDocument();
+    expect(parseFloat(screen.getByTestId("climb-callout-climb-early").style.opacity)).toBeCloseTo(1, 2);
+  });
 });
