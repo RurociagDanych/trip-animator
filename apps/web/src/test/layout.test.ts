@@ -161,8 +161,9 @@ describe("Geo layout & collision solver (layout.ts)", () => {
     expect(Math.abs(eastBearing90.x - 960)).toBeLessThan(2);
   });
 
-  it("deterministically repositions HUD away from colliding follow-marker route when collision_avoidance is true", () => {
-    // Route running directly North (333 km over 20s) so projected points pass upward right through top-center HUD
+  it("keeps HUD anchored at nominal slot during normal follow-marker playback and only repositions if the active marker itself collides", () => {
+    // Route running directly North (333 km over 20s): distant trail crosses top edge,
+    // but the active marker stays centered in the padded safe area.
     const stage = makeLinearStage([
       makePoint(0.4, -1.5, 0, 0),
       makePoint(0.4, 0, 166_500, 16_650),
@@ -174,8 +175,31 @@ describe("Geo layout & collision solver (layout.ts)", () => {
     spec.statistics_panel.collision_avoidance = true;
 
     const evaluated = evaluateTimeline([stage], spec, 0.5);
-    const followCamera = {
+    const centeredFollowCamera = {
       center: evaluated.markerPosition,
+      zoom: 9.5,
+      pitch: 0,
+      bearing: 0,
+    };
+
+    const centeredRun = solveStageLayout({
+      stages: [stage],
+      spec,
+      evaluated,
+      viewportW: 1280,
+      viewportH: 720,
+      compact: false,
+      isPreview: false,
+      hasActivePhoto: false,
+      followCamera: centeredFollowCamera,
+      travelDurationS: 20,
+    });
+    // Marker is safely centered -> HUD must stay anchored at top-center (no false-positive shifting)
+    expect(centeredRun.hud?.slot).toBe("top-center");
+
+    // Offset camera southward so the active marker itself projects right behind the top-center HUD
+    const collidingFollowCamera = {
+      center: [evaluated.markerPosition[0], evaluated.markerPosition[1] - 0.34] as [number, number],
       zoom: 9.5,
       pitch: 0,
       bearing: 0,
@@ -190,7 +214,7 @@ describe("Geo layout & collision solver (layout.ts)", () => {
       compact: false,
       isPreview: false,
       hasActivePhoto: false,
-      followCamera,
+      followCamera: collidingFollowCamera,
       travelDurationS: 20,
     });
     const run2 = solveStageLayout({
@@ -202,13 +226,12 @@ describe("Geo layout & collision solver (layout.ts)", () => {
       compact: false,
       isPreview: false,
       hasActivePhoto: false,
-      followCamera,
+      followCamera: collidingFollowCamera,
       travelDurationS: 20,
     });
 
-    // Pure temporal determinism
+    // Pure determinism + shifts away when active marker actually hits nominal HUD
     expect(run1.hud).toEqual(run2.hud);
-    // Shifted away from top-center because route travels straight through top-center
     expect(run1.hud?.slot).not.toBe("top-center");
 
     // With collision_avoidance disabled, stays at nominal top-center
@@ -225,7 +248,7 @@ describe("Geo layout & collision solver (layout.ts)", () => {
       compact: false,
       isPreview: false,
       hasActivePhoto: false,
-      followCamera,
+      followCamera: collidingFollowCamera,
       travelDurationS: 20,
     });
     expect(disabledRun.hud?.slot).toBe("top-center");

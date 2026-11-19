@@ -5,13 +5,11 @@ import type {
   RenderSpecV2,
   StatisticsPanelConfig,
 } from "../api/types";
-import {
-  clamp01,
-  sampleTimelinePointAtProgress,
-  type ClimbProgressMarker,
-  type ColorLegendStop,
-  type EvaluatedTimelineState,
-  type TimelineStage,
+import type {
+  ClimbProgressMarker,
+  ColorLegendStop,
+  EvaluatedTimelineState,
+  TimelineStage,
 } from "./timeline";
 
 export interface Rect {
@@ -534,7 +532,6 @@ export function solveStageLayout(input: SolveStageLayoutInput): StageLayoutSolut
     isPreview,
     hasActivePhoto,
     followCamera,
-    travelDurationS,
     measuredHudUnscaled,
   } = input;
 
@@ -652,58 +649,44 @@ export function solveStageLayout(input: SolveStageLayoutInput): StageLayoutSolut
     }
   }
 
-  // Resolve HUD placement (Gaussian-smoothed 7-tap temporal window in follow-marker when collision_avoidance is on)
+  // Resolve HUD placement:
+  // In follow-marker mode the camera is centered on the active marker with followPadding
+  // reserving clearance for the nominal HUD edge, so the HUD stays anchored at nominalSlot
+  // unless the active marker itself actually collides with the nominal HUD rect (e.g. under
+  // a custom camera offset or extreme viewport aspect ratio).
   let resolvedHud: StageLayoutSolution["hud"] = nominalHudRect && hudSize
     ? { rect: nominalHudRect, slot: nominalSlot, scale: hudSize.scale }
     : null;
 
   if (
     resolvedHud &&
+    nominalHudRect &&
     hudSize &&
     spec.statistics_panel.collision_avoidance &&
     spec.camera_mode === "follow-marker" &&
     followCamera &&
     stages.some((s) => s.points.length > 0)
   ) {
-    const effDurationS = Math.max(
-      1,
-      travelDurationS ?? (isPreview ? Math.min(spec.duration_seconds, 5) : spec.duration_seconds),
+    const markerScreen = projectLngLatToScreen(
+      evaluated.markerPosition,
+      followCamera.center,
+      followCamera.zoom,
+      followCamera.pitch,
+      followCamera.bearing,
+      safeW,
+      safeH,
+      followPadding,
     );
-    const tapDtP = Math.min(0.03, 0.1 / effDurationS);
-    const tapOffsets = [-3, -2, -1, 0, 1, 2, 3];
-    const tapWeights = [0.06, 0.12, 0.2, 0.24, 0.2, 0.12, 0.06];
-    const candidateSlots = getSlotOrderForPreferred(nominalSlot);
+    const markerMargin = 16;
+    const markerHitsRect = (rect: Rect): boolean =>
+      markerScreen.visible &&
+      markerScreen.x >= rect.x - markerMargin &&
+      markerScreen.x <= rect.x + rect.width + markerMargin &&
+      markerScreen.y >= rect.y - markerMargin &&
+      markerScreen.y <= rect.y + rect.height + markerMargin;
 
-    let sumX = 0;
-    let sumY = 0;
-    let centerSlot: HudSlotId = nominalSlot;
-
-    for (let tIdx = 0; tIdx < tapOffsets.length; tIdx++) {
-      const tapP = clamp01(evaluated.progressRatio + tapOffsets[tIdx]! * tapDtP);
-      // Sample local route window +/- 2.5s around tapP
-      const localHalfP = Math.min(0.15, 2.5 / effDurationS);
-      const projectedPts: { x: number; y: number }[] = [];
-      for (let k = -6; k <= 6; k++) {
-        const q = clamp01(tapP + (k / 6) * localHalfP);
-        const pt = sampleTimelinePointAtProgress(stages, spec, q);
-        if (!pt) continue;
-        const scr = projectLngLatToScreen(
-          [pt.lonUnwrapped, pt.lat],
-          followCamera.center,
-          followCamera.zoom,
-          followCamera.pitch,
-          followCamera.bearing,
-          safeW,
-          safeH,
-          followPadding,
-        );
-        if (scr.visible) {
-          projectedPts.push({ x: scr.x, y: scr.y });
-        }
-      }
-
-      let bestSlot = nominalSlot;
-      let bestScore = Infinity;
+    if (markerHitsRect(nominalHudRect)) {
+      const candidateSlots = getSlotOrderForPreferred(nominalSlot);
       const slotDimensions = (slot: HudSlotId) => {
         const panelPos = slotToPanelPosition(slot);
         if (panelPos === spec.statistics_panel.position) {
@@ -719,42 +702,20 @@ export function solveStageLayout(input: SolveStageLayoutInput): StageLayoutSolut
         );
       };
 
+      let bestSlot: HudSlotId = nominalSlot;
+      let bestDim = hudSize;
+      let bestRect = nominalHudRect;
+      let bestScore = Infinity;
+
       for (let sIdx = 0; sIdx < candidateSlots.length; sIdx++) {
         const slot = candidateSlots[sIdx]!;
         const dim = slotDimensions(slot);
         const rect = slotToRect(slot, dim.width, dim.height, safeW, safeH);
-        const paddedRect: Rect = {
-          x: rect.x - 10,
-          y: rect.y - 10,
-          width: rect.width + 20,
-          height: rect.height + 20,
-        };
 
-        let hitCount = 0;
-        let minDistSq = Infinity;
-        for (const pt of projectedPts) {
-          if (
-            pt.x >= paddedRect.x &&
-            pt.x <= paddedRect.x + paddedRect.width &&
-            pt.y >= paddedRect.y &&
-            pt.y <= paddedRect.y + paddedRect.height
-          ) {
-            hitCount += 1;
-          }
-          const dSq = pointToRectMinDistSq(pt.x, pt.y, rect);
-          if (dSq < minDistSq) {
-            minDistSq = dSq;
-          }
-        }
-
-        let score = hitCount * 1000;
-        if (hitCount === 0 && minDistSq < 400) {
-          score += (400 - minDistSq) * 0.2;
-        }
+        let score = markerHitsRect(rect) ? 10_000 : 0;
         if (watermarkRect && rectsIntersect(rect, watermarkRect, 8)) {
           score += 800;
         }
-        // Hysteresis favoring configured edge/slot
         if (slot !== nominalSlot) {
           const sameEdge = slot.split("-")[0] === nominalSlot.split("-")[0];
           score += sameEdge ? 120 + sIdx * 10 : 240 + sIdx * 10;
@@ -763,40 +724,17 @@ export function solveStageLayout(input: SolveStageLayoutInput): StageLayoutSolut
         if (score < bestScore) {
           bestScore = score;
           bestSlot = slot;
+          bestDim = dim;
+          bestRect = rect;
         }
       }
 
-      const chosenDim = slotDimensions(bestSlot);
-      const chosenRect = slotToRect(bestSlot, chosenDim.width, chosenDim.height, safeW, safeH);
-      sumX += chosenRect.x * tapWeights[tIdx]!;
-      sumY += chosenRect.y * tapWeights[tIdx]!;
-      if (tapOffsets[tIdx] === 0) {
-        centerSlot = bestSlot;
-      }
+      resolvedHud = {
+        rect: clampRectToViewport(bestRect, safeW, safeH, EDGE_MARGIN),
+        slot: bestSlot,
+        scale: bestDim.scale,
+      };
     }
-
-    const finalDim =
-      slotToPanelPosition(centerSlot) === spec.statistics_panel.position
-        ? hudSize
-        : estimateStatisticsHudSize(
-            { ...spec.statistics_panel, position: slotToPanelPosition(centerSlot) },
-            compact,
-            hasActivityChip,
-            safeW,
-            null,
-            safeH,
-          );
-    const smoothedRect = clampRectToViewport(
-      { x: sumX, y: sumY, width: finalDim.width, height: finalDim.height },
-      safeW,
-      safeH,
-      EDGE_MARGIN,
-    );
-    resolvedHud = {
-      rect: smoothedRect,
-      slot: centerSlot,
-      scale: finalDim.scale,
-    };
   }
 
   // Place elevation overlay without colliding with HUD or watermark
