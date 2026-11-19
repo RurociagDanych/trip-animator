@@ -663,3 +663,128 @@ def test_strava_polyline_webhook_queue_render_cache_reaper_and_cli(
         assert st_after is not None
         assert st_after.etl_version == 2
         assert json.dumps(st_after.warnings_json) is not None
+
+
+def test_auto_organize_groups_same_calendar_day_timezone_and_stage_ended_at(
+    make_harness: HarnessFactory,
+) -> None:
+    h = make_harness(rate_limit_gpx_max=50)
+    h.create_user("alice@example.com")
+    alice, csrf = h.login_client("alice@example.com")
+
+    proj_id = alice.post(
+        "/api/v1/projects",
+        json={"title": "Ten Day Multi-Ride Tour"},
+        headers={"X-CSRF-Token": csrf},
+    ).json()["id"]
+
+    # 10 distinct calendar days with 12 activities (days 2 & 7 have 08:00 + 15:30 rides).
+    # Upload out of chronological order to verify strict chronological sorting + same-day grouping.
+    schedule: list[tuple[str, str]] = [
+        ("Day 10 Ride", "2026-07-10T09:00:00Z"),
+        ("Day 2 Afternoon", "2026-07-02T15:30:00Z"),
+        ("Day 1 Ride", "2026-07-01T08:00:00Z"),
+        ("Day 7 Afternoon", "2026-07-07T15:30:00Z"),
+        ("Day 3 Ride", "2026-07-03T08:30:00Z"),
+        ("Day 2 Morning", "2026-07-02T08:00:00Z"),
+        ("Day 5 Ride", "2026-07-05T08:30:00Z"),
+        ("Day 4 Ride", "2026-07-04T08:30:00Z"),
+        ("Day 6 Ride", "2026-07-06T08:30:00Z"),
+        ("Day 7 Morning", "2026-07-07T08:00:00Z"),
+        ("Day 9 Ride", "2026-07-09T08:30:00Z"),
+        ("Day 8 Ride", "2026-07-08T08:30:00Z"),
+    ]
+    uploaded_by_name: dict[str, dict[str, object]] = {}
+    for stage_name, start_iso in schedule:
+        gpx = _make_gpx_with_start(stage_name, start_iso)
+        resp = alice.post(
+            f"/api/v1/projects/{proj_id}/gpx",
+            files={"file": (f"{stage_name}.gpx", gpx, "application/gpx+xml")},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert resp.status_code == 201, resp.text
+        uploaded_by_name[stage_name] = resp.json()
+
+    # Verify StageOut.ended_at equals started_at + elapsed_seconds (4 minutes = 240s)
+    day1_stage = uploaded_by_name["Day 1 Ride"]
+    assert day1_stage["started_at"] == "2026-07-01T08:00:00Z"
+    assert day1_stage["ended_at"] == "2026-07-01T08:04:00Z"
+
+    org = alice.post(
+        f"/api/v1/projects/{proj_id}/stages/auto-organize",
+        json={"overnight_gap_hours": 6.0, "timezone": "UTC"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert org.status_code == 200, org.text
+    stages = org.json()["stages"]
+    assert [s["name"] for s in stages] == [
+        "Day 1 Ride",
+        "Day 2 Morning",
+        "Day 2 Afternoon",
+        "Day 3 Ride",
+        "Day 4 Ride",
+        "Day 5 Ride",
+        "Day 6 Ride",
+        "Day 7 Morning",
+        "Day 7 Afternoon",
+        "Day 8 Ride",
+        "Day 9 Ride",
+        "Day 10 Ride",
+    ]
+    # 10 distinct calendar days -> max day_index is 10, NOT 12
+    assert [s["day_index"] for s in stages] == [1, 2, 2, 3, 4, 5, 6, 7, 7, 8, 9, 10]
+    transitions = org.json()["settings"]["stage_transitions"]
+    # Same-day morning -> afternoon stages must NOT get an overnight transition icon
+    day2_morning_id = str(uploaded_by_name["Day 2 Morning"]["id"])
+    day2_afternoon_id = str(uploaded_by_name["Day 2 Afternoon"]["id"])
+    assert day2_morning_id not in transitions
+    assert transitions[day2_afternoon_id] == "bed"
+
+    # Verify timezone-aware grouping (Europe/Warsaw is UTC+2 in July)
+    tz_proj_id = alice.post(
+        "/api/v1/projects",
+        json={"title": "Warsaw Timezone Tour"},
+        headers={"X-CSRF-Token": csrf},
+    ).json()["id"]
+
+    # Out-of-order upload:
+    # - Late Night: 2026-07-14T22:30:00Z -> Jul 14 in UTC, Jul 15 00:30 in Europe/Warsaw
+    # - Next Afternoon: 2026-07-15T14:00:00Z -> Jul 15 in UTC, Jul 15 16:00 in Europe/Warsaw
+    # - Morning: 2026-07-14T06:00:00Z -> Jul 14 in UTC, Jul 14 08:00 in Europe/Warsaw
+    for stage_name, start_iso in [
+        ("Next Afternoon", "2026-07-15T14:00:00Z"),
+        ("Morning", "2026-07-14T06:00:00Z"),
+        ("Late Night", "2026-07-14T22:30:00Z"),
+    ]:
+        resp = alice.post(
+            f"/api/v1/projects/{tz_proj_id}/gpx",
+            files={
+                "file": (
+                    f"{stage_name}.gpx",
+                    _make_gpx_with_start(stage_name, start_iso),
+                    "application/gpx+xml",
+                )
+            },
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert resp.status_code == 201, resp.text
+
+    org_warsaw = alice.post(
+        f"/api/v1/projects/{tz_proj_id}/stages/auto-organize",
+        json={"timezone": "Europe/Warsaw"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert org_warsaw.status_code == 200, org_warsaw.text
+    warsaw_stages = org_warsaw.json()["stages"]
+    assert [s["name"] for s in warsaw_stages] == ["Morning", "Late Night", "Next Afternoon"]
+    assert [s["day_index"] for s in warsaw_stages] == [1, 2, 2]
+
+    # Invalid timezone cleanly falls back to UTC where Morning + Late Night are both Jul 14
+    org_fallback = alice.post(
+        f"/api/v1/projects/{tz_proj_id}/stages/auto-organize",
+        json={"timezone": "Not/A_Real_Zone"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert org_fallback.status_code == 200, org_fallback.text
+    fallback_stages = org_fallback.json()["stages"]
+    assert [s["day_index"] for s in fallback_stages] == [1, 1, 2]

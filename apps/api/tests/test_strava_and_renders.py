@@ -2172,3 +2172,109 @@ def test_strava_import_all_rate_limit_and_ingest_processing(
             db, user.id, {"project_id": explicit_proj_id}
         )
         assert str(resolved_owned.id) == explicit_proj_id
+
+
+def test_strava_import_rejects_duplicate_activity_in_single_and_batch(
+    make_harness: HarnessFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_public_getaddrinfo)
+    h = make_harness(rate_limit_strava_import_max=20, rate_limit_strava_import_window_s=60)
+    upstream_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal upstream_calls
+        upstream_calls += 1
+        if request.url.path.endswith("/streams"):
+            return httpx.Response(
+                200,
+                json={
+                    "latlng": {"data": [[45.1, 10.1], [45.11, 10.11], [45.12, 10.12]]},
+                    "altitude": {"data": [500.0, 540.0, 590.0]},
+                    "time": {"data": [0, 60, 120]},
+                },
+            )
+        if request.url.path.startswith("/api/v3/activities/"):
+            act_id = request.url.path.rsplit("/", 1)[-1]
+            return httpx.Response(
+                200,
+                json={
+                    "id": int(act_id),
+                    "name": f"Ride {act_id}",
+                    "sport_type": "Ride",
+                    "start_date": "2026-07-14T08:00:00Z",
+                },
+            )
+        return httpx.Response(404)
+
+    h.app.state.http_client_factory = lambda: httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        follow_redirects=False,
+    )
+
+    user = h.create_user("dupstrava@example.com")
+    _seed_strava_connection(h, user.id, athlete_id="777")
+    client, csrf = h.login_client("dupstrava@example.com")
+
+    proj_a = client.post(
+        "/api/v1/projects",
+        json={"title": "Project A"},
+        headers={"X-CSRF-Token": csrf},
+    ).json()["id"]
+    proj_b = client.post(
+        "/api/v1/projects",
+        json={"title": "Project B"},
+        headers={"X-CSRF-Token": csrf},
+    ).json()["id"]
+
+    # First single import succeeds
+    first = client.post(
+        f"/api/v1/projects/{proj_a}/import-strava",
+        json={"activity_id": 5001, "day_index": 1},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert first.status_code == 201, first.text
+    calls_after_first = upstream_calls
+
+    # Duplicate single import into the same project returns 409 before any upstream Strava call
+    dup = client.post(
+        f"/api/v1/projects/{proj_a}/import-strava",
+        json={"activity_id": 5001, "day_index": 1},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert dup.status_code == 409, dup.text
+    assert "already been imported" in dup.json()["detail"].lower()
+    assert upstream_calls == calls_after_first
+
+    # Batch import with an already-imported ID (5001) and a duplicate within the batch (5002 x2)
+    batch = client.post(
+        f"/api/v1/projects/{proj_a}/import-strava/batch",
+        json={
+            "items": [
+                {"activity_id": 5001, "day_index": 1},
+                {"activity_id": 5002, "day_index": 2},
+                {"activity_id": 5002, "day_index": 2},
+            ]
+        },
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert batch.status_code == 200, batch.text
+    batch_json = batch.json()
+    assert [st["strava_activity_id"] for st in batch_json["imported"]] == [5002]
+    assert len(batch_json["failed"]) == 2
+    assert batch_json["failed"][0]["activity_id"] == 5001
+    assert "already been imported" in batch_json["failed"][0]["detail"].lower()
+    assert batch_json["failed"][1]["activity_id"] == 5002
+    assert "duplicate" in batch_json["failed"][1]["detail"].lower()
+
+    # Verify DB only has two Stage rows (5001 and 5002) for Project A
+    proj_a_detail = client.get(f"/api/v1/projects/{proj_a}").json()
+    assert [s["strava_activity_id"] for s in proj_a_detail["stages"]] == [5001, 5002]
+
+    # Importing the same Strava activity into a different project is still allowed
+    other_proj = client.post(
+        f"/api/v1/projects/{proj_b}/import-strava",
+        json={"activity_id": 5001, "day_index": 1},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert other_proj.status_code == 201, other_proj.text

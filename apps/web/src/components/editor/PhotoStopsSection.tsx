@@ -281,10 +281,12 @@ export function PhotoStopsSection({
           accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
           multiple
           className="hidden"
+          onClick={(e) => e.stopPropagation()}
           onChange={(e) => {
             if (e.currentTarget.files && e.currentTarget.files.length > 0) {
-              void handlePhotoFiles(e.currentTarget.files);
+              const selectedFiles = Array.from(e.currentTarget.files);
               e.currentTarget.value = "";
+              void handlePhotoFiles(selectedFiles);
             }
           }}
         />

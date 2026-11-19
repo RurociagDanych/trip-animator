@@ -152,7 +152,8 @@ export function generateExpeditionDocKeyframes(input: DirectorPresetInput): Came
 }
 
 /**
- * Climb Spotlight: speeds up flat valley transfers (2.5x) and slows/zooms into categorized climbs.
+ * Climb Spotlight (legacy preset compatibility): speeds up flat valley transfers (2.5x)
+ * and smoothly slows/zooms into categorized climbs without abrupt preset or bearing jumps.
  */
 export function generateClimbSpotlightKeyframes(input: DirectorPresetInput): CameraKeyframe[] {
   const { stages, spec, climbs = [] } = input;
@@ -166,7 +167,7 @@ export function generateClimbSpotlightKeyframes(input: DirectorPresetInput): Cam
         progress: 0.0,
         camera_mode: "follow-marker",
         camera_preset: "flat",
-        pitch_deg: 24,
+        pitch_deg: 20,
         bearing_offset_deg: 0,
         zoom_offset: -0.4,
         speed_multiplier: 2.5,
@@ -175,28 +176,28 @@ export function generateClimbSpotlightKeyframes(input: DirectorPresetInput): Cam
       {
         progress: Math.max(0.12, peak - 0.16),
         camera_mode: "follow-marker",
-        camera_preset: "dynamic-3d",
-        pitch_deg: 54,
+        camera_preset: "flat",
+        pitch_deg: 36,
         bearing_offset_deg: 0,
-        zoom_offset: 0.9,
+        zoom_offset: 0.65,
         speed_multiplier: 0.65,
         label: "Climb Focus",
       },
       {
         progress: peak,
         camera_mode: "follow-marker",
-        camera_preset: "drone-orbit",
-        pitch_deg: 56,
-        bearing_offset_deg: 45,
-        zoom_offset: 1.2,
+        camera_preset: "flat",
+        pitch_deg: 40,
+        bearing_offset_deg: 0,
+        zoom_offset: 0.9,
         speed_multiplier: 0.55,
-        label: "Summit Orbit",
+        label: "Summit Focus",
       },
       {
         progress: Math.min(0.92, peak + 0.14),
         camera_mode: "follow-marker",
         camera_preset: "flat",
-        pitch_deg: 24,
+        pitch_deg: 20,
         bearing_offset_deg: 0,
         zoom_offset: -0.3,
         speed_multiplier: 2.25,
@@ -215,7 +216,7 @@ export function generateClimbSpotlightKeyframes(input: DirectorPresetInput): Cam
       progress: 0.0,
       camera_mode: "follow-marker",
       camera_preset: "flat",
-      pitch_deg: 22,
+      pitch_deg: 20,
       bearing_offset_deg: 0,
       zoom_offset: -0.5,
       speed_multiplier: 2.5,
@@ -231,20 +232,20 @@ export function generateClimbSpotlightKeyframes(input: DirectorPresetInput): Cam
     keyframes.push({
       progress: startP,
       camera_mode: "follow-marker",
-      camera_preset: "dynamic-3d",
-      pitch_deg: 54,
+      camera_preset: "flat",
+      pitch_deg: 36,
       bearing_offset_deg: 0,
-      zoom_offset: 0.9,
+      zoom_offset: 0.65,
       speed_multiplier: 0.65,
       label: `${climb.category} ${climb.name}`.slice(0, 64),
     });
     keyframes.push({
       progress: summitP,
       camera_mode: "follow-marker",
-      camera_preset: "drone-orbit",
-      pitch_deg: 56,
-      bearing_offset_deg: 40,
-      zoom_offset: 1.15,
+      camera_preset: "flat",
+      pitch_deg: 40,
+      bearing_offset_deg: 0,
+      zoom_offset: 0.9,
       speed_multiplier: 0.55,
       label: `${climb.name} Summit`.slice(0, 64),
     });
@@ -253,7 +254,7 @@ export function generateClimbSpotlightKeyframes(input: DirectorPresetInput): Cam
         progress: Math.min(0.95, endP + 0.02),
         camera_mode: "follow-marker",
         camera_preset: "flat",
-        pitch_deg: 25,
+        pitch_deg: 20,
         bearing_offset_deg: 0,
         zoom_offset: -0.4,
         speed_multiplier: 2.5,

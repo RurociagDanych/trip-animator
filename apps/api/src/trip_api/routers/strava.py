@@ -891,6 +891,18 @@ async def _import_single_strava_activity(
     custom_name: str | None,
     activity_type: ActivityType | None,
 ) -> Stage:
+    existing_stage_id = db.scalar(
+        select(Stage.id).where(
+            Stage.project_id == project.id,
+            Stage.strava_activity_id == activity_id,
+        )
+    )
+    if existing_stage_id is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="This Strava activity has already been imported into this project",
+        )
+
     headers = {"Authorization": f"Bearer {access_token}"}
 
     activity_resp = await _strava_request(
@@ -1056,7 +1068,17 @@ async def import_strava_activities_batch(
 
     imported: list[StageOut] = []
     failed: list[StravaBatchImportFailure] = []
+    seen_activity_ids: set[int] = set()
     for item in body.items:
+        if item.activity_id in seen_activity_ids:
+            failed.append(
+                StravaBatchImportFailure(
+                    activity_id=item.activity_id,
+                    detail="Duplicate Strava activity in batch request",
+                )
+            )
+            continue
+        seen_activity_ids.add(item.activity_id)
         resolved_custom_name = item.name or item.custom_name
         try:
             stage = await _import_single_strava_activity(

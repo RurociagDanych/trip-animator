@@ -151,3 +151,102 @@ export function formatTimeInTimeZone(isoOrDate: Date | string | null | undefined
     }).format(date);
   }
 }
+
+function safeDateTimeFormat(
+  locales: string,
+  options: Intl.DateTimeFormatOptions,
+  timeZone?: string,
+): Intl.DateTimeFormat {
+  if (!timeZone) {
+    return new Intl.DateTimeFormat(locales, options);
+  }
+  try {
+    return new Intl.DateTimeFormat(locales, { ...options, timeZone });
+  } catch {
+    return new Intl.DateTimeFormat(locales, { ...options, timeZone: "UTC" });
+  }
+}
+
+export function formatStageCalendarDate(
+  startedAt?: string | null,
+  timeZone?: string,
+): string | null {
+  if (!startedAt) {
+    return null;
+  }
+  const date = new Date(startedAt);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+  return safeDateTimeFormat(
+    "en-US",
+    { month: "short", day: "numeric", year: "numeric" },
+    timeZone,
+  ).format(date);
+}
+
+export function formatStageTimeWindow(
+  startedAt?: string | null,
+  endedAt?: string | null,
+  elapsedSeconds?: number | null,
+  timeZone?: string,
+): string | null {
+  if (!startedAt) {
+    return null;
+  }
+  const startDate = new Date(startedAt);
+  if (Number.isNaN(startDate.getTime())) {
+    return null;
+  }
+
+  let endDate: Date | null = null;
+  if (endedAt) {
+    const parsedEnd = new Date(endedAt);
+    if (!Number.isNaN(parsedEnd.getTime()) && parsedEnd.getTime() > startDate.getTime()) {
+      endDate = parsedEnd;
+    }
+  }
+  if (
+    endDate === null &&
+    elapsedSeconds !== null &&
+    elapsedSeconds !== undefined &&
+    Number.isFinite(elapsedSeconds) &&
+    elapsedSeconds > 0
+  ) {
+    endDate = new Date(startDate.getTime() + elapsedSeconds * 1000);
+  }
+
+  const timeFmt = safeDateTimeFormat(
+    "en-GB",
+    { hour: "2-digit", minute: "2-digit", hourCycle: "h23" },
+    timeZone,
+  );
+  const fullDateFmt = safeDateTimeFormat(
+    "en-US",
+    { month: "short", day: "numeric", year: "numeric" },
+    timeZone,
+  );
+  const startTime = timeFmt.format(startDate);
+
+  if (!endDate) {
+    return `${fullDateFmt.format(startDate)} · ${startTime}`;
+  }
+
+  const dayKeyFmt = safeDateTimeFormat(
+    "en-CA",
+    { year: "numeric", month: "2-digit", day: "2-digit" },
+    timeZone,
+  );
+  const endTime = timeFmt.format(endDate);
+
+  if (dayKeyFmt.format(startDate) === dayKeyFmt.format(endDate)) {
+    return `${fullDateFmt.format(startDate)} · ${startTime} – ${endTime}`;
+  }
+
+  const shortDateFmt = safeDateTimeFormat(
+    "en-US",
+    { month: "short", day: "numeric" },
+    timeZone,
+  );
+  return `${shortDateFmt.format(startDate)} ${startTime} – ${shortDateFmt.format(endDate)} ${endTime}`;
+}

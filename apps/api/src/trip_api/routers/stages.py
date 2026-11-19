@@ -6,9 +6,10 @@ import asyncio
 import logging
 import tempfile
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, tzinfo
 from pathlib import Path
 from typing import Annotated, cast
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import polars as pl
 from fastapi import APIRouter, Body, File, Form, HTTPException, Request, Response, UploadFile
@@ -556,6 +557,18 @@ def reorder_stages(
     return [stage_to_out(s) for s in ordered]
 
 
+def _resolve_timezone(tz_name: str | None) -> tzinfo:
+    if not tz_name:
+        return UTC
+    cleaned = tz_name.strip()
+    if not cleaned:
+        return UTC
+    try:
+        return ZoneInfo(cleaned)
+    except (ZoneInfoNotFoundError, ValueError, KeyError):
+        return UTC
+
+
 @router.post("/stages/auto-organize", response_model=ProjectDetailOut)
 def auto_organize_stages(
     project_id: uuid.UUID,
@@ -564,7 +577,7 @@ def auto_organize_stages(
     store: StoreDep,
     body: Annotated[StageAutoOrganizeRequest | None, Body()] = None,
 ) -> ProjectDetailOut:
-    """Sort stages chronologically, cluster day_index across overnight gaps, and apply palette."""
+    """Sort stages chronologically, group day_index by local calendar date, and apply palette."""
     opts = body or StageAutoOrganizeRequest()
     project = get_owned_project(db, project_id, auth.user.id)
     stages = get_project_stages(db, project.id)
@@ -578,19 +591,21 @@ def auto_organize_stages(
         )
     )
 
-    gap_seconds = opts.overnight_gap_hours * 3600.0
+    target_tz = _resolve_timezone(opts.timezone)
     current_day = 1
-    prev_ts: datetime | None = None
+    prev_local_date: date | None = None
     for idx, stage in enumerate(stages):
         stage.stage_order = idx
-        curr_ts = ensure_utc(stage.started_at) if stage.started_at is not None else None
-        if idx > 0 and curr_ts is not None and prev_ts is not None:
-            gap_hit = (curr_ts - prev_ts).total_seconds() >= gap_seconds
-            if curr_ts.date() > prev_ts.date() or gap_hit:
+        curr_local_date = (
+            ensure_utc(stage.started_at).astimezone(target_tz).date()
+            if stage.started_at is not None
+            else None
+        )
+        if curr_local_date is not None:
+            if prev_local_date is not None and curr_local_date > prev_local_date:
                 current_day = min(current_day + 1, 365)
+            prev_local_date = curr_local_date
         stage.day_index = current_day
-        if curr_ts is not None:
-            prev_ts = curr_ts
 
     palette = _PALETTES[opts.palette_preset]
     settings_copy = dict(project.settings_json or {})

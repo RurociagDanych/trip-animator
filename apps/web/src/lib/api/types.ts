@@ -234,6 +234,7 @@ export interface StageOut {
   trim_start_s: number | null;
   trim_end_s: number | null;
   started_at: string | null;
+  ended_at?: string | null;
   point_count: number;
   distance_m: number;
   elevation_gain_m: number;
@@ -285,6 +286,7 @@ export interface PublicStageOut {
   trim_start_s: number | null;
   trim_end_s: number | null;
   started_at: string | null;
+  ended_at?: string | null;
   point_count: number;
   distance_m: number;
   elevation_gain_m: number;
@@ -490,6 +492,7 @@ export interface StageAutoOrganizeRequest {
   overnight_gap_hours?: number;
   palette_preset?: PalettePreset;
   assign_overnight_icons?: boolean;
+  timezone?: string;
 }
 
 export type StageAutoOrganizeOut = ProjectDetailOut;

@@ -4,6 +4,7 @@ import {
   ArrowDown,
   ArrowUp,
   BedDouble,
+  Calendar,
   CheckCircle2,
   ChevronDown,
   ChevronLeft,
@@ -32,7 +33,12 @@ import type {
   StageOut,
   TransitionIcon,
 } from "../../lib/api/types";
-import { formatDistance, formatElevation } from "../../lib/geo/format";
+import {
+  formatDistance,
+  formatElevation,
+  formatStageCalendarDate,
+  formatStageTimeWindow,
+} from "../../lib/geo/format";
 import type { MatchedPhoto } from "../../lib/geo/photos";
 import type { SidebarTab } from "../../lib/state/editor-store";
 import { PhotoStopsSection } from "./PhotoStopsSection";
@@ -144,6 +150,7 @@ export function StageSidebar({
   const [warningsExpanded, setWarningsExpanded] = useState(false);
   const [collapsedDays, setCollapsedDays] = useState<Record<number, boolean>>({});
   const [palettePreset, setPalettePreset] = useState<PalettePreset>("alpine-dawn");
+  const [confirmDeleteStageId, setConfirmDeleteStageId] = useState<string | null>(null);
 
   const selectedStage = useMemo(
     () => stages.find((s) => s.id === selectedStageId) ?? null,
@@ -263,9 +270,14 @@ export function StageSidebar({
     setBusyAction("auto-organize");
     setActionError(null);
     try {
+      const resolvedTimeZone =
+        typeof Intl !== "undefined"
+          ? Intl.DateTimeFormat().resolvedOptions().timeZone || undefined
+          : undefined;
       await stagesApi.autoOrganize(projectId, {
         palette_preset: palettePreset,
         assign_overnight_icons: true,
+        ...(resolvedTimeZone ? { timezone: resolvedTimeZone } : {}),
       });
       await onStagesMutated();
     } catch (err) {
@@ -435,6 +447,7 @@ export function StageSidebar({
   }
 
   async function handleDeleteStage(stageId: string) {
+    setConfirmDeleteStageId(null);
     setBusyAction(`delete-${stageId}`);
     setActionError(null);
     try {
@@ -539,10 +552,12 @@ export function StageSidebar({
                   accept=".gpx,.fit,.tcx,application/gpx+xml,application/octet-stream,application/vnd.garmin.tcx+xml"
                   multiple
                   className="hidden"
+                  onClick={(e) => e.stopPropagation()}
                   onChange={(e) => {
                     if (e.currentTarget.files && e.currentTarget.files.length > 0) {
-                      void handleTrackFiles(e.currentTarget.files);
+                      const selectedFiles = Array.from(e.currentTarget.files);
                       e.currentTarget.value = "";
+                      void handleTrackFiles(selectedFiles);
                     }
                   }}
                 />
@@ -723,6 +738,9 @@ export function StageSidebar({
                 {groupedByDay.map(([dayNum, dayStages]) => {
                   const isCollapsed = Boolean(collapsedDays[dayNum]);
                   const dayDistM = dayStages.reduce((acc, s) => acc + s.distance_m, 0);
+                  const firstStartedAt =
+                    dayStages.find((s) => Boolean(s.started_at))?.started_at ?? null;
+                  const dayDateLabel = formatStageCalendarDate(firstStartedAt);
                   return (
                     <div key={dayNum} className="space-y-1.5">
                       <button
@@ -731,17 +749,25 @@ export function StageSidebar({
                         onClick={() =>
                           setCollapsedDays((prev) => ({ ...prev, [dayNum]: !prev[dayNum] }))
                         }
-                        className="flex w-full items-center justify-between rounded px-1 py-0.5 text-[11px] font-medium text-ink-muted hover:bg-elevated/60 hover:text-ink"
+                        className="flex w-full items-center justify-between gap-2 rounded px-1 py-0.5 text-[11px] font-medium text-ink-muted hover:bg-elevated/60 hover:text-ink"
                       >
-                        <span className="inline-flex items-center gap-1">
+                        <span className="inline-flex min-w-0 items-center gap-1">
                           {isCollapsed ? (
-                            <ChevronRight className="h-3 w-3" aria-hidden="true" />
+                            <ChevronRight className="h-3 w-3 shrink-0" aria-hidden="true" />
                           ) : (
-                            <ChevronDown className="h-3 w-3" aria-hidden="true" />
+                            <ChevronDown className="h-3 w-3 shrink-0" aria-hidden="true" />
                           )}
-                          <span>Day {dayNum}</span>
+                          <span className="shrink-0">Day {dayNum}</span>
+                          {dayDateLabel ? (
+                            <span
+                              data-testid={`day-${dayNum}-date`}
+                              className="tabular-telemetry truncate font-normal text-ink-muted/80"
+                            >
+                              · {dayDateLabel}
+                            </span>
+                          ) : null}
                         </span>
-                        <span className="tabular-telemetry">
+                        <span className="tabular-telemetry shrink-0">
                           {dayStages.length} stage{dayStages.length > 1 ? "s" : ""} •{" "}
                           {formatDistance(dayDistM, spec.units)}
                         </span>
@@ -754,6 +780,15 @@ export function StageSidebar({
                             const colorHex = spec.stage_colors[stage.id] ?? spec.track_color;
                             const transitionIcon = spec.stage_transitions[stage.id] ?? "none";
                             const visualIdx = visualIndexById.get(stage.id) ?? 0;
+                            const stageDurationS =
+                              stage.elapsed_seconds > 0
+                                ? stage.elapsed_seconds
+                                : stage.moving_seconds;
+                            const timeWindow = formatStageTimeWindow(
+                              stage.started_at,
+                              stage.ended_at,
+                              stageDurationS,
+                            );
 
                             return (
                               <li
@@ -810,6 +845,19 @@ export function StageSidebar({
                                       </div>
                                     </div>
 
+                                    {timeWindow ? (
+                                      <div
+                                        data-testid="stage-date-range"
+                                        className="tabular-telemetry mt-1 flex items-center gap-1 text-[11px] text-ink-muted"
+                                      >
+                                        <Calendar
+                                          className="h-3 w-3 shrink-0 text-ink-muted/75"
+                                          aria-hidden="true"
+                                        />
+                                        <span className="truncate">{timeWindow}</span>
+                                      </div>
+                                    ) : null}
+
                                     <div className="tabular-telemetry mt-1.5 flex items-center gap-2.5 text-[11px] text-ink-muted">
                                       <span>{formatDistance(stage.distance_m, spec.units)}</span>
                                       <span>+{formatElevation(stage.elevation_gain_m, spec.units)}</span>
@@ -827,7 +875,10 @@ export function StageSidebar({
                                       type="button"
                                       aria-label={`Move ${stage.name} up`}
                                       disabled={visualIdx === 0 || busyAction !== null}
-                                      onClick={() => void moveStage(stage.id, -1)}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        void moveStage(stage.id, -1);
+                                      }}
                                       className="rounded p-0.5 text-ink-muted hover:bg-surface hover:text-ink disabled:opacity-30"
                                     >
                                       <ArrowUp className="h-3 w-3" aria-hidden="true" />
@@ -836,11 +887,56 @@ export function StageSidebar({
                                       type="button"
                                       aria-label={`Move ${stage.name} down`}
                                       disabled={visualIdx === visualStages.length - 1 || busyAction !== null}
-                                      onClick={() => void moveStage(stage.id, 1)}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        void moveStage(stage.id, 1);
+                                      }}
                                       className="rounded p-0.5 text-ink-muted hover:bg-surface hover:text-ink disabled:opacity-30"
                                     >
                                       <ArrowDown className="h-3 w-3" aria-hidden="true" />
                                     </button>
+                                    {confirmDeleteStageId === stage.id ? (
+                                      <button
+                                        type="button"
+                                        aria-label={`Confirm delete ${stage.name}`}
+                                        title={`Click again to confirm deleting ${stage.name}`}
+                                        data-testid={`quick-delete-stage-${stage.id}`}
+                                        disabled={busyAction !== null}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          void handleDeleteStage(stage.id);
+                                        }}
+                                        onBlur={() =>
+                                          setConfirmDeleteStageId((cur) =>
+                                            cur === stage.id ? null : cur,
+                                          )
+                                        }
+                                        onKeyDown={(e) => {
+                                          if (e.key === "Escape") {
+                                            e.stopPropagation();
+                                            setConfirmDeleteStageId(null);
+                                          }
+                                        }}
+                                        className="rounded bg-coral-accent p-0.5 text-canvas hover:bg-coral-accent/90 focus:outline-none focus:ring-1 focus:ring-coral-accent disabled:opacity-30"
+                                      >
+                                        <Trash2 className="h-3 w-3" aria-hidden="true" />
+                                      </button>
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        aria-label={`Delete ${stage.name}`}
+                                        title={`Delete ${stage.name}`}
+                                        data-testid={`quick-delete-stage-${stage.id}`}
+                                        disabled={busyAction !== null}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setConfirmDeleteStageId(stage.id);
+                                        }}
+                                        className="rounded p-0.5 text-ink-muted hover:bg-coral-accent/15 hover:text-coral-accent disabled:opacity-30"
+                                      >
+                                        <Trash2 className="h-3 w-3" aria-hidden="true" />
+                                      </button>
+                                    )}
                                   </div>
                                 </div>
                               </li>

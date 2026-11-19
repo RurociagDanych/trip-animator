@@ -173,7 +173,15 @@ export function StravaPickerModal({
       });
       onImported(stage);
     },
-    onError: (err) => {
+    onError: (err, activity) => {
+      if (err instanceof ApiError && err.status === 409) {
+        setImportedIds((prev) => ({ ...prev, [activity.id]: true }));
+        setSelectedIds((prev) => {
+          const next = { ...prev };
+          delete next[activity.id];
+          return next;
+        });
+      }
       setImportError(err instanceof ApiError ? err.message : "Failed to import Strava activity.");
     },
     onSettled: () => {
@@ -818,9 +826,12 @@ export function StravaPickerModal({
                           <span className="shrink-0 rounded border border-border bg-elevated px-1.5 py-0.5 text-[10px] text-ink-muted">
                             {act.sport_type}
                           </span>
-                          {alreadyInTrip ? (
-                            <span className="shrink-0 rounded border border-teal-accent/40 bg-teal-accent/10 px-1.5 py-0.5 text-[10px] font-medium text-teal-accent">
-                              Already in trip
+                          {alreadyInTrip || isImported ? (
+                            <span
+                              data-testid={`strava-imported-badge-${act.id}`}
+                              className="shrink-0 rounded border border-teal-accent/40 bg-teal-accent/10 px-1.5 py-0.5 text-[10px] font-medium text-teal-accent"
+                            >
+                              {alreadyInTrip ? "Already in trip" : "Imported"}
                             </span>
                           ) : null}
                         </div>

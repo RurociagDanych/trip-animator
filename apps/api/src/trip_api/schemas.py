@@ -126,6 +126,7 @@ class StageOut(BaseModel):
     trim_start_s: float | None = None
     trim_end_s: float | None = None
     started_at: datetime | None = None
+    ended_at: datetime | None = None
     point_count: int
     distance_m: float
     elevation_gain_m: float
@@ -168,6 +169,7 @@ class StageAutoOrganizeRequest(BaseModel):
     overnight_gap_hours: float = Field(default=6.0, gt=0.0, le=168.0, allow_inf_nan=False)
     palette_preset: PalettePreset = "alpine-dawn"
     assign_overnight_icons: bool = True
+    timezone: str | None = Field(default=None, max_length=64)
 
 
 class ProjectCreateRequest(BaseModel):
@@ -221,6 +223,7 @@ class PublicStageOut(BaseModel):
     trim_start_s: float | None = None
     trim_end_s: float | None = None
     started_at: datetime | None = None
+    ended_at: datetime | None = None
     point_count: int
     distance_m: float
     elevation_gain_m: float

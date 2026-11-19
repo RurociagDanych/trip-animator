@@ -51,7 +51,6 @@ const DIRECTOR_PRESETS: readonly {
 }[] = [
   { id: "none", label: "Manual", hint: "Custom static / manual cues" },
   { id: "expedition-doc", label: "Expedition Doc", hint: "Fly-in, 3D chase, summit orbit" },
-  { id: "climb-spotlight", label: "Climb Spotlight", hint: "2.5× valleys, slow on climbs" },
   { id: "social-reel", label: "Social Reel", hint: "Punchy fast-paced orbit cuts" },
 ];
 
@@ -769,7 +768,7 @@ export function InspectorPanel({
                   </button>
                 ) : null}
               </div>
-              <div className="grid grid-cols-2 gap-1.5" role="group" aria-label="Director presets">
+              <div className="grid grid-cols-3 gap-1.5" role="group" aria-label="Director presets">
                 {DIRECTOR_PRESETS.map((preset) => {
                   const active = spec.director_preset === preset.id;
                   return (

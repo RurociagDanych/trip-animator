@@ -10,7 +10,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal, cast
 
@@ -148,11 +148,24 @@ def _normalize_stage_format(raw: str | None, source_type: str) -> StageFormat:
     return "strava" if source_type == "strava" else "gpx"
 
 
+def _compute_stage_ended_at(stage: Stage, started_at: datetime | None) -> datetime | None:
+    if started_at is None:
+        return None
+    elapsed = float(stage.elapsed_seconds or 0.0)
+    moving = float(stage.moving_seconds or 0.0)
+    duration_s = elapsed if elapsed > 0 else (moving if moving > 0 else 0.0)
+    if duration_s <= 0:
+        return None
+    return started_at + timedelta(seconds=duration_s)
+
+
 def stage_to_out(stage: Stage) -> StageOut:
     source_type = cast(Literal["gpx", "strava"], stage.source_type)
     source_format = _normalize_stage_format(getattr(stage, "source_format", None), source_type)
     etl_version = int(getattr(stage, "etl_version", 1) or 1)
     activity_type = normalize_activity_type(stage.activity_type, DEFAULT_ACTIVITY_TYPE)
+    started_at = ensure_utc(stage.started_at) if stage.started_at else None
+    ended_at = _compute_stage_ended_at(stage, started_at)
     return StageOut(
         id=stage.id,
         project_id=stage.project_id,
@@ -167,7 +180,8 @@ def stage_to_out(stage: Stage) -> StageOut:
         day_index=stage.day_index,
         trim_start_s=stage.trim_start_s,
         trim_end_s=stage.trim_end_s,
-        started_at=ensure_utc(stage.started_at) if stage.started_at else None,
+        started_at=started_at,
+        ended_at=ended_at,
         point_count=stage.point_count,
         distance_m=stage.distance_m,
         elevation_gain_m=stage.elevation_gain_m,
@@ -189,6 +203,8 @@ def public_stage_to_out(stage: Stage) -> PublicStageOut:
     source_type = cast(Literal["gpx", "strava"], stage.source_type)
     source_format = _normalize_stage_format(getattr(stage, "source_format", None), source_type)
     activity_type = normalize_activity_type(stage.activity_type, DEFAULT_ACTIVITY_TYPE)
+    started_at = ensure_utc(stage.started_at) if stage.started_at else None
+    ended_at = _compute_stage_ended_at(stage, started_at)
     return PublicStageOut(
         id=stage.id,
         project_id=stage.project_id,
@@ -200,7 +216,8 @@ def public_stage_to_out(stage: Stage) -> PublicStageOut:
         day_index=stage.day_index,
         trim_start_s=stage.trim_start_s,
         trim_end_s=stage.trim_end_s,
-        started_at=ensure_utc(stage.started_at) if stage.started_at else None,
+        started_at=started_at,
+        ended_at=ended_at,
         point_count=stage.point_count,
         distance_m=stage.distance_m,
         elevation_gain_m=stage.elevation_gain_m,
