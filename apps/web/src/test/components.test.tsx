@@ -16,9 +16,12 @@ import { StatisticsHud } from "../components/stage/StatisticsHud";
 import {
   ALL_STATISTIC_METRICS,
   createDefaultRenderSpecV2,
+  type StageCameraOverride,
   type StageOut,
 } from "../lib/api/types";
+import { computeStageProgressSpans } from "../lib/geo/camera";
 import type { EvaluatedTimelineState } from "../lib/geo/timeline";
+import { useEditorStore } from "../lib/state/editor-store";
 
 function makeQueryClient() {
   return new QueryClient({
@@ -265,6 +268,301 @@ describe("Component tests: InspectorPanel, StageSidebar, ExportPanel, Statistics
       await waitFor(() => {
         expect(onStagesUpdated).toHaveBeenCalledTimes(2);
       });
+    });
+
+    it("supports quick pace chips (0.05x to 2x) and 0.05x slider minimum in StageSidebar", async () => {
+      const stage = makeStage({ id: "stage-pace", name: "Downtown Section" });
+      const spec = createDefaultRenderSpecV2();
+      spec.stage_camera_overrides = {
+        "stage-pace": {
+          focus_mode: "custom",
+          target_zoom: 15.8,
+          speed_multiplier: 0.25,
+          transition_margin: 0.02,
+        },
+      };
+      const onOverrideChange = vi.fn<
+        (stageId: string, override: StageCameraOverride | null) => void
+      >();
+
+      const rootRoute = createRootRoute({
+        component: () => (
+          <StageSidebar
+            projectId="proj-1"
+            stages={[stage]}
+            selectedStageId={stage.id}
+            spec={spec}
+            stravaConnected={false}
+            onSelectStage={vi.fn()}
+            onStageColorChange={vi.fn()}
+            onStageTransitionChange={vi.fn()}
+            onStageCameraOverrideChange={onOverrideChange}
+            onStagesMutated={vi.fn()}
+            onOpenStravaModal={vi.fn()}
+          />
+        ),
+      });
+      const router = createRouter({
+        routeTree: rootRoute,
+        history: createMemoryHistory({ initialEntries: ["/"] }),
+      });
+
+      render(<RouterProvider router={router} />);
+
+      const speedSlider = (await screen.findByLabelText(
+        "Stage playback speed",
+      )) as HTMLInputElement;
+      expect(speedSlider.min).toBe("0.05");
+      expect(speedSlider.max).toBe("3");
+      expect(speedSlider.step).toBe("0.05");
+
+      const expectedPaces = [0.05, 0.1, 0.25, 0.5, 1, 2] as const;
+      for (const pace of expectedPaces) {
+        const chip = screen.getByTestId(`stage-pace-chip-${pace}`);
+        expect(chip).toHaveTextContent(`${pace}×`);
+        expect(chip).toHaveAttribute("aria-pressed", pace === 0.25 ? "true" : "false");
+      }
+
+      fireEvent.click(screen.getByTestId("stage-pace-chip-0.05"));
+      expect(onOverrideChange).toHaveBeenCalledWith("stage-pace", {
+        focus_mode: "custom",
+        target_zoom: 15.8,
+        speed_multiplier: 0.05,
+        transition_margin: 0.02,
+      });
+
+      fireEvent.click(screen.getByTestId("stage-pace-chip-2"));
+      expect(onOverrideChange).toHaveBeenCalledWith("stage-pace", {
+        focus_mode: "custom",
+        target_zoom: 15.8,
+        speed_multiplier: 2,
+        transition_margin: 0.02,
+      });
+    });
+
+    it("splits a stage with slider readout, playhead snapping, other-stage notice, custom names, and Part 2 selection", async () => {
+      useEditorStore.getState().resetEditor();
+      const stage1 = makeStage({
+        id: "stage-1",
+        name: "Alpine Pass",
+        stage_order: 0,
+        distance_m: 20_000,
+        point_count: 120,
+      });
+      const stage2 = makeStage({
+        id: "stage-2",
+        name: "Valley Roll",
+        stage_order: 1,
+        distance_m: 20_000,
+        point_count: 100,
+      });
+      const part1 = makeStage({
+        id: "stage-1-p1",
+        name: "Climb Start",
+        stage_order: 0,
+        distance_m: 12_000,
+      });
+      const part2 = makeStage({
+        id: "stage-1-p2",
+        name: "Town Finish",
+        stage_order: 1,
+        distance_m: 8_000,
+      });
+
+      const spec = createDefaultRenderSpecV2();
+      spec.duration_seconds = 20;
+      spec.intro_hold_seconds = 0;
+      spec.outro_hold_seconds = 0;
+
+      const onSelectStage = vi.fn();
+      const onStagesMutated = vi.fn(async () => {});
+
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
+        if (url.endsWith("/api/v1/projects/proj-1/stages/stage-1/split") && init?.method === "POST") {
+          return new Response(
+            JSON.stringify({
+              part1,
+              part2,
+              stages: [part1, part2, { ...stage2, stage_order: 2 }],
+              revision: 4,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response(JSON.stringify({}), { status: 200 });
+      });
+
+      const rootRoute = createRootRoute({
+        component: () => (
+          <StageSidebar
+            projectId="proj-1"
+            stages={[stage1, stage2]}
+            selectedStageId={stage1.id}
+            spec={spec}
+            stravaConnected={false}
+            onSelectStage={onSelectStage}
+            onStageColorChange={vi.fn()}
+            onStageTransitionChange={vi.fn()}
+            onStagesMutated={onStagesMutated}
+            onOpenStravaModal={vi.fn()}
+          />
+        ),
+      });
+      const router = createRouter({
+        routeTree: rootRoute,
+        history: createMemoryHistory({ initialEntries: ["/"] }),
+      });
+
+      render(<RouterProvider router={router} />);
+
+      const splitSection = await screen.findByTestId("stage-split-section");
+      expect(splitSection).toBeInTheDocument();
+
+      // Default 50% readout
+      const readout = screen.getByTestId("stage-split-readout");
+      expect(readout).toHaveTextContent("Part 1: 10.0 km · Part 2: 10.0 km");
+
+      // Playhead on stage-2 (currentTimeRatio = 0.75 -> progress = 0.75, stage-1 span is [0, 0.5])
+      useEditorStore.getState().setCurrentTimeRatio(0.75);
+      fireEvent.click(screen.getByTestId("stage-split-use-playhead"));
+      expect(screen.getByTestId("stage-split-playhead-notice")).toHaveTextContent(
+        "Playhead is currently on another stage.",
+      );
+
+      // Playhead inside stage-1 at 60% of stage-1 -> global progress = 0.30 -> 12,000 m
+      useEditorStore.getState().setCurrentTimeRatio(0.3);
+      fireEvent.click(screen.getByTestId("stage-split-use-playhead"));
+      expect(screen.queryByTestId("stage-split-playhead-notice")).not.toBeInTheDocument();
+      expect((screen.getByTestId("stage-split-slider") as HTMLInputElement).value).toBe("12000");
+      expect(readout).toHaveTextContent("Part 1: 12.0 km · Part 2: 8.0 km");
+
+      // Adjust slider manually
+      fireEvent.change(screen.getByTestId("stage-split-slider"), { target: { value: "14500" } });
+      expect(readout).toHaveTextContent("Part 1: 14.5 km · Part 2: 5.5 km");
+
+      // Default and customized Part 1 / Part 2 names
+      const p1Input = screen.getByLabelText("Part 1 stage name") as HTMLInputElement;
+      const p2Input = screen.getByLabelText("Part 2 stage name") as HTMLInputElement;
+      expect(p1Input.value).toBe("Alpine Pass (Part 1)");
+      expect(p2Input.value).toBe("Alpine Pass (Part 2)");
+
+      // Recorded-time mode uses elapsed_seconds when snapping playhead across unequal-speed stages
+      const fastStage = makeStage({
+        id: "stage-fast",
+        name: "Fast Stage",
+        stage_order: 0,
+        distance_m: 10_000,
+        elapsed_seconds: 1000,
+        has_timestamps: true,
+      });
+      const slowStage = makeStage({
+        id: "stage-slow",
+        name: "Slow Stage",
+        stage_order: 1,
+        distance_m: 10_000,
+        elapsed_seconds: 3000,
+        has_timestamps: true,
+      });
+      const recordedTimeSpec = { ...spec, timeline_mode: "recorded-time" as const };
+      const spansRecorded = computeStageProgressSpans(
+        [fastStage, slowStage].map((s) => ({
+          id: s.id,
+          name: s.name,
+          dayIndex: s.day_index,
+          stageOrder: s.stage_order,
+          activityType: "cycling" as const,
+          color: "#38bdf8",
+          transition: "none" as const,
+          distanceM: s.distance_m,
+          elevationGainM: s.elevation_gain_m,
+          movingSeconds: s.moving_seconds,
+          elapsedSeconds: s.elapsed_seconds,
+          hasTimestamps: s.has_timestamps,
+          points: [],
+        })),
+        recordedTimeSpec,
+      );
+      expect(spansRecorded[0]!.endProgress).toBeCloseTo(0.25, 6);
+      expect(spansRecorded[1]!.startProgress).toBeCloseTo(0.25, 6);
+
+      fireEvent.change(p1Input, { target: { value: "Climb Start" } });
+      fireEvent.change(p2Input, { target: { value: "Town Finish" } });
+
+      // Submit split
+      fireEvent.click(screen.getByTestId("stage-split-submit"));
+
+      await waitFor(() => {
+        expect(onStagesMutated).toHaveBeenCalledTimes(1);
+      });
+
+      const splitCall = fetchSpy.mock.calls.find(
+        ([u, req]) =>
+          String(u).endsWith("/api/v1/projects/proj-1/stages/stage-1/split") &&
+          req?.method === "POST",
+      );
+      expect(splitCall).toBeDefined();
+      expect(JSON.parse(String(splitCall?.[1]?.body))).toEqual({
+        split_distance_m: 14500,
+        part1_name: "Climb Start",
+        part2_name: "Town Finish",
+      });
+      expect(onSelectStage).toHaveBeenCalledWith("stage-1-p2");
+      expect(onSelectStage).toHaveBeenCalledTimes(2);
+      useEditorStore.getState().resetEditor();
+    });
+
+    it("disables Split stage button when point_count < 4 and displays API error on split failure", async () => {
+      const tinyStage = makeStage({ id: "stage-tiny", point_count: 3, distance_m: 500 });
+      const normalStage = makeStage({ id: "stage-err", point_count: 20, distance_m: 5000 });
+      const spec = createDefaultRenderSpecV2();
+
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
+        if (url.includes("/split") && init?.method === "POST") {
+          return new Response(JSON.stringify({ detail: "Stage cannot be split at boundary" }), {
+            status: 422,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({}), { status: 200 });
+      });
+
+      const renderWithSelected = (stage: StageOut) => {
+        const rootRoute = createRootRoute({
+          component: () => (
+            <StageSidebar
+              projectId="proj-1"
+              stages={[stage]}
+              selectedStageId={stage.id}
+              spec={spec}
+              stravaConnected={false}
+              onSelectStage={vi.fn()}
+              onStageColorChange={vi.fn()}
+              onStageTransitionChange={vi.fn()}
+              onStagesMutated={vi.fn()}
+              onOpenStravaModal={vi.fn()}
+            />
+          ),
+        });
+        const router = createRouter({
+          routeTree: rootRoute,
+          history: createMemoryHistory({ initialEntries: ["/"] }),
+        });
+        return render(<RouterProvider router={router} />);
+      };
+
+      const tinyRender = renderWithSelected(tinyStage);
+      expect(await screen.findByTestId("stage-split-submit")).toBeDisabled();
+      tinyRender.unmount();
+
+      renderWithSelected(normalStage);
+      const submitBtn = await screen.findByTestId("stage-split-submit");
+      expect(submitBtn).toBeEnabled();
+      fireEvent.click(submitBtn);
+      expect(await screen.findByTestId("stage-split-error")).toHaveTextContent(
+        "Stage cannot be split at boundary",
+      );
     });
   });
 

@@ -174,6 +174,28 @@ class StageReorderRequest(BaseModel):
     day_indices: dict[uuid.UUID, int] | None = None
 
 
+class StageSplitRequest(BaseModel):
+    split_distance_m: float | None = Field(default=None, gt=0.0, allow_inf_nan=False)
+    split_elapsed_s: float | None = Field(default=None, gt=0.0, allow_inf_nan=False)
+    part1_name: str | None = Field(default=None, max_length=200)
+    part2_name: str | None = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def validate_single_split_axis(self) -> StageSplitRequest:
+        has_distance = self.split_distance_m is not None
+        has_elapsed = self.split_elapsed_s is not None
+        if has_distance == has_elapsed:
+            raise ValueError("Provide exactly one of split_distance_m or split_elapsed_s")
+        return self
+
+
+class StageSplitOut(BaseModel):
+    part1: StageOut
+    part2: StageOut
+    stages: list[StageOut]
+    revision: int
+
+
 class StageAutoOrganizeRequest(BaseModel):
     overnight_gap_hours: float = Field(default=6.0, gt=0.0, le=168.0, allow_inf_nan=False)
     palette_preset: PalettePreset = "alpine-dawn"

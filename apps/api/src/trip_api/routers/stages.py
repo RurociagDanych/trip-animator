@@ -28,7 +28,7 @@ from trip_telemetry import (
     write_silver_parquet,
 )
 
-from trip_api.db import Stage
+from trip_api.db import Project, Stage
 from trip_api.deps import AppSettings, CsrfAuth, DbSession, StoreDep, ensure_utc
 from trip_api.rate_limit import check_rate_limit
 from trip_api.schemas import (
@@ -38,11 +38,14 @@ from trip_api.schemas import (
     StageFormat,
     StageOut,
     StageReorderRequest,
+    StageSplitOut,
+    StageSplitRequest,
     StageUpdateRequest,
 )
 from trip_api.services import (
     align_project_photos,
     build_stage_chart_cache_bytes,
+    current_etl_version,
     get_owned_project,
     get_project_stages,
     get_silver_total_elapsed_s,
@@ -51,8 +54,10 @@ from trip_api.services import (
     persist_or_delete_stage_chart_cache,
     persist_or_delete_stage_lod_cache,
     persist_prepared_stage,
+    prepare_split_stage_artifacts,
     prepare_stage_artifacts,
     project_to_out,
+    rollback_split_stage_artifacts,
     stage_chart_cache_key,
     stage_events_cache_key,
     stage_lod_cache_key,
@@ -460,6 +465,203 @@ def update_stage(
     return stage_to_out(stage)
 
 
+@router.post("/stages/{stage_id}/split", response_model=StageSplitOut)
+def split_stage(
+    project_id: uuid.UUID,
+    stage_id: uuid.UUID,
+    body: StageSplitRequest,
+    auth: CsrfAuth,
+    db: DbSession,
+    store: StoreDep,
+) -> StageSplitOut:
+    """Physically split a stage into two consecutive stages by distance or elapsed time."""
+    project = get_owned_project(db, project_id, auth.user.id)
+    stage = db.scalar(select(Stage).where(Stage.id == stage_id, Stage.project_id == project.id))
+    if stage is None:
+        raise HTTPException(status_code=404, detail="Stage not found")
+
+    try:
+        prepared = prepare_split_stage_artifacts(
+            store=store,
+            stage=stage,
+            split_distance_m=body.split_distance_m,
+            split_elapsed_s=body.split_elapsed_s,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    old_part1_silver_key: str | None = None
+    committed = False
+    try:
+        if db.get_bind().dialect.name == "postgresql":
+            locked_project = db.scalar(
+                select(Project)
+                .where(Project.id == project.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if locked_project is None:
+                raise HTTPException(status_code=404, detail="Project not found")
+            project = locked_project
+
+        stage = db.scalar(
+            select(Stage)
+            .where(Stage.id == stage_id, Stage.project_id == project.id)
+            .execution_options(populate_existing=True)
+        )
+        if stage is None:
+            raise HTTPException(status_code=404, detail="Stage not found")
+
+        if (
+            stage.silver_object_key != prepared.source_silver_key
+            or stage.trim_start_s != prepared.source_trim_start_s
+            or stage.trim_end_s != prepared.source_trim_end_s
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Stage telemetry changed concurrently; please retry split",
+            )
+
+        old_part1_silver_key = stage.silver_object_key
+        original_order = stage.stage_order
+        p1_name = (
+            body.part1_name.strip()
+            if body.part1_name and body.part1_name.strip()
+            else f"{stage.name} (Part 1)"
+        )[:200]
+        p2_name = (
+            body.part2_name.strip()
+            if body.part2_name and body.part2_name.strip()
+            else f"{stage.name} (Part 2)"
+        )[:200]
+
+        following_stages = list(
+            db.scalars(
+                select(Stage)
+                .where(Stage.project_id == project.id, Stage.stage_order > original_order)
+                .order_by(Stage.stage_order.desc())
+            ).all()
+        )
+        for following in following_stages:
+            following.stage_order += 1
+
+        etl_ver = current_etl_version()
+        p1_sum = prepared.part1_summary
+        stage.name = p1_name
+        stage.silver_object_key = prepared.part1_silver_key
+        stage.etl_version = etl_ver
+        stage.trim_start_s = None
+        stage.trim_end_s = None
+        stage.started_at = prepared.part1_started_at
+        stage.point_count = p1_sum.point_count
+        stage.distance_m = p1_sum.distance_m
+        stage.elevation_gain_m = p1_sum.elevation_gain_m
+        stage.elevation_loss_m = p1_sum.elevation_loss_m
+        stage.moving_seconds = p1_sum.moving_seconds
+        stage.elapsed_seconds = p1_sum.elapsed_seconds
+        stage.has_timestamps = p1_sum.has_timestamps
+        stage.min_lat = p1_sum.min_lat
+        stage.max_lat = p1_sum.max_lat
+        stage.min_lon = p1_sum.min_lon
+        stage.max_lon = p1_sum.max_lon
+
+        p2_sum = prepared.part2_summary
+        part2_stage = Stage(
+            id=prepared.part2_id,
+            project_id=project.id,
+            source_type=stage.source_type,
+            source_format=stage.source_format,
+            etl_version=etl_ver,
+            bronze_sha256=stage.bronze_sha256,
+            activity_type=stage.activity_type,
+            external_source_id=None,
+            strava_activity_id=None,
+            name=p2_name,
+            stage_order=original_order + 1,
+            day_index=stage.day_index,
+            trim_start_s=None,
+            trim_end_s=None,
+            bronze_object_key=stage.bronze_object_key,
+            silver_object_key=prepared.part2_silver_key,
+            started_at=prepared.part2_started_at,
+            point_count=p2_sum.point_count,
+            distance_m=p2_sum.distance_m,
+            elevation_gain_m=p2_sum.elevation_gain_m,
+            elevation_loss_m=p2_sum.elevation_loss_m,
+            moving_seconds=p2_sum.moving_seconds,
+            elapsed_seconds=p2_sum.elapsed_seconds,
+            has_timestamps=p2_sum.has_timestamps,
+            min_lat=p2_sum.min_lat,
+            max_lat=p2_sum.max_lat,
+            min_lon=p2_sum.min_lon,
+            max_lon=p2_sum.max_lon,
+            warnings_json=list(stage.warnings_json or []),
+        )
+        db.add(part2_stage)
+
+        project.revision += 1
+        project.updated_at = datetime.now(UTC)
+        write_audit_event(
+            db,
+            user_id=auth.user.id,
+            project_id=project.id,
+            event_type="stage.split",
+            metadata={
+                "stage_id": str(stage.id),
+                "part1_id": str(stage.id),
+                "part2_id": str(part2_stage.id),
+                "part1_name": p1_name,
+                "part2_name": p2_name,
+            },
+        )
+        db.commit()
+        committed = True
+    except Exception:
+        if not committed:
+            db.rollback()
+            rollback_split_stage_artifacts(store, prepared)
+        raise
+
+    db.refresh(stage)
+    db.refresh(part2_stage)
+    db.refresh(project)
+
+    persist_or_delete_stage_lod_cache(store, stage, prepared.part1_lod_gz)
+    persist_or_delete_stage_chart_cache(store, stage, prepared.part1_chart_gz)
+    if prepared.part1_events_bytes is not None:
+        try:
+            store.put_bytes(
+                stage_events_cache_key(stage.project_id, stage.id),
+                prepared.part1_events_bytes,
+                content_type="application/vnd.apache.parquet",
+            )
+        except Exception as exc:
+            logger.warning("Failed to update events sidecar for stage %s: %s", stage.id, exc)
+            try:
+                store.delete(stage_events_cache_key(stage.project_id, stage.id))
+            except Exception:
+                logger.warning("Failed to delete stale events sidecar for stage %s", stage.id)
+
+    if old_part1_silver_key and old_part1_silver_key != prepared.part1_silver_key:
+        try:
+            store.delete(old_part1_silver_key)
+        except Exception:
+            logger.warning("Failed to delete superseded Silver key %s", old_part1_silver_key)
+
+    try:
+        align_project_photos(db, store, project.id, persist=True)
+    except Exception as exc:
+        logger.warning("Photo re-alignment failed after split on stage %s: %s", stage.id, exc)
+
+    ordered = get_project_stages(db, project.id)
+    return StageSplitOut(
+        part1=stage_to_out(stage),
+        part2=stage_to_out(part2_stage),
+        stages=[stage_to_out(s) for s in ordered],
+        revision=project.revision,
+    )
+
+
 @router.delete("/stages/{stage_id}", status_code=204)
 def delete_stage(
     project_id: uuid.UUID,
@@ -469,17 +671,23 @@ def delete_stage(
     store: StoreDep,
 ) -> Response:
     project = get_owned_project(db, project_id, auth.user.id)
+    if db.get_bind().dialect.name == "postgresql":
+        locked_project = db.scalar(
+            select(Project)
+            .where(Project.id == project.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if locked_project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        project = locked_project
+
     stage = db.scalar(select(Stage).where(Stage.id == stage_id, Stage.project_id == project.id))
     if stage is None:
         raise HTTPException(status_code=404, detail="Stage not found")
 
-    keys_to_delete = [
-        stage.bronze_object_key,
-        stage.silver_object_key,
-        stage_lod_cache_key(project.id, stage.id),
-        stage_chart_cache_key(project.id, stage.id),
-        stage_events_cache_key(project.id, stage.id),
-    ]
+    bronze_key = stage.bronze_object_key
+    silver_key = stage.silver_object_key
     deleted_stage_name = stage.name
     sid_str = str(stage.id)
     settings_copy = dict(project.settings_json or {})
@@ -499,6 +707,19 @@ def delete_stage(
     remaining = get_project_stages(db, project.id)
     for idx, rem in enumerate(remaining):
         rem.stage_order = idx
+
+    shared_bronze = db.scalar(
+        select(Stage.id).where(Stage.bronze_object_key == bronze_key).limit(1)
+    )
+    keys_to_delete = [
+        silver_key,
+        stage_lod_cache_key(project.id, stage_id),
+        stage_chart_cache_key(project.id, stage_id),
+        stage_events_cache_key(project.id, stage_id),
+    ]
+    if shared_bronze is None:
+        keys_to_delete.insert(0, bronze_key)
+
     write_audit_event(
         db,
         user_id=auth.user.id,

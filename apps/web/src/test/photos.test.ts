@@ -507,7 +507,7 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
     expect(spec.stage_camera_overrides["stage-street"]).toEqual({
       focus_mode: "street",
       target_zoom: 15.8,
-      speed_multiplier: 0.45,
+      speed_multiplier: 0.2,
       transition_margin: 0.02,
     });
 
@@ -531,25 +531,25 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
 
     expect(atEnterBoundary.focusWeight).toBeCloseTo(0.5, 4);
     expect(atEnterBoundary.targetZoom).toBeCloseTo(15.8, 4);
-    expect(atEnterBoundary.speedMultiplier).toBeCloseTo(0.725, 4);
+    expect(atEnterBoundary.speedMultiplier).toBeCloseTo(0.6, 4);
 
     expect(inB.focusWeight).toBeCloseTo(1.0, 6);
     expect(inB.targetZoom).toBeCloseTo(15.8, 6);
-    expect(inB.speedMultiplier).toBeCloseTo(0.45, 6);
-    expect(sampleCombinedSpeedMultiplier(stages, spec, 0.5)).toBeCloseTo(0.45, 6);
+    expect(inB.speedMultiplier).toBeCloseTo(0.2, 6);
+    expect(sampleCombinedSpeedMultiplier(stages, spec, 0.5)).toBeCloseTo(0.2, 6);
 
     expect(atExitBoundary.focusWeight).toBeCloseTo(0.5, 4);
     expect(inC.focusWeight).toBeCloseTo(0, 6);
     expect(inC.speedMultiplier).toBeCloseTo(1.0, 6);
 
-    // Stage B runs at 0.45x speed, so it gets more wall-clock duration than Stage A (1.0x)
+    // Stage B runs at 0.2x speed, so it gets much more wall-clock duration than Stage A (1.0x)
     const tEnterB = progressRatioToTimeRatio([], spec, 1 / 3, 30, false, stages) * 30;
     const tExitB = progressRatioToTimeRatio([], spec, 2 / 3, 30, false, stages) * 30;
     const tEnd = 29; // duration 30 - outro 1
     const durA = tEnterB - 1; // minus intro 1
     const durB = tExitB - tEnterB;
     const durC = tEnd - tExitB;
-    expect(durB).toBeGreaterThan(durA * 1.8);
+    expect(durB).toBeGreaterThan(durA * 3.5);
     expect(durC).toBeCloseTo(durA, 1);
 
     // Monotonicity and exact round-trip inversion with stages
@@ -563,6 +563,179 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
     for (const target of [0.08, 0.25, 0.34, 0.5, 0.67, 0.85, 0.96]) {
       const timeRatio = progressRatioToTimeRatio([], spec, target, 30, false, stages);
       const evaluated = evaluateTimelineSchedule(stages, [], spec, timeRatio * 30, 30, false);
+      expect(evaluated.progressRatio).toBeCloseTo(target, 4);
+    }
+  });
+
+  it("supports extreme 0.05x slow pace override with monotonic scheduling and accurate round-trip inversion", () => {
+    const stageA: TimelineStage = {
+      id: "stage-approach",
+      name: "Approach",
+      dayIndex: 1,
+      stageOrder: 0,
+      activityType: "cycling",
+      color: "#38bdf8",
+      transition: "none",
+      distanceM: 10_000,
+      elevationGainM: 100,
+      movingSeconds: 1000,
+      elapsedSeconds: 1000,
+      hasTimestamps: true,
+      points: [
+        makePoint(0.1, 0.1, 0, 0, "2040-04-12T08:00:00Z"),
+        makePoint(0.2, 0.1, 10_000, 1000, "2040-04-12T08:16:40Z"),
+      ],
+    };
+    const stageB: TimelineStage = {
+      id: "stage-ultra-slow",
+      name: "Old Town Walk",
+      dayIndex: 1,
+      stageOrder: 1,
+      activityType: "walking",
+      color: "#14b8a6",
+      transition: "none",
+      distanceM: 10_000,
+      elevationGainM: 20,
+      movingSeconds: 1000,
+      elapsedSeconds: 1000,
+      hasTimestamps: true,
+      points: [
+        {
+          ...makePoint(0.2, 0.1, 0, 0, "2040-04-12T09:00:00Z"),
+          globalDistM: 10_000,
+          globalElapsedS: 1000,
+        },
+        {
+          ...makePoint(0.25, 0.12, 10_000, 1000, "2040-04-12T09:16:40Z"),
+          globalDistM: 20_000,
+          globalElapsedS: 2000,
+        },
+      ],
+    };
+    const stageC: TimelineStage = {
+      id: "stage-exit",
+      name: "Exit Ride",
+      dayIndex: 1,
+      stageOrder: 2,
+      activityType: "cycling",
+      color: "#f59e0b",
+      transition: "none",
+      distanceM: 10_000,
+      elevationGainM: 80,
+      movingSeconds: 1000,
+      elapsedSeconds: 1000,
+      hasTimestamps: true,
+      points: [
+        {
+          ...makePoint(0.25, 0.12, 0, 0, "2040-04-12T10:00:00Z"),
+          globalDistM: 20_000,
+          globalElapsedS: 2000,
+        },
+        {
+          ...makePoint(0.35, 0.12, 10_000, 1000, "2040-04-12T10:16:40Z"),
+          globalDistM: 30_000,
+          globalElapsedS: 3000,
+        },
+      ],
+    };
+    const stages = [stageA, stageB, stageC];
+
+    const spec = normalizeRenderSpecV2({
+      duration_seconds: 60,
+      intro_hold_seconds: 1,
+      outro_hold_seconds: 1,
+      stage_camera_overrides: {
+        "stage-ultra-slow": {
+          focus_mode: "custom",
+          target_zoom: 16.0,
+          speed_multiplier: 0.05,
+          transition_margin: 0.02,
+        },
+        "stage-approach": {
+          focus_mode: "custom",
+          target_zoom: null,
+          speed_multiplier: 0.01, // clamped to 0.05
+          transition_margin: 0.02,
+        },
+      },
+    });
+
+    expect(spec.stage_camera_overrides["stage-ultra-slow"]?.speed_multiplier).toBe(0.05);
+    expect(spec.stage_camera_overrides["stage-approach"]?.speed_multiplier).toBe(0.05);
+
+    const singleSlowSpec = normalizeRenderSpecV2({
+      duration_seconds: 60,
+      intro_hold_seconds: 1,
+      outro_hold_seconds: 1,
+      stage_camera_overrides: {
+        "stage-ultra-slow": {
+          focus_mode: "custom",
+          target_zoom: 16.0,
+          speed_multiplier: 0.05,
+          transition_margin: 0.02,
+        },
+      },
+    });
+
+    expect(sampleCombinedSpeedMultiplier(stages, singleSlowSpec, 0.5)).toBeCloseTo(0.05, 6);
+
+    // Keyframes up to 4.0x remain uncapped at 3.0x when no stage override limits them,
+    // while per-stage overrides remain capped at 3.0x.
+    const keyframe4xSpec = normalizeRenderSpecV2({
+      camera_keyframes: [
+        {
+          progress: 0.5,
+          camera_mode: "follow-marker",
+          camera_preset: "dynamic-3d",
+          pitch_deg: 45,
+          bearing_offset_deg: 0,
+          zoom_offset: 0,
+          speed_multiplier: 4.0,
+          label: "Fast",
+        },
+      ],
+    });
+    expect(sampleCombinedSpeedMultiplier(stages, keyframe4xSpec, 0.5)).toBeCloseTo(4.0, 6);
+
+    const stageCappedSpec = normalizeRenderSpecV2({
+      stage_camera_overrides: {
+        "stage-ultra-slow": {
+          focus_mode: "custom",
+          target_zoom: 15.0,
+          speed_multiplier: 3.5,
+          transition_margin: 0.02,
+        },
+      },
+    });
+    expect(sampleCombinedSpeedMultiplier(stages, stageCappedSpec, 0.5)).toBeCloseTo(3.0, 6);
+
+    const tEnterB = progressRatioToTimeRatio([], singleSlowSpec, 1 / 3, 60, false, stages) * 60;
+    const tExitB = progressRatioToTimeRatio([], singleSlowSpec, 2 / 3, 60, false, stages) * 60;
+    const durA = tEnterB - 1;
+    const durB = tExitB - tEnterB;
+    const durC = 59 - tExitB;
+    expect(durB).toBeGreaterThan(durA * 12);
+    expect(durC).toBeCloseTo(durA, 1);
+
+    // Strictly monotonic across timeline
+    let prevProgress = -1;
+    for (let t = 0; t <= 60; t += 0.5) {
+      const res = evaluateTimelineSchedule(stages, [], singleSlowSpec, t, 60, false);
+      expect(res.progressRatio).toBeGreaterThanOrEqual(prevProgress - 1e-9);
+      prevProgress = res.progressRatio;
+    }
+
+    // Accurate round-trip inversion at boundary and interior progress values
+    for (const target of [0.05, 0.2, 0.32, 0.3333, 0.35, 0.5, 0.66, 0.6667, 0.8, 0.95]) {
+      const timeRatio = progressRatioToTimeRatio([], singleSlowSpec, target, 60, false, stages);
+      const evaluated = evaluateTimelineSchedule(
+        stages,
+        [],
+        singleSlowSpec,
+        timeRatio * 60,
+        60,
+        false,
+      );
       expect(evaluated.progressRatio).toBeCloseTo(target, 4);
     }
   });

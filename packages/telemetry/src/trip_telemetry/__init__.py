@@ -78,6 +78,7 @@ from trip_telemetry.pipeline import (
     simplify_coord_tuples_m,
     simplify_track_points,
     simplify_track_points_m,
+    split_silver_dataframe,
     write_silver_parquet,
 )
 from trip_telemetry.ref_data import build_reference_parquets, resolve_ref_data_dir
@@ -222,6 +223,7 @@ __all__ = [
     "simplify_track_points_m",
     "snap_photo_pin",
     "solve_camera_clock_skew",
+    "split_silver_dataframe",
     "terrarium_rgb_to_meters",
     "unwrap_longitudes",
     "write_silver_parquet",

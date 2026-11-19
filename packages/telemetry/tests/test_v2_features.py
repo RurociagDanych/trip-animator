@@ -44,6 +44,7 @@ from trip_telemetry import (
     simplify_coord_tuples_m,
     snap_photo_pin,
     solve_camera_clock_skew,
+    split_silver_dataframe,
     write_silver_parquet,
 )
 from trip_telemetry.schemas import ParsedTrack
@@ -190,11 +191,11 @@ def test_render_spec_v2_new_fields_and_keyframe_validation() -> None:
 
 
 def test_stage_camera_override_and_climb_callout_duration_validation() -> None:
-    # Mode defaults: street -> 15.8 / 0.45, close -> 13.8 / 0.7, auto -> None / 1.0
+    # Mode defaults: street -> 15.8 / 0.2, close -> 13.8 / 0.7, auto -> None / 1.0
     street_mode: StageFocusMode = "street"
     street = StageCameraOverride(focus_mode=street_mode)
     assert street.target_zoom == pytest.approx(15.8)
-    assert street.speed_multiplier == pytest.approx(0.45)
+    assert street.speed_multiplier == pytest.approx(0.2)
     assert street.transition_margin == pytest.approx(0.02)
 
     street_tuned = StageCameraOverride(
@@ -220,6 +221,11 @@ def test_stage_camera_override_and_climb_callout_duration_validation() -> None:
     assert custom.speed_multiplier == pytest.approx(0.6)
     assert custom.transition_margin == pytest.approx(0.05)
 
+    min_speed = StageCameraOverride(focus_mode="custom", speed_multiplier=0.05)
+    assert min_speed.speed_multiplier == pytest.approx(0.05)
+    max_speed = StageCameraOverride(focus_mode="custom", speed_multiplier=3.0)
+    assert max_speed.speed_multiplier == pytest.approx(3.0)
+
     auto = StageCameraOverride(focus_mode="auto", target_zoom=16.0, speed_multiplier=0.5)
     assert auto.target_zoom is None
     assert auto.speed_multiplier == pytest.approx(1.0)
@@ -228,7 +234,7 @@ def test_stage_camera_override_and_climb_callout_duration_validation() -> None:
     for bad_zoom in (2.9, 18.1, float("nan"), float("inf")):
         with pytest.raises(ValueError):
             StageCameraOverride(focus_mode="custom", target_zoom=bad_zoom)
-    for bad_speed in (0.19, 4.01, float("nan"), float("inf")):
+    for bad_speed in (0.04, 3.01, float("nan"), float("inf")):
         with pytest.raises(ValueError):
             StageCameraOverride(focus_mode="custom", speed_multiplier=bad_speed)
     for bad_margin in (0.004, 0.26, float("nan"), float("inf")):
@@ -643,3 +649,202 @@ def test_resolve_ref_data_dir_readonly_falls_back_to_tmp(
     assert (resolved / "countries.parquet").is_file()
     assert (resolved / "admin_regions.parquet").is_file()
     assert (resolved / "mountain_passes.parquet").is_file()
+
+
+def test_split_silver_dataframe_by_distance_elapsed_trimmed_and_untimed() -> None:
+    t0 = datetime(2001, 8, 1, 8, 0, 0, tzinfo=UTC)
+    pts = [
+        TrackPoint(
+            lat=0.1000 + i * 0.001,
+            lon=0.2000 + i * 0.001,
+            elev_m=1000.0 + i * 15.0,
+            ts_utc=t0 + timedelta(seconds=i * 60),
+        )
+        for i in range(8)
+    ]
+    track = ParsedTrack(
+        points=pts, point_count=len(pts), segment_count=1, has_timestamps=True, has_elevation=True
+    )
+    df, full_summary = build_silver_dataframe(track, trip_id="trip-1", stage_id="stage-orig")
+
+    # 1. Split by distance at midpoint
+    mid_dist = full_summary.distance_m / 2.0
+    p1_df, p1_sum, p2_df, p2_sum = split_silver_dataframe(
+        df,
+        trip_id="trip-1",
+        part1_stage_id="stage-p1",
+        part2_stage_id="stage-p2",
+        split_distance_m=mid_dist,
+    )
+    assert p1_df.height == 4
+    assert p2_df.height == 4
+    assert p1_df.get_column("seq").to_list() == [0, 1, 2, 3]
+    assert p2_df.get_column("seq").to_list() == [0, 1, 2, 3]
+    assert p1_df.get_column("stage_id").to_list() == ["stage-p1"] * 4
+    assert p2_df.get_column("stage_id").to_list() == ["stage-p2"] * 4
+    assert p1_df.get_column("delta_dist_m")[0] == 0.0
+    assert p2_df.get_column("delta_dist_m")[0] == 0.0
+    assert p1_df.get_column("cum_dist_m")[0] == 0.0
+    assert p2_df.get_column("cum_dist_m")[0] == 0.0
+    assert p1_df.get_column("elapsed_s")[0] == 0.0
+    assert p2_df.get_column("elapsed_s")[0] == 0.0
+    assert p1_df.get_column("elapsed_s")[-1] == pytest.approx(180.0)
+    assert p2_df.get_column("elapsed_s")[-1] == pytest.approx(180.0)
+    assert not any(p1_df.get_column("is_trimmed").to_list())
+    assert not any(p2_df.get_column("is_trimmed").to_list())
+    assert p1_sum.point_count == 4
+    assert p2_sum.point_count == 4
+    assert p1_sum.elapsed_seconds == pytest.approx(180.0)
+    assert p2_sum.elapsed_seconds == pytest.approx(180.0)
+    assert p1_sum.distance_m > 0.0
+    assert p2_sum.distance_m > 0.0
+    assert p1_sum.distance_m + p2_sum.distance_m < full_summary.distance_m
+
+    # 2. Split by elapsed_s at 120s (rows 0,1,2 -> 3 pts; rows 3..7 -> 5 pts)
+    e1_df, e1_sum, e2_df, e2_sum = split_silver_dataframe(
+        df,
+        trip_id="trip-1",
+        part1_stage_id="stage-e1",
+        part2_stage_id="stage-e2",
+        split_elapsed_s=120.0,
+    )
+    assert e1_sum.point_count == 3
+    assert e2_sum.point_count == 5
+    assert e1_sum.elapsed_seconds == pytest.approx(120.0)
+    assert e2_sum.elapsed_seconds == pytest.approx(240.0)
+    assert e2_df.get_column("ts_utc")[0] == t0 + timedelta(seconds=180)
+
+    # 3. Split trimmed DataFrame uses only active rows and resets is_trimmed=False
+    trimmed_df, _ = build_silver_dataframe(
+        track,
+        trip_id="trip-1",
+        stage_id="stage-trimmed",
+        trim_start_s=60.0,
+        trim_end_s=360.0,
+    )
+    t1_df, t1_sum, t2_df, t2_sum = split_silver_dataframe(
+        trimmed_df,
+        trip_id="trip-1",
+        part1_stage_id="stage-t1",
+        part2_stage_id="stage-t2",
+        split_elapsed_s=120.0,
+    )
+    assert t1_sum.point_count == 3
+    assert t2_sum.point_count == 3
+    assert t1_df.get_column("cum_dist_m")[0] == 0.0
+    assert t2_df.get_column("cum_dist_m")[0] == 0.0
+    assert not any(t1_df.get_column("is_trimmed").to_list())
+    assert not any(t2_df.get_column("is_trimmed").to_list())
+
+    # 4. Untimed track splits cleanly by distance, rejects elapsed split
+    untimed_pts = [
+        TrackPoint(lat=0.1000 + i * 0.001, lon=0.2000 + i * 0.001, elev_m=1000.0 + i * 5.0)
+        for i in range(6)
+    ]
+    untimed_df, untimed_sum = build_silver_dataframe(
+        ParsedTrack(
+            points=untimed_pts,
+            point_count=6,
+            segment_count=1,
+            has_timestamps=False,
+            has_elevation=True,
+        ),
+        trip_id="trip-2",
+        stage_id="stage-untimed",
+    )
+    u1_df, u1_sum, u2_df, u2_sum = split_silver_dataframe(
+        untimed_df,
+        trip_id="trip-2",
+        part1_stage_id="stage-u1",
+        part2_stage_id="stage-u2",
+        split_distance_m=untimed_sum.distance_m / 2.0,
+    )
+    assert u1_sum.point_count == 3
+    assert u2_sum.point_count == 3
+    assert u1_sum.has_timestamps is False
+    assert u2_sum.has_timestamps is False
+    assert u1_df.get_column("elapsed_s").is_null().all()
+    assert u2_df.get_column("elapsed_s").is_null().all()
+
+    with pytest.raises(ValueError, match="without timestamps"):
+        split_silver_dataframe(
+            untimed_df,
+            trip_id="trip-2",
+            part1_stage_id="stage-u1",
+            part2_stage_id="stage-u2",
+            split_elapsed_s=60.0,
+        )
+
+    # 5. Validation errors: both/neither axis, <4 active pts, <2 pts on a side, non-finite
+    with pytest.raises(ValueError):
+        split_silver_dataframe(df, trip_id="t", part1_stage_id="p1", part2_stage_id="p2")
+    with pytest.raises(ValueError):
+        split_silver_dataframe(
+            df,
+            trip_id="t",
+            part1_stage_id="p1",
+            part2_stage_id="p2",
+            split_distance_m=100.0,
+            split_elapsed_s=60.0,
+        )
+    with pytest.raises(ValueError, match="at least 2 points"):
+        split_silver_dataframe(
+            df,
+            trip_id="t",
+            part1_stage_id="p1",
+            part2_stage_id="p2",
+            split_elapsed_s=30.0,
+        )
+    with pytest.raises(ValueError, match="at least 2 points"):
+        split_silver_dataframe(
+            df,
+            trip_id="t",
+            part1_stage_id="p1",
+            part2_stage_id="p2",
+            split_elapsed_s=400.0,
+        )
+    with pytest.raises(ValueError, match="at least 4 active points"):
+        split_silver_dataframe(
+            df.head(3),
+            trip_id="t",
+            part1_stage_id="p1",
+            part2_stage_id="p2",
+            split_distance_m=50.0,
+        )
+    with pytest.raises(ValueError):
+        split_silver_dataframe(
+            df,
+            trip_id="t",
+            part1_stage_id="p1",
+            part2_stage_id="p2",
+            split_distance_m=float("nan"),
+        )
+
+    # 6. Timestamp jitter guarantees contiguous slicing (never interleaves rows across halves)
+    jitter_pts = [
+        TrackPoint(lat=0.1000, lon=0.2000, elev_m=1000.0, ts_utc=t0),
+        TrackPoint(lat=0.1010, lon=0.2010, elev_m=1010.0, ts_utc=t0 + timedelta(seconds=60)),
+        TrackPoint(lat=0.1020, lon=0.2020, elev_m=1020.0, ts_utc=t0 + timedelta(seconds=180)),
+        TrackPoint(lat=0.1030, lon=0.2030, elev_m=1030.0, ts_utc=t0 + timedelta(seconds=100)),
+        TrackPoint(lat=0.1040, lon=0.2040, elev_m=1040.0, ts_utc=t0 + timedelta(seconds=240)),
+    ]
+    jitter_df, _ = build_silver_dataframe(
+        ParsedTrack(
+            points=jitter_pts,
+            point_count=5,
+            segment_count=1,
+            has_timestamps=True,
+            has_elevation=True,
+        ),
+        trip_id="trip-jitter",
+        stage_id="stage-jitter",
+    )
+    j1_df, _, j2_df, _ = split_silver_dataframe(
+        jitter_df,
+        trip_id="trip-jitter",
+        part1_stage_id="j1",
+        part2_stage_id="j2",
+        split_elapsed_s=120.0,
+    )
+    assert j1_df.get_column("lat").to_list() == pytest.approx([0.1000, 0.1010])
+    assert j2_df.get_column("lat").to_list() == pytest.approx([0.1020, 0.1030, 0.1040])

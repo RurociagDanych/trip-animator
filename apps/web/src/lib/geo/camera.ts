@@ -97,8 +97,9 @@ export function computeBearingDeg(
 }
 
 const MIN_SPEED_MULTIPLIER = 0.25;
-const MIN_STAGE_SPEED_MULTIPLIER = 0.2;
+const MIN_STAGE_SPEED_MULTIPLIER = 0.05;
 const MAX_SPEED_MULTIPLIER = 4.0;
+const MAX_STAGE_SPEED_MULTIPLIER = 3.0;
 
 export function smoothstep01(t: number): number {
   const x = Math.min(1, Math.max(0, Number.isFinite(t) ? t : 0));
@@ -116,7 +117,7 @@ function clampStageSpeedMultiplier(value: number): number {
   if (!Number.isFinite(value)) {
     return 1.0;
   }
-  return Math.min(MAX_SPEED_MULTIPLIER, Math.max(MIN_STAGE_SPEED_MULTIPLIER, value));
+  return Math.min(MAX_STAGE_SPEED_MULTIPLIER, Math.max(MIN_STAGE_SPEED_MULTIPLIER, value));
 }
 
 export interface StageProgressSpan {
@@ -171,7 +172,7 @@ export function resolveStageCameraOverride(
       targetZoom = 15.8;
     }
     if (speedMultiplier === 1.0) {
-      speedMultiplier = 0.45;
+      speedMultiplier = 0.2;
     }
   } else if (focusMode === "close") {
     if (targetZoom === null) {
@@ -254,10 +255,14 @@ export function computeStageProgressSpans(
     }
   }
 
-  // Fallback to stage.distanceM (or equal slices when total distance is 0)
-  const weights = stages.map((s) =>
-    Number.isFinite(s.distanceM) && s.distanceM > 0 ? s.distanceM : 0,
-  );
+  // Fallback to stage.elapsedSeconds in recorded-time mode, else stage.distanceM (or equal slices)
+  const useRecordedTimeFallback =
+    spec.timeline_mode === "recorded-time" &&
+    stages.every((s) => s.hasTimestamps && Number.isFinite(s.elapsedSeconds) && s.elapsedSeconds > 0);
+  const weights = stages.map((s) => {
+    const raw = useRecordedTimeFallback ? s.elapsedSeconds : s.distanceM;
+    return Number.isFinite(raw) && raw > 0 ? raw : 0;
+  });
   const totalWeight = weights.reduce((acc, w) => acc + w, 0);
   const spans: StageProgressSpan[] = [];
   let cum = 0;
@@ -383,7 +388,7 @@ export function evaluateStageCameraFocus(
 }
 
 /**
- * Multiplies keyframe speed multiplier with smooth per-stage speed multiplier, clamped to [0.2, 4.0].
+ * Multiplies keyframe speed multiplier with smooth per-stage speed multiplier, clamped to [0.05, 4.0].
  */
 export function sampleCombinedSpeedMultiplier(
   stages: readonly TimelineStage[],
@@ -392,7 +397,11 @@ export function sampleCombinedSpeedMultiplier(
 ): number {
   const kfSpeed = sampleKeyframeSpeedMultiplier(spec.camera_keyframes ?? [], progress);
   const stageSpeed = evaluateStageCameraFocus(stages, spec, progress).speedMultiplier;
-  return clampStageSpeedMultiplier(kfSpeed * stageSpeed);
+  const combined = kfSpeed * stageSpeed;
+  if (!Number.isFinite(combined)) {
+    return 1.0;
+  }
+  return Math.min(MAX_SPEED_MULTIPLIER, Math.max(MIN_STAGE_SPEED_MULTIPLIER, combined));
 }
 
 function sortKeyframes(keyframes: readonly CameraKeyframe[]): readonly CameraKeyframe[] {

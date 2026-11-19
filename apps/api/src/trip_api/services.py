@@ -44,6 +44,7 @@ from trip_telemetry import (
     query_stage_kpis,
     query_telemetry_profile,
     serialize_stage_events_parquet_bytes,
+    split_silver_dataframe,
     write_silver_parquet,
 )
 from trip_telemetry.schemas import SilverTelemetrySummary
@@ -592,6 +593,164 @@ def prepare_stage_artifacts(
         summary=summary,
         parsed=parsed,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedSplitArtifacts:
+    """CPU-transformed and staged split artifacts ready for DB persistence."""
+
+    part1_id: uuid.UUID
+    part2_id: uuid.UUID
+    source_silver_key: str
+    source_trim_start_s: float | None
+    source_trim_end_s: float | None
+    part1_silver_key: str
+    part1_lod_gz: bytes
+    part1_chart_gz: bytes
+    part1_events_bytes: bytes | None
+    part2_silver_key: str
+    part2_lod_key: str
+    part2_chart_key: str
+    part2_events_key: str
+    part1_summary: SilverTelemetrySummary
+    part2_summary: SilverTelemetrySummary
+    part1_started_at: datetime | None
+    part2_started_at: datetime | None
+
+
+def _extract_first_ts_utc(df: pl.DataFrame) -> datetime | None:
+    if "ts_utc" not in df.columns or df.height == 0:
+        return None
+    non_null = df.get_column("ts_utc").drop_nulls()
+    if non_null.len() == 0:
+        return None
+    first_val = non_null[0]
+    if isinstance(first_val, datetime):
+        return ensure_utc(first_val)
+    return None
+
+
+def _build_split_part_blobs(
+    tmpdir: Path,
+    part_id: uuid.UUID,
+    part_df: pl.DataFrame,
+) -> tuple[bytes, bytes, bytes, bytes | None]:
+    parquet_path = write_silver_parquet(part_df, tmpdir / f"{part_id}.parquet")
+    silver_bytes = parquet_path.read_bytes()
+    lod_gz = build_lod_cache_from_parquet(parquet_path)
+    chart_gz = build_stage_chart_cache_bytes(parquet_path)
+    events_path = tmpdir / f"{part_id}_events.parquet"
+    build_stage_events_parquet(parquet_path, events_path, stage_id=str(part_id))
+    events_bytes = events_path.read_bytes() if events_path.exists() else None
+    return silver_bytes, lod_gz, chart_gz, events_bytes
+
+
+def rollback_split_stage_artifacts(store: ObjectStore, prepared: PreparedSplitArtifacts) -> None:
+    """Best-effort cleanup of newly uploaded immutable split blobs on DB failure."""
+    for key in (
+        prepared.part1_silver_key,
+        prepared.part2_silver_key,
+        prepared.part2_lod_key,
+        prepared.part2_chart_key,
+        prepared.part2_events_key,
+    ):
+        try:
+            store.delete(key)
+        except Exception:
+            logger.warning("Failed to rollback split object key %s", key)
+
+
+def prepare_split_stage_artifacts(
+    *,
+    store: ObjectStore,
+    stage: Stage,
+    split_distance_m: float | None = None,
+    split_elapsed_s: float | None = None,
+) -> PreparedSplitArtifacts:
+    """Split Silver telemetry and upload immutable split blobs before acquiring DB locks."""
+    part1_id = stage.id
+    part2_id = uuid.uuid4()
+    project_id = stage.project_id
+    source_silver_key = stage.silver_object_key
+    source_trim_start_s = stage.trim_start_s
+    source_trim_end_s = stage.trim_end_s
+
+    with materialize_silver_parquet(store, stage) as parquet_path:
+        df = pl.read_parquet(parquet_path)
+
+    part1_df, part1_summary, part2_df, part2_summary = split_silver_dataframe(
+        df,
+        trip_id=str(project_id),
+        part1_stage_id=str(part1_id),
+        part2_stage_id=str(part2_id),
+        split_distance_m=split_distance_m,
+        split_elapsed_s=split_elapsed_s,
+    )
+
+    part1_started_at = _extract_first_ts_utc(part1_df)
+    part2_started_at = _extract_first_ts_utc(part2_df)
+
+    with tempfile.TemporaryDirectory(prefix="trip_split_") as tmpdir:
+        tmp_root = Path(tmpdir)
+        p1_silver, p1_lod, p1_chart, p1_events = _build_split_part_blobs(
+            tmp_root, part1_id, part1_df
+        )
+        p2_silver, p2_lod, p2_chart, p2_events = _build_split_part_blobs(
+            tmp_root, part2_id, part2_df
+        )
+
+    part1_silver_key = f"silver/{project_id}/{part1_id}_{part2_id.hex[:8]}.parquet"
+    part2_silver_key = f"silver/{project_id}/{part2_id}.parquet"
+    part2_lod_key = stage_lod_cache_key(project_id, part2_id)
+    part2_chart_key = stage_chart_cache_key(project_id, part2_id)
+    part2_events_key = stage_events_cache_key(project_id, part2_id)
+
+    prepared = PreparedSplitArtifacts(
+        part1_id=part1_id,
+        part2_id=part2_id,
+        source_silver_key=source_silver_key,
+        source_trim_start_s=source_trim_start_s,
+        source_trim_end_s=source_trim_end_s,
+        part1_silver_key=part1_silver_key,
+        part1_lod_gz=p1_lod,
+        part1_chart_gz=p1_chart,
+        part1_events_bytes=p1_events,
+        part2_silver_key=part2_silver_key,
+        part2_lod_key=part2_lod_key,
+        part2_chart_key=part2_chart_key,
+        part2_events_key=part2_events_key,
+        part1_summary=part1_summary,
+        part2_summary=part2_summary,
+        part1_started_at=part1_started_at,
+        part2_started_at=part2_started_at,
+    )
+
+    # Upload only new immutable keys pre-commit; live Part 1 sidecar keys are updated post-commit.
+    try:
+        store.put_bytes(
+            part2_silver_key,
+            p2_silver,
+            content_type="application/vnd.apache.parquet",
+        )
+        store.put_bytes(part2_lod_key, p2_lod, content_type="application/gzip")
+        store.put_bytes(part2_chart_key, p2_chart, content_type="application/gzip")
+        if p2_events is not None:
+            store.put_bytes(
+                part2_events_key,
+                p2_events,
+                content_type="application/vnd.apache.parquet",
+            )
+
+        store.put_bytes(
+            part1_silver_key,
+            p1_silver,
+            content_type="application/vnd.apache.parquet",
+        )
+    except Exception:
+        rollback_split_stage_artifacts(store, prepared)
+        raise
+
+    return prepared
 
 
 def persist_prepared_stage(

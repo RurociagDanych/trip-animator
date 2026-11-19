@@ -712,7 +712,7 @@ class StageCameraOverride(BaseModel):
 
     focus_mode: StageFocusMode = "auto"
     target_zoom: float | None = Field(default=None, ge=3.0, le=18.0)
-    speed_multiplier: float = Field(default=1.0, ge=0.2, le=4.0)
+    speed_multiplier: float = Field(default=1.0, ge=0.05, le=3.0)
     transition_margin: float = Field(default=0.02, ge=0.005, le=0.25)
 
     @model_validator(mode="after")
@@ -730,7 +730,7 @@ class StageCameraOverride(BaseModel):
             if self.target_zoom is None:
                 self.target_zoom = 15.8
             if self.speed_multiplier == 1.0:
-                self.speed_multiplier = 0.45
+                self.speed_multiplier = 0.2
         elif self.focus_mode == "close":
             if self.target_zoom is None:
                 self.target_zoom = 13.8

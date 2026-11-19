@@ -5,8 +5,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 import trip_api.routers.stages as stages_router
-from trip_api.db import RenderJob
-from trip_api.services import stage_chart_cache_key, stage_lod_cache_key
+from trip_api.db import RenderJob, Stage
+from trip_api.services import (
+    stage_chart_cache_key,
+    stage_events_cache_key,
+    stage_lod_cache_key,
+)
 from trip_telemetry import parse_gpx_bytes
 
 if TYPE_CHECKING:
@@ -1106,7 +1110,7 @@ def test_stage_camera_overrides_and_climb_callout_duration_api_lifecycle(
     assert patched_settings["stage_camera_overrides"][s1_id] == {
         "focus_mode": "street",
         "target_zoom": 15.8,
-        "speed_multiplier": 0.45,
+        "speed_multiplier": 0.2,
         "transition_margin": 0.02,
     }
     assert patched_settings["stage_camera_overrides"][s2_id] == {
@@ -1115,6 +1119,43 @@ def test_stage_camera_overrides_and_climb_callout_duration_api_lifecycle(
         "speed_multiplier": 0.6,
         "transition_margin": 0.04,
     }
+
+    # Lowered speed_multiplier bounds: 0.05 and 3.0 accepted; 0.04 and 3.01 rejected
+    for bad_speed in (0.04, 3.01):
+        bad_speed_resp = client.patch(
+            f"/api/v1/projects/{proj_id}",
+            json={
+                "revision": 2,
+                "settings": {
+                    "stage_camera_overrides": {
+                        s1_id: {"focus_mode": "custom", "speed_multiplier": bad_speed},
+                    },
+                },
+            },
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert bad_speed_resp.status_code == 422
+
+    bounds_patch = client.patch(
+        f"/api/v1/projects/{proj_id}",
+        json={
+            "revision": 2,
+            "settings": {
+                "stage_camera_overrides": {
+                    s1_id: {"focus_mode": "custom", "speed_multiplier": 0.05},
+                    s2_id: {"focus_mode": "custom", "speed_multiplier": 3.0},
+                },
+            },
+        },
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert bounds_patch.status_code == 200, bounds_patch.text
+    assert bounds_patch.json()["settings"]["stage_camera_overrides"][s1_id][
+        "speed_multiplier"
+    ] == pytest.approx(0.05)
+    assert bounds_patch.json()["settings"]["stage_camera_overrides"][s2_id][
+        "speed_multiplier"
+    ] == pytest.approx(3.0)
 
     # POST /renders accepts valid project stage IDs in stage_camera_overrides
     good_render = client.post(
@@ -1147,3 +1188,383 @@ def test_stage_camera_overrides_and_climb_callout_duration_api_lifecycle(
     assert s1_id not in remaining_overrides
     assert s2_id in remaining_overrides
     assert remaining_overrides[s2_id]["focus_mode"] == "custom"
+
+
+def test_stage_split_api_lifecycle_and_shared_bronze_deletion(
+    harness: AppHarness,
+    sample_gpx: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness.create_user("split-owner@example.com")
+    harness.create_user("split-other@example.com")
+    client, csrf = harness.login_client("split-owner@example.com")
+    other_client, other_csrf = harness.login_client("split-other@example.com")
+
+    proj_id = client.post(
+        "/api/v1/projects",
+        json={"title": "Split Lifecycle Tour"},
+        headers={"X-CSRF-Token": csrf},
+    ).json()["id"]
+
+    eight_pt_gpx = b"""<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="pytest" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk>
+    <name>Long Pass</name>
+    <type>cycling</type>
+    <trkseg>
+      <trkpt lat="0.1000" lon="0.2000"><ele>1000.0</ele><time>2001-06-01T08:00:00Z</time></trkpt>
+      <trkpt lat="0.1010" lon="0.2010"><ele>1020.0</ele><time>2001-06-01T08:01:00Z</time></trkpt>
+      <trkpt lat="0.1020" lon="0.2020"><ele>1040.0</ele><time>2001-06-01T08:02:00Z</time></trkpt>
+      <trkpt lat="0.1030" lon="0.2030"><ele>1060.0</ele><time>2001-06-01T08:03:00Z</time></trkpt>
+      <trkpt lat="0.1040" lon="0.2040"><ele>1080.0</ele><time>2001-06-01T08:04:00Z</time></trkpt>
+      <trkpt lat="0.1050" lon="0.2050"><ele>1100.0</ele><time>2001-06-01T08:05:00Z</time></trkpt>
+      <trkpt lat="0.1060" lon="0.2060"><ele>1120.0</ele><time>2001-06-01T08:06:00Z</time></trkpt>
+      <trkpt lat="0.1070" lon="0.2070"><ele>1140.0</ele><time>2001-06-01T08:07:00Z</time></trkpt>
+    </trkseg>
+  </trk>
+</gpx>"""
+
+    untimed_gpx = b"""<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="pytest" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk><name>Untimed Track</name><trkseg>
+    <trkpt lat="0.1000" lon="0.2000"><ele>900.0</ele></trkpt>
+    <trkpt lat="0.1010" lon="0.2010"><ele>910.0</ele></trkpt>
+    <trkpt lat="0.1020" lon="0.2020"><ele>920.0</ele></trkpt>
+    <trkpt lat="0.1030" lon="0.2030"><ele>930.0</ele></trkpt>
+  </trkseg></trk>
+</gpx>"""
+
+    s0 = client.post(
+        f"/api/v1/projects/{proj_id}/gpx",
+        files={"file": ("s0.gpx", sample_gpx, "application/gpx+xml")},
+        data={"day_index": "1", "name": "Warmup"},
+        headers={"X-CSRF-Token": csrf},
+    ).json()
+    s1 = client.post(
+        f"/api/v1/projects/{proj_id}/gpx",
+        files={"file": ("s1.gpx", eight_pt_gpx, "application/gpx+xml")},
+        data={"day_index": "2", "name": "Mountain Pass"},
+        headers={"X-CSRF-Token": csrf},
+    ).json()
+    s2 = client.post(
+        f"/api/v1/projects/{proj_id}/gpx",
+        files={"file": ("s2.gpx", untimed_gpx, "application/gpx+xml")},
+        data={"day_index": "3", "name": "Finale"},
+        headers={"X-CSRF-Token": csrf},
+    ).json()
+
+    # Attach settings and strava/external metadata to s1 to verify preservation vs Part 2 clearing
+    patch_resp = client.patch(
+        f"/api/v1/projects/{proj_id}",
+        json={
+            "revision": 1,
+            "settings": {
+                "stage_colors": {s1["id"]: "#FF5500"},
+                "stage_camera_overrides": {s1["id"]: {"focus_mode": "street"}},
+            },
+        },
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert patch_resp.status_code == 200
+    assert patch_resp.json()["revision"] == 2
+
+    with harness.session_factory() as db:
+        s1_db = db.get(Stage, uuid.UUID(s1["id"]))
+        assert s1_db is not None
+        s1_db.strava_activity_id = 987654321
+        s1_db.external_source_id = "strava:987654321"
+        db.commit()
+        bronze_path = s1_db.bronze_object_key
+        orig_s1_silver_key = s1_db.silver_object_key
+
+    # Security / error checks: missing CSRF -> 403, BOLA -> 404, unknown stage -> 404
+    assert (
+        client.post(
+            f"/api/v1/projects/{proj_id}/stages/{s1['id']}/split",
+            json={"split_distance_m": 200.0},
+        ).status_code
+        == 403
+    )
+    assert (
+        other_client.post(
+            f"/api/v1/projects/{proj_id}/stages/{s1['id']}/split",
+            json={"split_distance_m": 200.0},
+            headers={"X-CSRF-Token": other_csrf},
+        ).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            f"/api/v1/projects/{proj_id}/stages/{uuid.uuid4()}/split",
+            json={"split_distance_m": 200.0},
+            headers={"X-CSRF-Token": csrf},
+        ).status_code
+        == 404
+    )
+
+    # Validation 422s: neither axis, both axes, non-positive, leaving <2 pts, untimed elapsed
+    for bad_payload in (
+        {},
+        {"split_distance_m": 200.0, "split_elapsed_s": 120.0},
+        {"split_distance_m": 0.0},
+        {"split_elapsed_s": -5.0},
+        {"split_distance_m": 1.0},
+        {"split_distance_m": s1["distance_m"] * 2.0},
+    ):
+        assert (
+            client.post(
+                f"/api/v1/projects/{proj_id}/stages/{s1['id']}/split",
+                json=bad_payload,
+                headers={"X-CSRF-Token": csrf},
+            ).status_code
+            == 422
+        )
+    assert (
+        client.post(
+            f"/api/v1/projects/{proj_id}/stages/{s2['id']}/split",
+            json={"split_elapsed_s": 30.0},
+            headers={"X-CSRF-Token": csrf},
+        ).status_code
+        == 422
+    )
+
+    # Split middle stage s1 by distance with default names
+    split1 = client.post(
+        f"/api/v1/projects/{proj_id}/stages/{s1['id']}/split",
+        json={"split_distance_m": s1["distance_m"] / 2.0},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert split1.status_code == 200, split1.text
+    body1 = split1.json()
+    p1 = body1["part1"]
+    p2 = body1["part2"]
+    ordered1 = body1["stages"]
+
+    assert body1["revision"] == 3
+    assert p1["id"] == s1["id"]
+    assert p2["id"] != s1["id"]
+    assert p1["name"] == "Mountain Pass (Part 1)"
+    assert p2["name"] == "Mountain Pass (Part 2)"
+    assert p1["stage_order"] == 1
+    assert p2["stage_order"] == 2
+    assert p1["day_index"] == 2
+    assert p2["day_index"] == 2
+    assert p1["point_count"] == 4
+    assert p2["point_count"] == 4
+    assert p1["strava_activity_id"] == 987654321
+    assert p1["external_source_id"] == "strava:987654321"
+    assert p2["strava_activity_id"] is None
+    assert p2["external_source_id"] is None
+    assert p1["trim_start_s"] is None and p1["trim_end_s"] is None
+    assert p2["trim_start_s"] is None and p2["trim_end_s"] is None
+    assert [st["id"] for st in ordered1] == [s0["id"], p1["id"], p2["id"], s2["id"]]
+    assert [st["stage_order"] for st in ordered1] == [0, 1, 2, 3]
+
+    # Verify settings preserved for Part 1, ObjectStore keys updated, and old Silver key deleted
+    detail1 = client.get(f"/api/v1/projects/{proj_id}").json()
+    assert detail1["settings"]["stage_colors"][p1["id"]] == "#FF5500"
+    assert detail1["settings"]["stage_camera_overrides"][p1["id"]]["focus_mode"] == "street"
+
+    with harness.session_factory() as db:
+        p1_db = db.get(Stage, uuid.UUID(p1["id"]))
+        p2_db = db.get(Stage, uuid.UUID(p2["id"]))
+        assert p1_db is not None and p2_db is not None
+        assert p1_db.bronze_object_key == bronze_path
+        assert p2_db.bronze_object_key == bronze_path
+        assert p1_db.silver_object_key != orig_s1_silver_key
+        assert p2_db.silver_object_key != p1_db.silver_object_key
+        p1_silver_key = p1_db.silver_object_key
+        p2_silver_key = p2_db.silver_object_key
+
+    with pytest.raises(FileNotFoundError):
+        harness.store.resolve_existing_path(orig_s1_silver_key)
+    for expected_key in (
+        bronze_path,
+        p1_silver_key,
+        stage_lod_cache_key(uuid.UUID(proj_id), uuid.UUID(p1["id"])),
+        stage_chart_cache_key(uuid.UUID(proj_id), uuid.UUID(p1["id"])),
+        stage_events_cache_key(uuid.UUID(proj_id), uuid.UUID(p1["id"])),
+        p2_silver_key,
+        stage_lod_cache_key(uuid.UUID(proj_id), uuid.UUID(p2["id"])),
+        stage_chart_cache_key(uuid.UUID(proj_id), uuid.UUID(p2["id"])),
+        stage_events_cache_key(uuid.UUID(proj_id), uuid.UUID(p2["id"])),
+    ):
+        assert harness.store.resolve_existing_path(expected_key).is_file()
+
+    # Downstream telemetry endpoints reflect all 4 stages cleanly
+    assert client.get(f"/api/v1/projects/{proj_id}/kpis").json()["stage_count"] == 4
+    geom = client.get(f"/api/v1/projects/{proj_id}/telemetry/geometry?lod=full").json()
+    assert len(geom["features"]) == 4
+    assert client.get(f"/api/v1/projects/{proj_id}/telemetry/chart").status_code == 200
+    assert client.get(f"/api/v1/projects/{proj_id}/export?format=gpx").status_code == 200
+    assert client.get(f"/api/v1/projects/{proj_id}/export?format=geojson").status_code == 200
+
+    # Audit event recorded
+    audit_events = client.get(f"/api/v1/projects/{proj_id}/audit").json()
+    split_events = [e for e in audit_events if e["event_type"] == "stage.split"]
+    assert len(split_events) == 1
+    assert split_events[0]["metadata"]["part2_id"] == p2["id"]
+
+    # Split Part 2 by elapsed_s with custom names
+    split2 = client.post(
+        f"/api/v1/projects/{proj_id}/stages/{p2['id']}/split",
+        json={
+            "split_elapsed_s": 60.0,
+            "part1_name": "  Upper Ascent  ",
+            "part2_name": "  Summit Push  ",
+        },
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert split2.status_code == 200, split2.text
+    body2 = split2.json()
+    assert body2["revision"] == 4
+    assert body2["part1"]["name"] == "Upper Ascent"
+    assert body2["part2"]["name"] == "Summit Push"
+    assert body2["part1"]["point_count"] == 2
+    assert body2["part2"]["point_count"] == 2
+    p2b = body2["part2"]
+
+    # Shared bronze_object_key deletion safety:
+    # Deleting Part 1 keeps shared bronze blob while Part 2 and Part 2b still reference it
+    assert (
+        client.delete(
+            f"/api/v1/projects/{proj_id}/stages/{p1['id']}",
+            headers={"X-CSRF-Token": csrf},
+        ).status_code
+        == 204
+    )
+    assert harness.store.resolve_existing_path(bronze_path).is_file()
+    with pytest.raises(FileNotFoundError):
+        harness.store.resolve_existing_path(p1_silver_key)
+
+    # Deleting Part 2 still keeps shared bronze blob because Part 2b still references it
+    assert (
+        client.delete(
+            f"/api/v1/projects/{proj_id}/stages/{p2['id']}",
+            headers={"X-CSRF-Token": csrf},
+        ).status_code
+        == 204
+    )
+    assert harness.store.resolve_existing_path(bronze_path).is_file()
+
+    # Deleting Part 2b (last reference) finally deletes the shared bronze blob
+    assert (
+        client.delete(
+            f"/api/v1/projects/{proj_id}/stages/{p2b['id']}",
+            headers={"X-CSRF-Token": csrf},
+        ).status_code
+        == 204
+    )
+    with pytest.raises(FileNotFoundError):
+        harness.store.resolve_existing_path(bronze_path)
+
+    # DB failure during split rolls back newly uploaded blobs and leaves Part 1 sidecars untouched
+    s0_lod_key = stage_lod_cache_key(uuid.UUID(proj_id), uuid.UUID(s0["id"]))
+    orig_s0_lod_bytes = harness.store.get_bytes(s0_lod_key)
+
+    def _boom_audit(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("simulated DB failure")
+
+    monkeypatch.setattr(stages_router, "write_audit_event", _boom_audit)
+    from fastapi.testclient import TestClient
+
+    safe_client = TestClient(
+        harness.app, raise_server_exceptions=False, cookies=dict(client.cookies)
+    )
+    fail_resp = safe_client.post(
+        f"/api/v1/projects/{proj_id}/stages/{s0['id']}/split",
+        json={"split_elapsed_s": 60.0},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert fail_resp.status_code == 500
+    assert harness.store.get_bytes(s0_lod_key) == orig_s0_lod_bytes
+    # Stage count unchanged (still s0 and s2)
+    after_fail = client.get(f"/api/v1/projects/{proj_id}").json()
+    assert [st["id"] for st in after_fail["stages"]] == [s0["id"], s2["id"]]
+
+
+def test_stage_split_concurrent_change_returns_409_and_strava_delete_keeps_shared_bronze(
+    harness: AppHarness,
+    sample_gpx: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trip_api.ingest import _delete_stage_and_artifacts
+    from trip_api.services import prepare_split_stage_artifacts as orig_prepare_split
+
+    harness.create_user("split-race@example.com")
+    client, csrf = harness.login_client("split-race@example.com")
+
+    proj_id = client.post(
+        "/api/v1/projects",
+        json={"title": "Split Race & Shared Bronze"},
+        headers={"X-CSRF-Token": csrf},
+    ).json()["id"]
+
+    six_pt_gpx = b"""<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="pytest" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk><name>Race Track</name><trkseg>
+    <trkpt lat="0.1000" lon="0.2000"><ele>1000.0</ele><time>2001-06-02T08:00:00Z</time></trkpt>
+    <trkpt lat="0.1010" lon="0.2010"><ele>1010.0</ele><time>2001-06-02T08:01:00Z</time></trkpt>
+    <trkpt lat="0.1020" lon="0.2020"><ele>1020.0</ele><time>2001-06-02T08:02:00Z</time></trkpt>
+    <trkpt lat="0.1030" lon="0.2030"><ele>1030.0</ele><time>2001-06-02T08:03:00Z</time></trkpt>
+    <trkpt lat="0.1040" lon="0.2040"><ele>1040.0</ele><time>2001-06-02T08:04:00Z</time></trkpt>
+    <trkpt lat="0.1050" lon="0.2050"><ele>1050.0</ele><time>2001-06-02T08:05:00Z</time></trkpt>
+  </trkseg></trk>
+</gpx>"""
+    st = client.post(
+        f"/api/v1/projects/{proj_id}/gpx",
+        files={"file": ("race.gpx", six_pt_gpx, "application/gpx+xml")},
+        data={"day_index": "1", "name": "Race Track"},
+        headers={"X-CSRF-Token": csrf},
+    ).json()
+
+    # Simulate a concurrent telemetry mutation (e.g., trim or split) between prepare and lock
+    def _prepare_with_concurrent_trim(**kwargs: object) -> object:
+        prepared = orig_prepare_split(**kwargs)  # type: ignore[arg-type]
+        with harness.session_factory() as db2:
+            row = db2.get(Stage, uuid.UUID(st["id"]))
+            assert row is not None
+            row.trim_start_s = 10.0
+            db2.commit()
+        return prepared
+
+    monkeypatch.setattr(
+        stages_router, "prepare_split_stage_artifacts", _prepare_with_concurrent_trim
+    )
+    conflict_resp = client.post(
+        f"/api/v1/projects/{proj_id}/stages/{st['id']}/split",
+        json={"split_elapsed_s": 120.0},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert conflict_resp.status_code == 409
+
+    # Clear the simulated trim and verify real split succeeds while Strava delete keeps bronze
+    monkeypatch.undo()
+    with harness.session_factory() as db:
+        row = db.get(Stage, uuid.UUID(st["id"]))
+        assert row is not None
+        row.trim_start_s = None
+        db.commit()
+
+    split_resp = client.post(
+        f"/api/v1/projects/{proj_id}/stages/{st['id']}/split",
+        json={"split_elapsed_s": 120.0},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert split_resp.status_code == 200, split_resp.text
+    p1_id = split_resp.json()["part1"]["id"]
+    p2_id = split_resp.json()["part2"]["id"]
+
+    with harness.session_factory() as db:
+        p1_row = db.get(Stage, uuid.UUID(p1_id))
+        p2_row = db.get(Stage, uuid.UUID(p2_id))
+        assert p1_row is not None and p2_row is not None
+        shared_bronze_key = p1_row.bronze_object_key
+        _delete_stage_and_artifacts(db, harness.store, p1_row)
+        db.commit()
+        assert harness.store.resolve_existing_path(shared_bronze_key).is_file()
+
+        _delete_stage_and_artifacts(db, harness.store, p2_row)
+        db.commit()
+        with pytest.raises(FileNotFoundError):
+            harness.store.resolve_existing_path(shared_bronze_key)

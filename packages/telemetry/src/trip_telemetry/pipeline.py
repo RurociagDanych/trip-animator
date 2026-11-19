@@ -421,6 +421,118 @@ def apply_non_destructive_trim(
     return trimmed_df, summary
 
 
+def _normalize_split_half(
+    half: pl.DataFrame,
+    *,
+    trip_id: str,
+    stage_id: str,
+) -> tuple[pl.DataFrame, SilverTelemetrySummary]:
+    """Re-normalize sequence, distance, elapsed time, and unwrapped longitudes for a split half."""
+    n = half.height
+    unwrapped_lons, _ = unwrap_longitudes(half.get_column("lon").to_list())
+    base_cum_dist = float(half.get_column("cum_dist_m")[0])
+    half_has_timestamps = bool(half.get_column("ts_utc").is_not_null().all())
+
+    normalized = half.with_columns(
+        pl.lit(trip_id).cast(pl.Utf8).alias("trip_id"),
+        pl.lit(stage_id).cast(pl.Utf8).alias("stage_id"),
+        pl.Series("seq", list(range(n)), dtype=pl.Int64),
+        pl.Series("lon_unwrapped", unwrapped_lons, dtype=pl.Float64),
+        pl.when(pl.int_range(0, n) == 0)
+        .then(0.0)
+        .otherwise(pl.col("delta_dist_m"))
+        .cast(pl.Float64)
+        .alias("delta_dist_m"),
+        (pl.col("cum_dist_m") - base_cum_dist)
+        .clip(lower_bound=0.0)
+        .cast(pl.Float64)
+        .alias("cum_dist_m"),
+        pl.when(pl.col("ts_utc").is_not_null())
+        .then(
+            (
+                (pl.col("ts_utc") - pl.col("ts_utc").min()).dt.total_microseconds() / 1_000_000.0
+            ).clip(lower_bound=0.0)
+        )
+        .otherwise(None)
+        .cast(pl.Float64)
+        .alias("elapsed_s"),
+        pl.lit(False).alias("is_trimmed"),
+    )
+    summary = _compute_summary_from_df(
+        normalized,
+        trip_id=trip_id,
+        stage_id=stage_id,
+        has_timestamps=half_has_timestamps,
+    )
+    return normalized, summary
+
+
+def split_silver_dataframe(
+    df: pl.DataFrame,
+    *,
+    trip_id: str,
+    part1_stage_id: str,
+    part2_stage_id: str,
+    split_distance_m: float | None = None,
+    split_elapsed_s: float | None = None,
+) -> tuple[pl.DataFrame, SilverTelemetrySummary, pl.DataFrame, SilverTelemetrySummary]:
+    """Split a Silver telemetry DataFrame into two re-normalized halves by distance or elapsed s."""
+    if (split_distance_m is None) == (split_elapsed_s is None):
+        raise ValueError("Provide exactly one of split_distance_m or split_elapsed_s")
+    if split_distance_m is not None and (
+        not math.isfinite(split_distance_m) or split_distance_m <= 0.0
+    ):
+        raise ValueError("split_distance_m must be a finite positive number")
+    if split_elapsed_s is not None and (
+        not math.isfinite(split_elapsed_s) or split_elapsed_s <= 0.0
+    ):
+        raise ValueError("split_elapsed_s must be a finite positive number")
+
+    active = df.filter(~pl.col("is_trimmed")) if "is_trimmed" in df.columns else df
+    if active.height < 4:
+        raise ValueError("Stage must have at least 4 active points to split")
+
+    has_timestamps = bool(active.get_column("ts_utc").is_not_null().all())
+
+    if split_distance_m is not None:
+        base_dist = float(active.get_column("cum_dist_m")[0])
+        cum_dists = active.get_column("cum_dist_m").to_list()
+        split_idx: int | None = None
+        for idx, dist_val in enumerate(cum_dists):
+            if float(dist_val) - base_dist > split_distance_m:
+                split_idx = idx
+                break
+    else:
+        assert split_elapsed_s is not None
+        if not has_timestamps:
+            raise ValueError("Cannot split by elapsed time on a stage without timestamps")
+        timestamps = active.get_column("ts_utc").to_list()
+        base_ts = timestamps[0]
+        split_idx = None
+        for idx, ts_val in enumerate(timestamps):
+            if (ts_val - base_ts).total_seconds() > split_elapsed_s:
+                split_idx = idx
+                break
+
+    if split_idx is None or split_idx < 2 or (active.height - split_idx) < 2:
+        raise ValueError("Split point must leave at least 2 points in both halves")
+
+    part1_raw = active.slice(0, split_idx)
+    part2_raw = active.slice(split_idx)
+
+    part1_df, part1_summary = _normalize_split_half(
+        part1_raw,
+        trip_id=trip_id,
+        stage_id=part1_stage_id,
+    )
+    part2_df, part2_summary = _normalize_split_half(
+        part2_raw,
+        trip_id=trip_id,
+        stage_id=part2_stage_id,
+    )
+    return part1_df, part1_summary, part2_df, part2_summary
+
+
 def _is_teleport_jump(prev_pt: TrackPoint, cur_pt: TrackPoint) -> bool:
     if prev_pt.segment_idx != cur_pt.segment_idx:
         return False

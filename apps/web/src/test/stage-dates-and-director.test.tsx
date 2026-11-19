@@ -455,7 +455,7 @@ describe("Per-stage camera focus UI, InspectorPanel climb tag duration, and edit
       override: {
         focus_mode: "street",
         target_zoom: 15.8,
-        speed_multiplier: 0.45,
+        speed_multiplier: 0.2,
         transition_margin: 0.02,
       },
     });
@@ -504,13 +504,13 @@ describe("Per-stage camera focus UI, InspectorPanel climb tag duration, and edit
       [stage1.id]: {
         focus_mode: "street",
         target_zoom: 15.8,
-        speed_multiplier: 0.45,
+        speed_multiplier: 0.2,
         transition_margin: 0.02,
       },
     };
     renderSidebar("stages", streetSpec);
     const badge = await screen.findByTestId(`stage-focus-badge-${stage1.id}`);
-    expect(badge).toHaveTextContent("Street · 0.45×");
+    expect(badge).toHaveTextContent("Street · 0.2×");
   });
 
   it("renders InspectorPanel climb tag display duration slider and Always toggle when show_climb_callouts is enabled", () => {

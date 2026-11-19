@@ -34,16 +34,19 @@ import type {
   StageCameraOverride,
   StageFocusMode,
   StageOut,
+  StageSplitRequest,
   TransitionIcon,
 } from "../../lib/api/types";
+import { computeStageProgressSpans } from "../../lib/geo/camera";
 import {
   formatDistance,
   formatElevation,
   formatStageCalendarDate,
   formatStageTimeWindow,
 } from "../../lib/geo/format";
-import type { MatchedPhoto } from "../../lib/geo/photos";
-import type { SidebarTab } from "../../lib/state/editor-store";
+import { evaluateTimelineSchedule, type MatchedPhoto } from "../../lib/geo/photos";
+import type { TimelineStage } from "../../lib/geo/timeline";
+import { useEditorStore, type SidebarTab } from "../../lib/state/editor-store";
 import { PhotoStopsSection } from "./PhotoStopsSection";
 import {
   ACTIVITY_ICON_LIST,
@@ -79,9 +82,16 @@ const STAGE_FOCUS_PRESETS: readonly {
 }[] = [
   { mode: "auto", label: "Auto", hint: "1×" },
   { mode: "close", label: "Close", hint: "Zoom 13.8 · 0.7×" },
-  { mode: "street", label: "Street Focus", hint: "Zoom 15.8 · 0.45×" },
+  { mode: "street", label: "Street Focus", hint: "Zoom 15.8 · 0.2×" },
   { mode: "custom", label: "Custom", hint: "Manual zoom & pace" },
 ];
+
+const QUICK_PACE_OPTIONS = [0.05, 0.1, 0.25, 0.5, 1, 2] as const;
+
+function buildDefaultSplitName(baseName: string, suffix: string): string {
+  const maxBaseLen = Math.max(1, 200 - suffix.length);
+  return `${baseName.slice(0, maxBaseLen)}${suffix}`;
+}
 
 function formatSpeedMultiplier(speed: number): string {
   if (!Number.isFinite(speed)) {
@@ -492,6 +502,25 @@ export function StageSidebar({
       await onStagesMutated();
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : "Failed to delete stage");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleSplitStage(
+    stage: StageOut,
+    payload: StageSplitRequest,
+  ): Promise<string | null> {
+    setBusyAction(`split-${stage.id}`);
+    setActionError(null);
+    try {
+      const res = await stagesApi.split(projectId, stage.id, payload);
+      onSelectStage(res.part2.id);
+      await onStagesMutated();
+      onSelectStage(res.part2.id);
+      return null;
+    } catch (err) {
+      return err instanceof ApiError ? err.message : "Failed to split stage";
     } finally {
       setBusyAction(null);
     }
@@ -1083,13 +1112,16 @@ export function StageSidebar({
                 </button>
               </div>
               <StageEditorForm
-                key={`${selectedStage.id}-${selectedStage.name}-${selectedStage.day_index}-${selectedStage.activity_type ?? "cycling"}-${selectedStage.trim_start_s ?? "n"}-${selectedStage.trim_end_s ?? "n"}`}
+                key={`${selectedStage.id}-${selectedStage.name}-${selectedStage.day_index}-${selectedStage.activity_type ?? "cycling"}-${selectedStage.trim_start_s ?? "n"}-${selectedStage.trim_end_s ?? "n"}-${selectedStage.distance_m}`}
                 stage={selectedStage}
+                stages={stages}
+                matchedPhotos={matchedPhotos}
                 spec={spec}
                 busyAction={busyAction}
                 onSave={(draft) => void handleSaveStageDetails(selectedStage, draft)}
                 onClearTrim={() => void handleClearTrim(selectedStage)}
                 onDelete={() => void handleDeleteStage(selectedStage.id)}
+                onSplitStage={(payload) => handleSplitStage(selectedStage, payload)}
                 onStageColorChange={onStageColorChange}
                 onStageTransitionChange={onStageTransitionChange}
                 onStageCameraOverrideChange={onStageCameraOverrideChange}
@@ -1116,6 +1148,8 @@ export function StageSidebar({
 
 interface StageEditorFormProps {
   stage: StageOut;
+  stages: readonly StageOut[];
+  matchedPhotos: readonly MatchedPhoto[];
   spec: RenderSpecV2;
   busyAction: string | null;
   onSave: (draft: {
@@ -1127,6 +1161,7 @@ interface StageEditorFormProps {
   }) => void;
   onClearTrim: () => void;
   onDelete: () => void;
+  onSplitStage: (payload: StageSplitRequest) => Promise<string | null>;
   onStageColorChange: (stageId: string, colorHex: string) => void;
   onStageTransitionChange: (stageId: string, transition: TransitionIcon) => void;
   onStageCameraOverrideChange?: (stageId: string, override: StageCameraOverride | null) => void;
@@ -1134,11 +1169,14 @@ interface StageEditorFormProps {
 
 function StageEditorForm({
   stage,
+  stages,
+  matchedPhotos,
   spec,
   busyAction,
   onSave,
   onClearTrim,
   onDelete,
+  onSplitStage,
   onStageColorChange,
   onStageTransitionChange,
   onStageCameraOverrideChange,
@@ -1154,6 +1192,20 @@ function StageEditorForm({
   const [draftTrimEnd, setDraftTrimEnd] = useState(
     stage.trim_end_s !== null ? String(stage.trim_end_s) : "",
   );
+
+  const minSplitM = Math.max(1, Math.round(stage.distance_m * 0.05));
+  const maxSplitM = Math.max(minSplitM, Math.round(stage.distance_m * 0.95));
+  const [splitDistanceM, setSplitDistanceM] = useState(() =>
+    Math.min(maxSplitM, Math.max(minSplitM, Math.round(stage.distance_m * 0.5))),
+  );
+  const [part1Name, setPart1Name] = useState(() =>
+    buildDefaultSplitName(stage.name, " (Part 1)"),
+  );
+  const [part2Name, setPart2Name] = useState(() =>
+    buildDefaultSplitName(stage.name, " (Part 2)"),
+  );
+  const [playheadNotice, setPlayheadNotice] = useState<string | null>(null);
+  const [splitError, setSplitError] = useState<string | null>(null);
 
   const currentOverride = spec.stage_camera_overrides?.[stage.id];
   const focusMode: StageFocusMode = currentOverride?.focus_mode ?? "auto";
@@ -1182,7 +1234,7 @@ function StageEditorForm({
       onStageCameraOverrideChange(stage.id, {
         focus_mode: "street",
         target_zoom: 15.8,
-        speed_multiplier: 0.45,
+        speed_multiplier: 0.2,
         transition_margin: transitionMargin,
       });
       return;
@@ -1193,6 +1245,68 @@ function StageEditorForm({
       speed_multiplier: speedMultiplier,
       transition_margin: transitionMargin,
     });
+  }
+
+  function handleUseCurrentPlayhead() {
+    const state = useEditorStore.getState();
+    const lightweightStages: TimelineStage[] = [...stages]
+      .sort((a, b) => a.stage_order - b.stage_order)
+      .map((s) => ({
+        id: s.id,
+        name: s.name,
+        dayIndex: s.day_index,
+        stageOrder: s.stage_order,
+        activityType: normalizeActivityType(s.activity_type),
+        color: spec.stage_colors[s.id] ?? spec.track_color,
+        transition: spec.stage_transitions[s.id] ?? "none",
+        distanceM: s.distance_m,
+        elevationGainM: s.elevation_gain_m,
+        movingSeconds: s.moving_seconds,
+        elapsedSeconds: s.elapsed_seconds,
+        hasTimestamps: s.has_timestamps,
+        points: [],
+      }));
+    const effectiveDurationS = state.previewWatermark
+      ? Math.min(spec.duration_seconds, 5)
+      : spec.duration_seconds;
+    const { progressRatio } = evaluateTimelineSchedule(
+      lightweightStages,
+      matchedPhotos,
+      spec,
+      state.currentTimeRatio * effectiveDurationS,
+      effectiveDurationS,
+      state.previewWatermark,
+    );
+    const spans = computeStageProgressSpans(lightweightStages, spec);
+    const span = spans.find((s) => s.stageId === stage.id);
+    if (
+      !span ||
+      (spans.length > 1 &&
+        (progressRatio < span.startProgress - 1e-6 ||
+          progressRatio > span.endProgress + 1e-6))
+    ) {
+      setPlayheadNotice("Playhead is currently on another stage.");
+      return;
+    }
+    const spanLen = span.endProgress - span.startProgress;
+    const localFrac = spanLen > 1e-9 ? (progressRatio - span.startProgress) / spanLen : 0.5;
+    const rawDist = stage.distance_m * localFrac;
+    const clampedDist = Math.min(maxSplitM, Math.max(minSplitM, rawDist));
+    setSplitDistanceM(Math.round(clampedDist));
+    setPlayheadNotice(null);
+  }
+
+  async function handleSplitClick() {
+    setSplitError(null);
+    setPlayheadNotice(null);
+    const errMessage = await onSplitStage({
+      split_distance_m: splitDistanceM,
+      part1_name: part1Name.trim() || buildDefaultSplitName(stage.name, " (Part 1)"),
+      part2_name: part2Name.trim() || buildDefaultSplitName(stage.name, " (Part 2)"),
+    });
+    if (errMessage) {
+      setSplitError(errMessage);
+    }
   }
 
   return (
@@ -1458,7 +1572,7 @@ function StageEditorForm({
             <input
               type="range"
               aria-label="Stage playback speed"
-              min={0.25}
+              min={0.05}
               max={3.0}
               step={0.05}
               value={speedMultiplier}
@@ -1473,6 +1587,38 @@ function StageEditorForm({
               }}
               className="w-full accent-sky-accent"
             />
+            <div
+              role="group"
+              aria-label="Quick playback pace presets"
+              className="grid grid-cols-6 gap-1 pt-0.5"
+            >
+              {QUICK_PACE_OPTIONS.map((pace) => {
+                const active = Math.abs(speedMultiplier - pace) < 1e-6;
+                return (
+                  <button
+                    key={pace}
+                    type="button"
+                    data-testid={`stage-pace-chip-${pace}`}
+                    aria-pressed={active}
+                    onClick={() =>
+                      onStageCameraOverrideChange?.(stage.id, {
+                        focus_mode: "custom",
+                        target_zoom: targetZoom,
+                        speed_multiplier: pace,
+                        transition_margin: transitionMargin,
+                      })
+                    }
+                    className={`tabular-telemetry rounded border px-1 py-0.5 text-[10px] font-medium transition-colors ${
+                      active
+                        ? "border-sky-accent bg-sky-accent/15 text-sky-accent"
+                        : "border-border bg-elevated text-ink-muted hover:text-ink"
+                    }`}
+                  >
+                    {pace}×
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </div>
       </div>
@@ -1525,6 +1671,106 @@ function StageEditorForm({
       >
         {busyAction === `update-${stage.id}` ? "Applying..." : "Apply stage changes"}
       </button>
+
+      <div
+        data-testid="stage-split-section"
+        className="space-y-2 border-t border-border/70 pt-2.5"
+      >
+        <div className="flex items-center justify-between gap-2 text-[11px]">
+          <span className="inline-flex items-center gap-1 font-medium text-ink">
+            <Scissors className="h-3 w-3 text-sky-accent" aria-hidden="true" />
+            <span>Split stage</span>
+          </span>
+          <button
+            type="button"
+            data-testid="stage-split-use-playhead"
+            disabled={busyAction !== null || stage.distance_m <= 0}
+            onClick={handleUseCurrentPlayhead}
+            className="rounded border border-border bg-elevated px-1.5 py-0.5 text-[10px] font-medium text-ink-muted hover:border-sky-accent/60 hover:text-sky-accent transition-colors disabled:opacity-50"
+          >
+            Use current playhead
+          </button>
+        </div>
+
+        <div className="space-y-1">
+          <input
+            type="range"
+            aria-label="Split distance"
+            data-testid="stage-split-slider"
+            min={minSplitM}
+            max={maxSplitM}
+            step={1}
+            value={splitDistanceM}
+            onChange={(e) => {
+              setSplitDistanceM(Number(e.currentTarget.value));
+              setPlayheadNotice(null);
+            }}
+            className="w-full accent-sky-accent"
+          />
+          <div
+            data-testid="stage-split-readout"
+            className="tabular-telemetry text-[10px] text-ink-muted"
+          >
+            Part 1: {formatDistance(splitDistanceM, spec.units)} · Part 2:{" "}
+            {formatDistance(Math.max(0, stage.distance_m - splitDistanceM), spec.units)}
+          </div>
+        </div>
+
+        {playheadNotice ? (
+          <div
+            data-testid="stage-split-playhead-notice"
+            className="rounded border border-amber-accent/35 bg-amber-accent/10 px-2 py-1 text-[10px] text-amber-accent"
+          >
+            {playheadNotice}
+          </div>
+        ) : null}
+
+        <div className="grid grid-cols-2 gap-1.5">
+          <input
+            type="text"
+            aria-label="Part 1 stage name"
+            maxLength={200}
+            value={part1Name}
+            onChange={(e) => setPart1Name(e.currentTarget.value)}
+            placeholder={`${stage.name} (Part 1)`}
+            className="w-full rounded border border-border bg-elevated px-2 py-1 text-[11px] text-ink placeholder:text-ink-muted/50 focus:border-sky-accent focus:outline-none"
+          />
+          <input
+            type="text"
+            aria-label="Part 2 stage name"
+            maxLength={200}
+            value={part2Name}
+            onChange={(e) => setPart2Name(e.currentTarget.value)}
+            placeholder={`${stage.name} (Part 2)`}
+            className="w-full rounded border border-border bg-elevated px-2 py-1 text-[11px] text-ink placeholder:text-ink-muted/50 focus:border-sky-accent focus:outline-none"
+          />
+        </div>
+
+        {splitError ? (
+          <div
+            role="alert"
+            data-testid="stage-split-error"
+            className="rounded border border-coral-accent/40 bg-coral-accent/10 px-2 py-1 text-[11px] text-ink"
+          >
+            {splitError}
+          </div>
+        ) : null}
+
+        <button
+          type="button"
+          data-testid="stage-split-submit"
+          disabled={busyAction !== null || stage.point_count < 4 || stage.distance_m <= 0}
+          onClick={() => void handleSplitClick()}
+          className="inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-sky-accent/50 bg-sky-accent/10 py-1.5 text-xs font-medium text-sky-accent hover:bg-sky-accent/20 transition-colors disabled:opacity-50"
+        >
+          {busyAction === `split-${stage.id}` ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+          ) : (
+            <Scissors className="h-3.5 w-3.5" aria-hidden="true" />
+          )}
+          <span>{busyAction === `split-${stage.id}` ? "Splitting..." : "Split stage"}</span>
+        </button>
+      </div>
     </form>
   );
 }

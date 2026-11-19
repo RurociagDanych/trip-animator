@@ -381,8 +381,8 @@ def _claim_ingest_jobs(
 
 
 def _delete_stage_and_artifacts(db: Session, store: ObjectStore, stage: Stage) -> None:
+    bronze_key = stage.bronze_object_key
     keys = [
-        stage.bronze_object_key,
         stage.silver_object_key,
         stage_lod_cache_key(stage.project_id, stage.id),
         stage_chart_cache_key(stage.project_id, stage.id),
@@ -390,6 +390,11 @@ def _delete_stage_and_artifacts(db: Session, store: ObjectStore, stage: Stage) -
     ]
     db.delete(stage)
     db.flush()
+    shared_bronze = db.scalar(
+        select(Stage.id).where(Stage.bronze_object_key == bronze_key).limit(1)
+    )
+    if shared_bronze is None:
+        keys.insert(0, bronze_key)
     for key in keys:
         try:
             store.delete(key)

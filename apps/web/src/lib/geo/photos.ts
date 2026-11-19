@@ -410,7 +410,7 @@ function computeDisplayEnvelope(
   return { opacity, scale, kenBurnsScale };
 }
 
-const SPEED_LUT_STEPS = 512;
+const SPEED_LUT_STEPS = 1024;
 const MAX_SPEED_LUT_CACHE_ENTRIES = 32;
 
 interface SpeedCurveLut {

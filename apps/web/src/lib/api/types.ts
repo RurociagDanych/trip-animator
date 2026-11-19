@@ -402,6 +402,20 @@ export interface StageReorderRequest {
   day_indices?: Record<string, number>;
 }
 
+export interface StageSplitRequest {
+  split_distance_m?: number | null;
+  split_elapsed_s?: number | null;
+  part1_name?: string | null;
+  part2_name?: string | null;
+}
+
+export interface StageSplitOut {
+  part1: StageOut;
+  part2: StageOut;
+  stages: StageOut[];
+  revision: number;
+}
+
 export interface TelemetryChartPoint {
   cum_dist_m: number;
   elev_m: number | null;
@@ -956,14 +970,14 @@ function normalizeStageCameraOverride(rawOverride: unknown): StageCameraOverride
     typeof ov.target_zoom === "number" && Number.isFinite(ov.target_zoom)
       ? clampFinite(ov.target_zoom, 3.0, 18.0, 15.8)
       : null;
-  let speedMultiplier = clampFinite(ov.speed_multiplier, 0.2, 4.0, 1.0);
+  let speedMultiplier = clampFinite(ov.speed_multiplier, 0.05, 3.0, 1.0);
 
   if (focusMode === "street") {
     if (targetZoom === null) {
       targetZoom = 15.8;
     }
     if (speedMultiplier === 1.0) {
-      speedMultiplier = 0.45;
+      speedMultiplier = 0.2;
     }
   } else if (focusMode === "close") {
     if (targetZoom === null) {

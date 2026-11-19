@@ -37,6 +37,8 @@ import type {
   StageAutoOrganizeRequest,
   StageOut,
   StageReorderRequest,
+  StageSplitOut,
+  StageSplitRequest,
   StageUpdateRequest,
   StravaActivityOut,
   StravaBatchImportOut,
@@ -200,6 +202,12 @@ export const stagesApi = {
   ): Promise<StageAutoOrganizeOut> {
     return apiClient.post<StageAutoOrganizeOut>(
       `/api/v1/projects/${projectId}/stages/auto-organize`,
+      payload,
+    );
+  },
+  split(projectId: string, stageId: string, payload: StageSplitRequest): Promise<StageSplitOut> {
+    return apiClient.post<StageSplitOut>(
+      `/api/v1/projects/${projectId}/stages/${stageId}/split`,
       payload,
     );
   },
