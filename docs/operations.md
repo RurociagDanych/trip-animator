@@ -1,0 +1,125 @@
+# Operations
+
+Deployment, integration and maintenance notes for self-hosting Trip Animator.
+
+## Status
+
+Beta, self-hosted. You operate the application, database, object storage, backups, TLS and any external integrations.
+
+Exercised in local QA: GPX/TCX ingestion, share/playback, the mobile header, and a five-second 1280×720 flat-mode MP4 render.
+
+Not yet established: real Strava OAuth behavior, manual FIT import, full-length 1080p export, terrain/3D rendering. Render cost and success depend on the host and map-tile availability.
+
+## Local development setup
+
+### Prerequisites
+- Python 3.12+ with [`uv`](https://docs.astral.sh/uv/)
+- Node.js 24+ with [`pnpm`](https://pnpm.io/) v11
+- Docker Engine with the Docker Compose plugin (the bootstrap starts this repo's PostgreSQL service)
+- `ffmpeg` and Playwright Chromium are optional; install them only if running the local render worker
+
+### Bootstrap
+
+From the repository root, run:
+
+```bash
+make bootstrap
+```
+
+This runs `scripts/bootstrap-local.sh`: it creates `.env` from `.env.example` only when `.env` is absent, installs the locked Python and JavaScript dependencies, starts the Compose PostgreSQL service, waits for its health check, and applies Alembic migrations. It does not start the API, web app, object store, or render worker. Review `.env` locally before starting services; do not share it.
+
+Bootstrap is local-only: it refuses `APP_ENV=production`, non-loopback database hosts, URL query/fragment options, and libpq host/service overrides. Existing process variables take precedence over `.env`. Set `POSTGRES_PORT` and the port in `DATABASE_URL` together when the default local PostgreSQL port is occupied.
+
+Create a local user account (or use dev-login when `DEV_AUTH_ENABLED=true` in `APP_ENV=development`):
+
+```bash
+uv run python -m trip_api.cli create-user \
+  --email rider@example.com \
+  --password "correct-horse-battery-staple" \
+  --display-name "Alpine Rider"
+```
+
+### Start services
+
+Run each in a separate terminal:
+
+```bash
+# Terminal 1: FastAPI backend (:8000)
+make dev-api
+
+# Terminal 2: Vite React frontend (:5173, proxies /api to :8000)
+make dev-web
+
+# Terminal 3 (optional, for MP4 rendering): Render worker
+uv run python -c "from trip_worker.runner import run_worker_loop; run_worker_loop()"
+```
+
+## Strava OAuth2 setup
+
+1. In your [Strava API Application settings](https://www.strava.com/settings/api), set **Authorization Callback Domain** to:
+   - `localhost` for local development or local Docker Compose, or
+   - your production domain (e.g., `trips.example.com`).
+2. Configure `.env`:
+   - `STRAVA_CLIENT_ID=<your-client-id>`
+   - `STRAVA_CLIENT_SECRET=<your-client-secret>`
+   - `STRAVA_REDIRECT_URI`:
+     - Local Vite dev: `http://localhost:5173/strava/callback`
+     - Docker Compose (Caddy HTTP): `http://localhost/strava/callback`
+     - Production HTTPS: `https://<your-domain>/strava/callback`
+   - Optional webhook verification token: `STRAVA_VERIFY_TOKEN=<random-secret>`
+
+> Note: The SPA route `/strava/callback` receives the Strava redirect and invokes `GET /api/v1/strava/callback` using your authenticated session cookie.
+
+## Docker Compose deployment
+
+`infra/compose.yaml` orchestrates the complete hardened stack (`postgres`, `minio`, `minio-init`, `migrate`, `api`, `worker`, `web`, `caddy`).
+
+```bash
+# Validate Compose configuration
+make compose-config
+
+# Build and launch the full stack
+docker compose -f infra/compose.yaml --env-file .env up -d --build
+```
+
+For production (`APP_ENV=production`), ensure `.env` overrides all secrets (`POSTGRES_PASSWORD`, `SESSION_SECRET`, `TOKEN_ENCRYPTION_KEY`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `METRICS_TOKEN`), sets `DEV_AUTH_ENABLED=false`, and sets `DOMAIN` + `ALLOWED_ORIGINS` for Caddy automatic TLS.
+
+### Observability and retention reaper
+
+- **Liveness**: `GET /health` → `200 {"status":"ok","service":"trip-api","env":"..."}`
+- **Readiness**: `GET /ready` → `200` when `SELECT 1` succeeds against PostgreSQL, `503` otherwise
+- **Metrics**: `GET /metrics` (internal `api:8000/metrics`, blocked at Caddy edge, Bearer-gated by `METRICS_TOKEN`, zero PII)
+- **Retention Reaper**: Prunes expired `sessions`, expired `oauth_states`, stale `rate_limits`, and terminal `render_jobs` + ObjectStore `.mp4`/`.webp` artifacts past `RENDER_RETENTION_DAYS` (default `7`):
+
+```bash
+# Dry-run preview
+uv run python -m trip_api.cli reap --dry-run --json
+
+# Execute prune
+uv run python -m trip_api.cli reap
+```
+
+In Docker Compose, run the reaper on a host cron or systemd timer:
+
+```bash
+docker compose -f infra/compose.yaml exec -T api python -m trip_api.cli reap
+```
+
+### Optional Apache Airflow 3 Orchestration (`--profile airflow`)
+
+Airflow is isolated in its own standalone project (`airflow/pyproject.toml`) and disabled by default so the core stack remains lean. When enabled with `--profile airflow`, `airflow-init` provisions a dedicated PostgreSQL database (`${AIRFLOW_DB:-airflow}`) to avoid `alembic_version` collisions, and `airflow` exposes the UI on loopback `127.0.0.1:${AIRFLOW_PORT:-8081}` (`read_only: true`, UID `10001`):
+
+- `trip_dbt_gold_pipeline` (`0 * * * *`): Discovers Silver GeoParquet objects, stages them locally, runs `dbt-duckdb`, atomically swaps `trip_analytics.duckdb` into `GOLD_OUTPUT_DIR`, and verifies mart parity.
+- `trip_strava_incremental_sync` (`*/30 * * * *`): Syncs active Strava OAuth connections via dynamic task mapping using AEAD token decryption/refresh, SSRF outbound guards, per-user activity deduplication, and zero tokens in XCom.
+- `trip_platform_maintenance_and_audit` (`0 3 * * *`): Executes `reap_expired`, reconciles PostgreSQL `Stage`/`RenderJob` records against `ObjectStore`, and validates Silver GeoParquet schemas and metadata.
+
+```bash
+# Start stack with optional Airflow orchestration
+make airflow-up
+
+# Run Airflow DAG integrity + pure-Python task tests
+make test-airflow
+make lint-airflow
+```
+
+See [security.md](security.md) before exposing a deployment to a network.
