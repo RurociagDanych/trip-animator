@@ -1,5 +1,35 @@
 import type { ActivityType } from "../../components/icons";
 
+export interface VaultActivityReadinessOut { metadata_available: boolean; has_gps: boolean; track_ready: boolean; tile_precision: "none" | "summary_polyline" | "full_stream" }
+export interface VaultActivityListItemOut {
+  id: string; name: string; activity_type: string; raw_sport_type: string; source_provider: string;
+  started_at: string; local_date: string; timezone_name: string | null; date_is_utc_fallback: boolean;
+  distance_m: number | null; elevation_gain_m: number | null; moving_seconds: number | null; elapsed_seconds: number | null;
+  has_gps: boolean; readiness: VaultActivityReadinessOut;
+}
+export interface VaultActivitySummaryOut {
+  activity_count: number; distance_m: number | null; distance_known_count: number;
+  elevation_gain_m: number | null; elevation_gain_known_count: number; moving_seconds: number | null;
+  moving_seconds_known_count: number; elapsed_seconds: number | null; elapsed_seconds_known_count: number;
+  gps_activity_count: number; no_gps_activity_count: number;
+}
+export interface VaultActivityListOut { items: VaultActivityListItemOut[]; total: number; offset: number; limit: number; summary: VaultActivitySummaryOut }
+export interface VaultActivityDetailOut extends VaultActivityListItemOut {
+  strava_activity_id: number | null; started_at_local: string | null; utc_offset_s: number;
+  elevation_loss_m: number | null; elev_high_m: number | null; elev_low_m: number | null;
+  avg_speed_mps: number | null; max_speed_mps: number | null; avg_hr_bpm: number | null; max_hr_bpm: number | null;
+  avg_watts: number | null; weighted_watts: number | null; kilojoules: number | null; avg_cadence: number | null;
+  suffer_score: number | null; gear_id: string | null; gear_name: string | null; is_commute: boolean;
+  is_indoor_virtual: boolean; is_private: boolean; summary_polyline: string | null; tile_count_z14: number;
+  new_tiles_z14_count: number; primary_country: string | null; source_url: string | null;
+  project_usages: { project_id: string; project_title: string; stage_id: string; stage_name: string }[];
+}
+export interface VaultSyncStatusOut {
+  connected: boolean; status: string; phase: string; phase_label: string; mode: string; progress_pct: number | null;
+  processed_activities: number; estimated_total_activities: number | null; imported_count: number; vault_version: number;
+  last_synced_at: string | null; last_error: string | null;
+}
+
 export type ResolutionPreset =
   | "1280x720"
   | "1920x1080"

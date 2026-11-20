@@ -42,6 +42,7 @@ from trip_api.routers import (
     stages,
     strava,
     telemetry,
+    vault,
 )
 from trip_api.storage import ObjectStore
 
@@ -305,6 +306,7 @@ def create_app(
     application.include_router(telemetry.router)
     application.include_router(analytics.router)
     application.include_router(strava.router)
+    application.include_router(vault.router)
     application.include_router(renders.router)
     application.include_router(share.router)
 

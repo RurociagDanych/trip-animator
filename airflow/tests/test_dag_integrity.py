@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-airflow = pytest.importorskip("airflow")
+pytest.importorskip("airflow")
 
 
 def _load_dagbag(tmp_path: Path, monkeypatch: Any) -> Any:
@@ -50,6 +50,9 @@ def test_all_three_dags_load_without_errors_or_cycles(tmp_path: Path, monkeypatc
 def test_dag_schedules_tasks_edges_and_zero_secret_literals(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
+    from airflow.serialization.enums import Encoding
+    from airflow.serialization.serialized_objects import SerializedDAG
+
     dagbag = _load_dagbag(tmp_path, monkeypatch)
 
     gold_dag = dagbag.dags["trip_dbt_gold_pipeline"]
@@ -72,21 +75,15 @@ def test_dag_schedules_tasks_edges_and_zero_secret_literals(
     }
 
     strava_dag = dagbag.dags["trip_strava_incremental_sync"]
-    assert str(strava_dag.schedule) == "*/30 * * * *"
-    assert set(strava_dag.tags) == {"trip-animator", "strava", "ingestion", "bronze-silver"}
-    assert set(strava_dag.task_ids) == {
-        "discover_active_strava_connections",
-        "has_active_strava_connections",
-        "sync_strava_connection",
-        "summarize_strava_sync",
-    }
-    assert (
-        "sync_strava_connection"
-        in strava_dag.get_task("has_active_strava_connections").downstream_task_ids
-    )
-    assert strava_dag.get_task("sync_strava_connection").downstream_task_ids == {
-        "summarize_strava_sync"
-    }
+    assert str(strava_dag.schedule) == "* * * * *"
+    assert strava_dag.is_paused_upon_creation is False
+    assert set(strava_dag.tags) == {"trip-animator", "strava", "vault"}
+    assert set(strava_dag.task_ids) == {"schedule_and_process_vault_syncs"}
+    serialized = SerializedDAG.to_dict(strava_dag)
+    assert serialized["dag"]["dag_id"] == "trip_strava_incremental_sync"
+    serialized_task = serialized["dag"]["tasks"][0][Encoding.VAR]
+    assert serialized_task["task_id"] == "schedule_and_process_vault_syncs"
+    assert serialized_task["task_type"] == "_PythonDecoratedOperator"
 
     maint_dag = dagbag.dags["trip_platform_maintenance_and_audit"]
     assert str(maint_dag.schedule) == "0 3 * * *"

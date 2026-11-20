@@ -72,11 +72,30 @@ make dev-api                        # FastAPI on :8000
 make dev-web                        # Vite on :5173
 ```
 
-For the render worker, Strava setup, Docker Compose, observability and Airflow, see [docs/operations.md](docs/operations.md).
+### Required Apache Airflow 3 Orchestration
 
-## Tests
+Airflow is included in the default Compose stack and is required to execute Strava Vault synchronization. Catalog browsing and GPX import remain available when it is stopped; sync requests stay queued until it recovers. The isolated project (`airflow/pyproject.toml`) uses a dedicated PostgreSQL database (`${AIRFLOW_DB:-airflow}`), avoiding application migration collisions. The supervised single-host runtime exposes its UI only on loopback `127.0.0.1:${AIRFLOW_PORT:-8081}` (`read_only: true`, UID `10001`). API and execution JWT keys are persisted in the Airflow logs volume unless explicitly configured. The sync DAG starts unpaused; other schedules are opt-in:
+
+- `trip_dbt_gold_pipeline` (`0 * * * *`): Discovers Silver GeoParquet objects, stages them locally, runs `dbt-duckdb`, atomically swaps `trip_analytics.duckdb` into `GOLD_OUTPUT_DIR`, and verifies mart parity.
+- `trip_strava_incremental_sync` (`* * * * *`): Drains the durable Vault queue in bounded batches, resumes historical backfill and rate-limited jobs, and schedules incremental reconciliation every 30 minutes. Activities without GPS are retained; synchronization never creates projects or stages. Tokens remain out of XCom.
+- `trip_platform_maintenance_and_audit` (`0 3 * * *`): Executes `reap_expired`, reconciles PostgreSQL `Stage`/`RenderJob` records against `ObjectStore`, and validates Silver GeoParquet schemas and metadata.
 
 ```bash
+# Start just the orchestrator (also included in normal docker compose up)
+make airflow-up
+
+# Stop execution without removing services or volumes
+make airflow-down
+
+# Run required Airflow DAG integrity and task behavior tests
+make test-airflow
+make lint-airflow
+```
+
+---
+
+## Testing, Linting & Verification
+
 ```bash
 # Workspace targets
 make lint           # ruff check apps packages + eslint

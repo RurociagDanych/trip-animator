@@ -29,7 +29,7 @@ from trip_airflow.maintenance_audit import (
     validate_silver_parquet_metadata,
 )
 from trip_airflow.storage_helpers import object_exists
-from trip_api.db import IngestJob, OAuthConnection, RenderJob, Stage
+from trip_api.db import IngestJob, OAuthConnection, Project, RenderJob, Stage, VaultActivity
 from trip_api.security import encrypt_secret
 from trip_api.services import (
     stage_chart_cache_key,
@@ -194,6 +194,7 @@ def test_ingest_worker_webhook_queue_and_silver_replay(
 ) -> None:
     monkeypatch.setattr(socket, "getaddrinfo", fake_public_getaddrinfo)
     user = airflow_harness.create_user("webhook@example.com")
+    project = airflow_harness.create_project(user.id, "Explicit Strava Import")
     key = airflow_harness.settings.decoded_encryption_key
     aad = f"oauth:{user.id}:strava".encode()
     now = datetime.now(UTC)
@@ -214,6 +215,19 @@ def test_ingest_worker_webhook_queue_and_silver_replay(
                 event_type="create",
                 external_owner_id="998877",
                 external_object_id=555001,
+                payload_json={
+                    "aspect_type": "create",
+                    "source": "strava_bulk_import",
+                    "project_id": str(project.id),
+                },
+            )
+        )
+        db.add(
+            IngestJob(
+                provider="strava",
+                event_type="create",
+                external_owner_id="998877",
+                external_object_id=555003,
                 payload_json={"aspect_type": "create"},
             )
         )
@@ -229,11 +243,14 @@ def test_ingest_worker_webhook_queue_and_silver_replay(
         db.commit()
 
     def _mock_transport(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/activities/555001"):
+        if request.url.path.endswith("/activities/555001") or request.url.path.endswith(
+            "/activities/555003"
+        ):
+            activity_id = int(request.url.path.rsplit("/", 1)[-1])
             return httpx.Response(
                 200,
                 json={
-                    "id": 555001,
+                    "id": activity_id,
                     "name": "Sample Morning Ride",
                     "sport_type": "Ride",
                     "start_date": "2001-01-02T08:00:00Z",
@@ -263,14 +280,23 @@ def test_ingest_worker_webhook_queue_and_silver_replay(
             http_client_factory=lambda: httpx.Client(transport=transport),
             now=now,
         )
-        assert res["succeeded"] == 1
+        assert res["succeeded"] == 2
         assert res["ignored"] == 1
         assert res["failed"] == 0
 
         stage = db.scalar(select(Stage).where(Stage.strava_activity_id == 555001))
         assert stage is not None
+        assert stage.project_id == project.id
         assert stage.etl_version == CURRENT_ETL_VERSION
         assert stage.bronze_sha256 is not None
+
+        # Ordinary webhook creates a Vault activity without creating a project stage.
+        webhook_activity = db.scalar(
+            select(VaultActivity).where(VaultActivity.strava_activity_id == 555003)
+        )
+        assert webhook_activity is not None
+        assert db.scalar(select(Stage).where(Stage.strava_activity_id == 555003)) is None
+        assert db.scalar(select(Project).where(Project.title == "Strava Auto-Sync")) is None
 
         # Test multi-day clustering helper for day + 2
         next_day_idx = cluster_activity_day_index(

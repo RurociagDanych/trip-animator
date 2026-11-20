@@ -42,6 +42,14 @@ from trip_api.services import (
     write_audit_event,
 )
 from trip_api.storage import ObjectStore
+from trip_api.vault_sync import (
+    bump_user_vault_version,
+    delete_strava_vault_activity,
+    mirror_stage_to_vault,
+    prepare_vault_geometry_from_parsed_track,
+    recompute_user_chronological_new_tiles,
+    upsert_strava_activity_to_vault,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -238,9 +246,10 @@ def _refresh_access_token_if_needed(
 
 
 def _is_rate_limited(headers: Mapping[str, str]) -> bool:
-    """Inspect Strava X-RateLimit-Usage / X-RateLimit-Limit headers for backpressure."""
-    usage_raw = headers.get("x-ratelimit-usage") or headers.get("X-RateLimit-Usage")
-    limit_raw = headers.get("x-ratelimit-limit") or headers.get("X-RateLimit-Limit")
+    """Inspect Strava X-ReadRateLimit-* or X-RateLimit-* headers for backpressure."""
+    lower = {k.lower(): v for k, v in headers.items()}
+    usage_raw = lower.get("x-readratelimit-usage") or lower.get("x-ratelimit-usage")
+    limit_raw = lower.get("x-readratelimit-limit") or lower.get("x-ratelimit-limit")
     if not usage_raw or not limit_raw:
         return False
     try:
@@ -457,6 +466,11 @@ def process_pending_ingest_jobs(
             continue
 
         if job.event_type == "delete":
+            deleted_vault_count = delete_strava_vault_activity(
+                db,
+                user_id=conn.user_id,
+                strava_activity_id=job.external_object_id,
+            )
             matching_stages = list(
                 db.scalars(
                     select(Stage)
@@ -479,16 +493,27 @@ def process_pending_ingest_jobs(
                     event_type="stage.strava_webhook_deleted",
                     metadata={"strava_activity_id": job.external_object_id},
                 )
+            if deleted_vault_count > 0:
+                write_audit_event(
+                    db,
+                    user_id=conn.user_id,
+                    event_type="vault.strava_webhook_deleted",
+                    metadata={
+                        "strava_activity_id": job.external_object_id,
+                        "deleted_count": deleted_vault_count,
+                    },
+                )
             job.status = "succeeded"
             job.lease_expires_at = None
             db.commit()
             succeeded += 1
             continue
 
-        if (
+        is_bulk_import = (
             isinstance(job.payload_json, dict)
             and job.payload_json.get("source") == "strava_bulk_import"
-        ):
+        )
+        if is_bulk_import:
             existing_bulk_stage_id = db.scalar(
                 select(Stage.id)
                 .join(Project, Stage.project_id == Project.id)
@@ -554,7 +579,62 @@ def process_pending_ingest_jobs(
                 raise StravaUpstreamError(f"Activity fetch failed (status={act_resp.status_code})")
 
             activity_json = act_resp.json()
-            if not isinstance(activity_json, dict) or not activity_json.get("start_latlng"):
+            if not isinstance(activity_json, dict):
+                raise ValueError("Malformed Strava activity JSON")
+
+            existing_stage = db.scalar(
+                select(Stage)
+                .join(Project, Stage.project_id == Project.id)
+                .where(
+                    Project.owner_user_id == conn.user_id,
+                    Stage.strava_activity_id == job.external_object_id,
+                )
+            )
+
+            # Decision 1A: Webhook create/update upserts into Activity Vault only,
+            # hydrating streams ONLY when a Stage for this activity already exists.
+            if not is_bulk_import and existing_stage is None:
+                upsert_res = upsert_strava_activity_to_vault(
+                    db,
+                    user_id=conn.user_id,
+                    item=activity_json,
+                    now=current_time,
+                )
+                recompute_user_chronological_new_tiles(db, conn.user_id)
+                bump_user_vault_version(db, conn.user_id)
+                write_audit_event(
+                    db,
+                    user_id=conn.user_id,
+                    event_type="vault.strava_webhook_upserted",
+                    metadata={
+                        "vault_activity_id": str(upsert_res.vault_activity.id),
+                        "strava_activity_id": job.external_object_id,
+                        "event_type": job.event_type,
+                    },
+                )
+                job.status = "succeeded"
+                job.error_message = None
+                job.lease_expires_at = None
+                db.commit()
+                succeeded += 1
+                continue
+
+            if not activity_json.get("start_latlng"):
+                if not is_bulk_import:
+                    upsert_res = upsert_strava_activity_to_vault(
+                        db,
+                        user_id=conn.user_id,
+                        item=activity_json,
+                        now=current_time,
+                    )
+                    recompute_user_chronological_new_tiles(db, conn.user_id)
+                    bump_user_vault_version(db, conn.user_id)
+                    job.status = "succeeded"
+                    job.error_message = None
+                    job.lease_expires_at = None
+                    db.commit()
+                    succeeded += 1
+                    continue
                 job.status = "ignored"
                 job.lease_expires_at = None
                 job.error_message = "Strava activity has no GPS stream"
@@ -602,6 +682,7 @@ def process_pending_ingest_jobs(
                 start_date=activity_json.get("start_date"),
                 name=str(activity_json.get("name") or f"Strava {job.external_object_id}"),
             )
+            vault_geom = prepare_vault_geometry_from_parsed_track(parsed)
             raw_bronze = json.dumps(
                 {"activity": activity_json, "streams": streams_json},
                 separators=(",", ":"),
@@ -613,23 +694,18 @@ def process_pending_ingest_jobs(
                 parsed.name,
             )
 
-            existing_stage = db.scalar(
-                select(Stage)
-                .join(Project, Stage.project_id == Project.id)
-                .where(
-                    Project.owner_user_id == conn.user_id,
-                    Stage.strava_activity_id == job.external_object_id,
-                )
-            )
             if existing_stage is not None:
-                _rewrite_stage_from_parsed(
-                    db=db,
-                    store=store,
+                # Refresh the canonical Strava record, never the project stage:
+                # that stage may have been renamed, trimmed, or split locally.
+                mirror_stage_to_vault(
+                    db,
+                    user_id=conn.user_id,
                     stage=existing_stage,
-                    parsed=parsed,
-                    raw_bronze_bytes=raw_bronze,
-                    stage_name=parsed.name or existing_stage.name,
-                    activity_type=resolved_activity,
+                    geometry=vault_geom,
+                    trusted_provider_geometry=True,
+                    strava_activity_json=activity_json,
+                    recompute_new_tiles=True,
+                    now=current_time,
                 )
                 target_project_id = existing_stage.project_id
                 stage_id_val = existing_stage.id
@@ -652,6 +728,16 @@ def process_pending_ingest_jobs(
                     activity_type=resolved_activity,
                     external_source_id=str(job.external_object_id),
                     strava_activity_id=job.external_object_id,
+                )
+                mirror_stage_to_vault(
+                    db,
+                    user_id=conn.user_id,
+                    stage=new_stage,
+                    geometry=vault_geom,
+                    trusted_provider_geometry=True,
+                    strava_activity_json=activity_json,
+                    recompute_new_tiles=True,
+                    now=current_time,
                 )
                 target_project_id = target_project.id
                 stage_id_val = new_stage.id
@@ -774,7 +860,18 @@ def _rewrite_stage_from_parsed(
     stage.max_lat = summary.max_lat
     stage.min_lon = summary.min_lon
     stage.max_lon = summary.max_lon
-    stage.warnings_json = [w.model_dump(mode="json") for w in parsed.warnings]
+    warnings: list[dict[str, object]] = [w.model_dump(mode="json") for w in parsed.warnings]
+    split_exclusion: dict[str, object] = {"code": "vault_canonical_excluded_split_segment"}
+    if (
+        any(
+            warning.get("code") == "vault_canonical_excluded_split_segment"
+            for warning in (stage.warnings_json or [])
+            if isinstance(warning, dict)
+        )
+        and split_exclusion not in warnings
+    ):
+        warnings.append(split_exclusion)
+    stage.warnings_json = warnings
     db.flush()
 
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
@@ -11,11 +11,13 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Float,
     ForeignKey,
     Index,
     Integer,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -195,6 +197,17 @@ class Stage(Base):
     )
     external_source_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     strava_activity_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    vault_activity_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "vault_activities.id",
+            ondelete="SET NULL",
+            use_alter=True,
+            name="fk_stages_vault_activity_id_vault_activities",
+        ),
+        nullable=True,
+        index=True,
+    )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     stage_order: Mapped[int] = mapped_column(Integer, nullable=False)
     day_index: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
@@ -424,6 +437,284 @@ class RateLimitRecord(Base):
     bucket_key: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     request_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class VaultActivity(Base):
+    __tablename__ = "vault_activities"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "source_provider",
+            "external_activity_id",
+            name="uq_vault_activities_user_provider_ext",
+        ),
+        CheckConstraint(
+            "source_provider IN ('strava', 'upload', 'stage')",
+            name="ck_vault_activities_source_provider",
+        ),
+        CheckConstraint(_ACTIVITY_TYPE_CHECK_SQL, name="ck_vault_activities_activity_type"),
+        CheckConstraint(
+            "tile_precision IN ('none', 'summary_polyline', 'full_stream')",
+            name="ck_vault_activities_tile_precision",
+        ),
+        Index("ix_vault_activities_user_started", "user_id", "started_at"),
+        Index("ix_vault_activities_user_local_date", "user_id", "local_date"),
+        Index("ix_vault_activities_user_type_date", "user_id", "activity_type", "local_date"),
+        Index("ix_vault_activities_user_strava", "user_id", "strava_activity_id"),
+        Index(
+            "ix_vault_activities_user_bbox",
+            "user_id",
+            "min_lat",
+            "max_lat",
+            "min_lon",
+            "max_lon",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    source_provider: Mapped[str] = mapped_column(String(16), nullable=False)
+    external_activity_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    strava_activity_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    source_stage_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("stages.id", ondelete="SET NULL"), nullable=True
+    )
+
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    raw_sport_type: Mapped[str] = mapped_column(
+        String(64), default="", server_default="", nullable=False
+    )
+    activity_type: Mapped[str] = mapped_column(
+        String(32), default="cycling", server_default="cycling", nullable=False
+    )
+
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at_local: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=False), nullable=True
+    )
+    local_date: Mapped[date] = mapped_column(Date, nullable=False)
+    timezone_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    utc_offset_s: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+
+    distance_m: Mapped[float] = mapped_column(
+        Float, default=0.0, server_default=text("0"), nullable=False
+    )
+    elevation_gain_m: Mapped[float] = mapped_column(
+        Float, default=0.0, server_default=text("0"), nullable=False
+    )
+    elevation_loss_m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    elev_high_m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    elev_low_m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    moving_seconds: Mapped[float] = mapped_column(
+        Float, default=0.0, server_default=text("0"), nullable=False
+    )
+    elapsed_seconds: Mapped[float] = mapped_column(
+        Float, default=0.0, server_default=text("0"), nullable=False
+    )
+    avg_speed_mps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_speed_mps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_hr_bpm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_hr_bpm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_watts: Mapped[float | None] = mapped_column(Float, nullable=True)
+    weighted_watts: Mapped[float | None] = mapped_column(Float, nullable=True)
+    kilojoules: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_cadence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    suffer_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    gear_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    gear_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    is_commute: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+    is_indoor_virtual: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+    is_private: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+    has_gps: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+
+    start_lat: Mapped[float | None] = mapped_column(Float, nullable=True)
+    start_lon: Mapped[float | None] = mapped_column(Float, nullable=True)
+    end_lat: Mapped[float | None] = mapped_column(Float, nullable=True)
+    end_lon: Mapped[float | None] = mapped_column(Float, nullable=True)
+    min_lat: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_lat: Mapped[float | None] = mapped_column(Float, nullable=True)
+    min_lon: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_lon: Mapped[float | None] = mapped_column(Float, nullable=True)
+    summary_polyline: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    tile_precision: Mapped[str] = mapped_column(
+        String(16), default="none", server_default="none", nullable=False
+    )
+    tile_count_z14: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    new_tiles_z14_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    primary_country: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    bronze_object_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    raw_metadata_json: Mapped[dict[str, object]] = mapped_column(
+        JSONVariant, default=dict, nullable=False
+    )
+
+    synced_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class VaultActivityTile(Base):
+    __tablename__ = "vault_activity_tiles"
+    __table_args__ = (
+        CheckConstraint("zoom IN (14, 17)", name="ck_vault_activity_tiles_zoom"),
+        CheckConstraint("tile_x >= 0 AND tile_y >= 0", name="ck_vault_activity_tiles_xy_nonneg"),
+        Index(
+            "ix_vault_activity_tiles_user_zoom_xy",
+            "user_id",
+            "zoom",
+            "tile_x",
+            "tile_y",
+            "vault_activity_id",
+        ),
+        Index("ix_vault_activity_tiles_user_key", "user_id", "tile_key"),
+    )
+
+    vault_activity_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("vault_activities.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    zoom: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
+    tile_x: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tile_y: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    tile_key: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class VaultSyncState(Base):
+    __tablename__ = "vault_sync_states"
+    __table_args__ = (
+        UniqueConstraint("user_id", "provider", name="uq_vault_sync_states_user_provider"),
+        CheckConstraint(
+            "status IN ('idle', 'queued', 'running', 'rate_limited', 'failed', 'completed')",
+            name="ck_vault_sync_states_status",
+        ),
+        CheckConstraint(
+            "phase IN ("
+            "'idle', 'discovering_pages', 'importing_activities', "
+            "'computing_tiles', 'rate_limit_paused', 'completed', 'failed'"
+            ")",
+            name="ck_vault_sync_states_phase",
+        ),
+        CheckConstraint(
+            "mode IN ('full_backfill', 'incremental')",
+            name="ck_vault_sync_states_mode",
+        ),
+        Index("ix_vault_sync_states_status_retry", "status", "next_retry_at", "lease_expires_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(
+        String(16), default="strava", server_default="strava", nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(24), default="idle", server_default="idle", nullable=False
+    )
+    phase: Mapped[str] = mapped_column(
+        String(32), default="idle", server_default="idle", nullable=False
+    )
+    mode: Mapped[str] = mapped_column(
+        String(24), default="incremental", server_default="incremental", nullable=False
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    backfill_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    backfill_cursor_before_epoch: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    incremental_after_epoch: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    retry_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    rate_limit_short_used: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rate_limit_short_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rate_limit_daily_used: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rate_limit_daily_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    current_page: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    total_scanned: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    total_upserted: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    total_skipped_existing: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    total_skipped_no_gps: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    total_failed: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    tiles_computed_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    estimated_total_activities: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    vault_version: Mapped[int] = mapped_column(
+        Integer, default=1, server_default=text("1"), nullable=False
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class VaultGear(Base):
+    __tablename__ = "vault_gears"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    provider: Mapped[str] = mapped_column(String(16), primary_key=True, default="strava")
+    gear_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    gear_type: Mapped[str] = mapped_column(
+        String(24), default="other", server_default="other", nullable=False
+    )
+    distance_m: Mapped[float] = mapped_column(
+        Float, default=0.0, server_default=text("0"), nullable=False
+    )
+    is_primary: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )

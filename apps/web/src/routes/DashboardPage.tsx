@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import { ActivityIcon, getActivityIconMeta } from "../components/icons";
+import { ActivityLibraryView } from "../components/dashboard/ActivityLibraryView";
 
 const LazyAtlasView = lazy(() =>
   import("../components/dashboard/AtlasView").then((m) => ({
@@ -42,7 +43,7 @@ import { polylinesToSvgPath } from "../lib/geo/polyline";
 export function DashboardPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [dashboardTab, setDashboardTab] = useState<"trips" | "atlas">("trips");
+  const [dashboardTab, setDashboardTab] = useState<"trips" | "atlas" | "library">("trips");
   const [newTitle, setNewTitle] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -217,6 +218,15 @@ export function DashboardPage() {
               <button
                 type="button"
                 role="tab"
+                aria-selected={dashboardTab === "library"}
+                onClick={() => setDashboardTab("library")}
+                className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition-colors ${dashboardTab === "library" ? "bg-elevated text-sky-accent" : "text-ink-muted hover:text-ink"}`}
+              >
+                <span>Activity Library</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
                 aria-selected={dashboardTab === "atlas"}
                 onClick={() => setDashboardTab("atlas")}
                 className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition-colors ${
@@ -265,7 +275,7 @@ export function DashboardPage() {
           </div>
         ) : null}
 
-        {dashboardTab === "atlas" ? (
+        {dashboardTab === "library" ? <ActivityLibraryView /> : dashboardTab === "atlas" ? (
           <Suspense
             fallback={
               <div className="flex items-center justify-center rounded-lg border border-border bg-surface p-10 text-xs text-ink-muted">

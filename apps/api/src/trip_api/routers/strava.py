@@ -65,6 +65,10 @@ from trip_api.services import (
     write_audit_event,
 )
 from trip_api.storage import ObjectStore
+from trip_api.vault_sync import (
+    mirror_stage_to_vault,
+    prepare_vault_geometry_from_parsed_track,
+)
 
 router = APIRouter(tags=["strava"])
 logger = logging.getLogger(__name__)
@@ -961,7 +965,8 @@ async def _import_single_strava_activity(
         stage_name,
     )
 
-    return ingest_parsed_track(
+    vault_geom = prepare_vault_geometry_from_parsed_track(parsed)
+    stage = ingest_parsed_track(
         db=db,
         store=store,
         project=project,
@@ -977,6 +982,15 @@ async def _import_single_strava_activity(
         external_source_id=str(activity_id),
         strava_activity_id=activity_id,
     )
+    mirror_stage_to_vault(
+        db,
+        user_id=project.owner_user_id,
+        stage=stage,
+        geometry=vault_geom,
+        strava_activity_json=activity_json,
+        recompute_new_tiles=True,
+    )
+    return stage
 
 
 @router.post(

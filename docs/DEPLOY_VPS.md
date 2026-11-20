@@ -68,7 +68,12 @@ Configure these in **Repository Settings -> Secrets and variables -> Actions**. 
 | `ref` | string | `main` | Git branch, tag, or commit SHA to deploy (`[A-Za-z0-9._/-]+`). |
 | `build_worker` | boolean | `true` | Rebuild the Playwright MP4 render worker image (`worker`). Set `false` to skip rebuilding it on quick API/Web deploys. |
 | `prune_builder_cache` | boolean | `true` | Run `docker builder prune -f` before and between sequential image builds to reduce peak VPS disk usage. |
-| `with_airflow` | boolean | `false` | Build and start the optional `--profile airflow` services. |
+
+Airflow is always built and started for Strava Vault synchronization. The workflow
+waits for metadata database, scheduler, and DAG processor health. Library browsing
+and GPX import do not depend on Airflow; sync requests remain queued during an
+orchestrator outage. Only the Strava sync DAG is automatically unpaused; other
+maintenance and analytics schedules remain opt-in.
 
 ## Triggering a Deployment
 
@@ -76,7 +81,7 @@ Configure these in **Repository Settings -> Secrets and variables -> Actions**. 
 
 1. Open the repository on GitHub and go to **Actions -> Deploy VPS**.
 2. Click **Run workflow**.
-3. Choose the target `ref` and toggle `build_worker`, `prune_builder_cache`, and `with_airflow` as needed, then click **Run workflow**.
+3. Choose the target `ref` and toggle `build_worker` and `prune_builder_cache` as needed, then click **Run workflow**.
 
 ### GitHub CLI (`gh`)
 
@@ -92,8 +97,7 @@ Fast API and Web deploy of a specific release tag without rebuilding the Playwri
 gh workflow run deploy-vps.yml \
   -f ref=v1.0.0 \
   -f build_worker=false \
-  -f prune_builder_cache=true \
-  -f with_airflow=false
+  -f prune_builder_cache=true
 ```
 
 Watch the latest run:

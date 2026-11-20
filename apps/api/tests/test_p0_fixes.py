@@ -15,7 +15,7 @@ from sqlalchemy import select
 from trip_api.cli import main as cli_main
 from trip_api.cli import run_ingest_worker_loop, run_process_ingest_jobs
 from trip_api.config import Settings
-from trip_api.db import IngestJob, OAuthConnection, Stage
+from trip_api.db import IngestJob, OAuthConnection, Stage, VaultActivity
 from trip_api.gold_sync import ensure_local_gold_duckdb, reset_gold_sync_cache
 from trip_api.ingest import process_pending_ingest_jobs
 from trip_api.security import encrypt_secret
@@ -612,4 +612,5 @@ def test_ingest_cli_loop_max_attempts_and_throttled_backoff(
 
     assert cli_main(["process-ingest-jobs", "--dry-run", "--json", "--database-url", db_url]) == 0
     with h.session_factory() as db:
-        assert len(db.scalars(select(Stage)).all()) == 2
+        assert len(db.scalars(select(Stage)).all()) == 0
+        assert len(db.scalars(select(VaultActivity)).all()) == 2

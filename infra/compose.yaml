@@ -339,7 +339,6 @@ services:
         ipv4_address: 172.30.0.10
 
   airflow-init:
-    profiles: ["airflow"]
     image: trip-animator-v2-airflow:local
     build:
       context: ..
@@ -402,6 +401,7 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=64M,mode=1777,nosuid,nodev
+      - /opt/airflow:size=64M,uid=10001,gid=10001,mode=0700,nosuid,nodev
     cap_drop:
       - ALL
     security_opt:
@@ -411,7 +411,6 @@ services:
       - backend
 
   airflow:
-    profiles: ["airflow"]
     image: trip-animator-v2-airflow:local
     build:
       context: ..
@@ -427,6 +426,7 @@ services:
       GOLD_OUTPUT_DIR: /data/gold
       TRIP_DBT_PROJECT_DIR: /app/dbt
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__PARALLELISM: "2"
       AIRFLOW__CORE__DAGS_FOLDER: /app/airflow/dags
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
@@ -434,8 +434,9 @@ services:
       AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
       AIRFLOW__API__SECRET_KEY: ${AIRFLOW_API_SECRET_KEY:-}
       AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-}
-      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: ${AIRFLOW_SIMPLE_AUTH_USERS:-}
-      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /tmp/simple_auth_manager_passwords.json.generated
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: ${AIRFLOW_SIMPLE_AUTH_USERS:-admin:admin}
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/logs/simple_auth_manager_passwords.json.generated
+      AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://127.0.0.1:8080/execution/
       AIRFLOW__LOGGING__BASE_LOG_FOLDER: /opt/airflow/logs
     ports:
       - "127.0.0.1:${AIRFLOW_PORT:-8081}:8080"
@@ -448,14 +449,15 @@ services:
       airflow-init:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/v2/monitor/health"]
+      test: ["CMD", "python", "/app/airflow-runtime.py", "healthcheck"]
       interval: 15s
       timeout: 5s
       retries: 15
-      start_period: 20s
+      start_period: 60s
     read_only: true
     tmpfs:
       - /tmp:size=512M,mode=1777,nosuid,nodev
+      - /opt/airflow:size=64M,uid=10001,gid=10001,mode=0700,nosuid,nodev
     cap_drop:
       - ALL
     security_opt:

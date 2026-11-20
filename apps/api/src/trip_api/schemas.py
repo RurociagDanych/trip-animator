@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Literal
 
 from fastapi import HTTPException
@@ -626,6 +626,169 @@ class HeatmapCellOut(BaseModel):
 class AnalyticsHeatmapOut(BaseModel):
     trips: list[AtlasTripOut] = Field(default_factory=list)
     hex_cells: list[HeatmapCellOut] = Field(default_factory=list)
+
+
+VaultSyncRequestMode = Literal["incremental", "full", "full_backfill"]
+VaultSyncMode = Literal["full_backfill", "incremental"]
+VaultSyncStatus = Literal["idle", "queued", "running", "rate_limited", "failed", "completed"]
+VaultSyncPhase = Literal[
+    "idle",
+    "discovering_pages",
+    "importing_activities",
+    "computing_tiles",
+    "rate_limit_paused",
+    "completed",
+    "failed",
+]
+
+
+class VaultSyncStravaRequest(BaseModel):
+    mode: VaultSyncRequestMode = "incremental"
+    after: str | None = None
+    before: str | None = None
+    inline_first_page: bool = True
+
+
+class VaultRateLimitOut(BaseModel):
+    short_used: int | None = None
+    short_limit: int | None = None
+    daily_used: int | None = None
+    daily_limit: int | None = None
+
+
+class VaultSyncStatusOut(BaseModel):
+    connected: bool
+    athlete_id: str | None = None
+    status: VaultSyncStatus = "idle"
+    phase: VaultSyncPhase = "idle"
+    phase_label: str = "Ready to sync"
+    mode: VaultSyncMode = "incremental"
+    progress_pct: float | None = None
+    current_page: int = 0
+    processed_activities: int = 0
+    estimated_total_activities: int | None = None
+    imported_count: int = 0
+    skipped_existing_count: int = 0
+    skipped_no_gps_count: int = 0
+    failed_count: int = 0
+    tiles_computed_count: int = 0
+    vault_version: int = 1
+    total_activities: int = 0
+    gps_activities: int = 0
+    indoor_activities: int = 0
+    started_at: datetime | None = None
+    backfill_completed_at: datetime | None = None
+    last_synced_at: datetime | None = None
+    next_retry_at: datetime | None = None
+    rate_limit_retry_in_seconds: int | None = None
+    eta_seconds: int | None = None
+    rate_limit: VaultRateLimitOut = Field(default_factory=VaultRateLimitOut)
+    strava_short_usage: str | None = None
+    strava_daily_usage: str | None = None
+    webhook_active: bool = False
+    last_error: str | None = None
+
+
+class VaultBackfillStagesOut(BaseModel):
+    scanned_stages: int
+    mirrored_stages: int
+    linked_stages: int
+    skipped_stages: int
+    failed_stages: int
+    vault_version: int
+
+
+class VaultActivityReadinessOut(BaseModel):
+    metadata_available: bool
+    has_gps: bool
+    track_ready: bool
+    tile_precision: Literal["none", "summary_polyline", "full_stream"]
+
+
+class VaultActivityListItemOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    activity_type: str
+    raw_sport_type: str
+    source_provider: str
+    started_at: datetime
+    local_date: date
+    timezone_name: str | None
+    date_is_utc_fallback: bool
+    distance_m: float | None
+    elevation_gain_m: float | None
+    moving_seconds: float | None
+    elapsed_seconds: float | None
+    has_gps: bool
+    readiness: VaultActivityReadinessOut
+
+
+class VaultActivitySummaryOut(BaseModel):
+    activity_count: int
+    distance_m: float | None
+    distance_known_count: int
+    elevation_gain_m: float | None
+    elevation_gain_known_count: int
+    moving_seconds: float | None
+    moving_seconds_known_count: int
+    elapsed_seconds: float | None
+    elapsed_seconds_known_count: int
+    gps_activity_count: int
+    no_gps_activity_count: int
+
+
+class VaultActivityListOut(BaseModel):
+    items: list[VaultActivityListItemOut]
+    total: int
+    offset: int
+    limit: int
+    summary: VaultActivitySummaryOut
+
+
+class VaultActivityProjectUsageOut(BaseModel):
+    project_id: uuid.UUID
+    project_title: str
+    stage_id: uuid.UUID
+    stage_name: str
+
+
+class VaultActivityDetailOut(VaultActivityListItemOut):
+    strava_activity_id: int | None
+    started_at_local: datetime | None
+    utc_offset_s: int
+    elevation_loss_m: float | None
+    elev_high_m: float | None
+    elev_low_m: float | None
+    avg_speed_mps: float | None
+    max_speed_mps: float | None
+    avg_hr_bpm: float | None
+    max_hr_bpm: float | None
+    avg_watts: float | None
+    weighted_watts: float | None
+    kilojoules: float | None
+    avg_cadence: float | None
+    suffer_score: float | None
+    gear_id: str | None
+    gear_name: str | None
+    is_commute: bool
+    is_indoor_virtual: bool
+    is_private: bool
+    start_lat: float | None
+    start_lon: float | None
+    end_lat: float | None
+    end_lon: float | None
+    min_lat: float | None
+    max_lat: float | None
+    min_lon: float | None
+    max_lon: float | None
+    summary_polyline: str | None
+    tile_count_z14: int
+    new_tiles_z14_count: int
+    primary_country: str | None
+    bronze_object_key: str | None
+    source_url: str | None
+    raw_metadata: dict[str, object]
+    project_usages: list[VaultActivityProjectUsageOut]
 
 
 def validate_stage_maps_against_project(spec: RenderSpecV2, valid_stage_ids: set[str]) -> None:

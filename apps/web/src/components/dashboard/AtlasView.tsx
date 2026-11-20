@@ -2,7 +2,7 @@ import { MapboxOverlay } from "@deck.gl/mapbox";
 import { PathLayer, ScatterplotLayer } from "@deck.gl/layers";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { AlertCircle, Compass, Globe2, Loader2, Mountain, Route, X, Zap } from "lucide-react";
+import { AlertCircle, Compass, Globe2, Loader2, Mountain, Route, Zap } from "lucide-react";
 import maplibregl, { type Map as MapLibreMap } from "maplibre-gl";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ApiError } from "../../lib/api/client";
@@ -13,7 +13,7 @@ import type {
   CareerAnalyticsOut,
   HeatmapCellOut,
   ProjectOut,
-  StravaImportAllOut,
+
   StravaImportStatusOut,
   UnitsMode,
 } from "../../lib/api/types";
@@ -81,7 +81,7 @@ export function AtlasView({
   const [webglAvailable] = useState<boolean>(() => isWebGlAvailable());
   const [userSelectedProjectId, setUserSelectedProjectId] = useState<string | null>(null);
   const [pickerProjectId, setPickerProjectId] = useState<string | null>(null);
-  const [bulkImportSummary, setBulkImportSummary] = useState<StravaImportAllOut | null>(null);
+
   const [stravaError, setStravaError] = useState<string | null>(null);
 
   const selectedProjectId = useMemo(() => {
@@ -136,30 +136,6 @@ export function AtlasView({
     },
   });
 
-  const importAllMutation = useMutation({
-    mutationFn: () =>
-      stravaApi.importAll({
-        project_id: selectedProjectId || undefined,
-        max_activities: 200,
-        gps_only: true,
-      }),
-    onMutate: () => {
-      setStravaError(null);
-      setBulkImportSummary(null);
-    },
-    onSuccess: (res) => {
-      setBulkImportSummary(res);
-      void queryClient.invalidateQueries({ queryKey: ["strava", "import-status"] });
-      void queryClient.invalidateQueries({ queryKey: ["projects"] });
-      void queryClient.invalidateQueries({ queryKey: ["analytics"] });
-      onStravaImported?.();
-    },
-    onError: (err) => {
-      setStravaError(
-        err instanceof ApiError ? err.message : "Failed to queue Strava bulk import.",
-      );
-    },
-  });
 
   function handleOpenStravaPicker() {
     setStravaError(null);
@@ -418,7 +394,7 @@ export function AtlasView({
                 </div>
                 <p className="mt-0.5 text-[11px] text-ink-muted">
                   {stravaConnected
-                    ? "Browse activities or queue all GPS Strava activities directly into your Atlas."
+                    ? "Choose a Strava activity and add it to a curated trip."
                     : "Connect your Strava account to populate your career Atlas and heatmap automatically."}
                 </p>
               </div>
@@ -457,22 +433,7 @@ export function AtlasView({
                     <span>Import from Strava</span>
                   </button>
 
-                  <button
-                    type="button"
-                    data-testid="atlas-import-all-strava"
-                    disabled={importAllMutation.isPending}
-                    onClick={() => importAllMutation.mutate()}
-                    className="inline-flex items-center gap-1.5 rounded-md border border-amber-accent/50 bg-amber-accent/15 px-3 py-1.5 text-xs font-medium text-amber-accent hover:bg-amber-accent/25 disabled:opacity-45"
-                  >
-                    {importAllMutation.isPending ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-                    ) : (
-                      <Zap className="h-3.5 w-3.5" aria-hidden="true" />
-                    )}
-                    <span>
-                      {importAllMutation.isPending ? "Queuing all…" : "Import all available"}
-                    </span>
-                  </button>
+
                 </>
               ) : (
                 <button
@@ -492,33 +453,7 @@ export function AtlasView({
             </div>
           </div>
 
-          {bulkImportSummary ? (
-            <div
-              data-testid="atlas-bulk-import-summary"
-              className="flex items-center justify-between gap-2 rounded-md border border-sky-accent/40 bg-sky-accent/10 px-3 py-1.5 text-[11px] text-sky-accent"
-            >
-              <span>
-                Queued {bulkImportSummary.queued_count} activit
-                {bulkImportSummary.queued_count === 1 ? "y" : "ies"}
-                {bulkImportSummary.project_title
-                  ? ` into "${bulkImportSummary.project_title}"`
-                  : ""}{" "}
-                ({bulkImportSummary.skipped_existing_count} already imported
-                {bulkImportSummary.skipped_no_gps_count > 0
-                  ? `, ${bulkImportSummary.skipped_no_gps_count} without GPS`
-                  : ""}
-                , {bulkImportSummary.total_scanned} scanned).
-              </span>
-              <button
-                type="button"
-                onClick={() => setBulkImportSummary(null)}
-                aria-label="Dismiss bulk import summary"
-                className="rounded p-0.5 hover:bg-sky-accent/20"
-              >
-                <X className="h-3 w-3" aria-hidden="true" />
-              </button>
-            </div>
-          ) : null}
+
 
           {stravaError ? (
             <div

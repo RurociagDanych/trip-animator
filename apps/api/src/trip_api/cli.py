@@ -36,7 +36,10 @@ from trip_api.db import (
     create_db_engine,
     create_session_factory,
 )
-from trip_api.ingest import count_pending_ingest_jobs, process_pending_ingest_jobs
+from trip_api.ingest import (
+    count_pending_ingest_jobs,
+    process_pending_ingest_jobs,
+)
 from trip_api.reaper import build_object_store, run_reap
 from trip_api.security import hash_password
 from trip_api.services import (
@@ -63,7 +66,7 @@ class ReplayReport:
 
 @dataclass(frozen=True, slots=True)
 class IngestProcessReport:
-    """Summary counts produced by processing queued Strava webhook ingest jobs."""
+    """Summary counts produced by processing queued Strava webhook ingest jobs and Vault syncs."""
 
     matched_jobs: int
     succeeded_jobs: int
@@ -71,6 +74,10 @@ class IngestProcessReport:
     failed_jobs: int
     dry_run: bool = False
     deferred_jobs: int = 0
+    vault_syncs_claimed: int = 0
+    vault_syncs_completed: int = 0
+    vault_syncs_rate_limited: int = 0
+    vault_syncs_failed: int = 0
 
 
 def create_user(
@@ -354,6 +361,7 @@ def run_ingest_worker_loop(
     total_ignored = 0
     total_failed = 0
     total_deferred = 0
+
     iterations = 0
 
     try:
@@ -623,6 +631,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "ignored_jobs": rep_ing.ignored_jobs,
                         "failed_jobs": rep_ing.failed_jobs,
                         "deferred_jobs": rep_ing.deferred_jobs,
+                        "vault_syncs_claimed": rep_ing.vault_syncs_claimed,
+                        "vault_syncs_completed": rep_ing.vault_syncs_completed,
+                        "vault_syncs_rate_limited": rep_ing.vault_syncs_rate_limited,
+                        "vault_syncs_failed": rep_ing.vault_syncs_failed,
                         "dry_run": rep_ing.dry_run,
                     }
                 )
@@ -632,9 +644,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"Ingest jobs complete (dry_run={rep_ing.dry_run}): "
                 f"matched={rep_ing.matched_jobs} succeeded={rep_ing.succeeded_jobs} "
                 f"ignored={rep_ing.ignored_jobs} failed={rep_ing.failed_jobs} "
-                f"deferred={rep_ing.deferred_jobs}"
+                f"deferred={rep_ing.deferred_jobs} "
+                f"vault_syncs={rep_ing.vault_syncs_claimed}"
             )
-        return 0 if getattr(args, "loop", False) else (0 if rep_ing.failed_jobs == 0 else 1)
+        return (
+            0
+            if getattr(args, "loop", False)
+            else (0 if rep_ing.failed_jobs == 0 and rep_ing.vault_syncs_failed == 0 else 1)
+        )
 
     return 1
 

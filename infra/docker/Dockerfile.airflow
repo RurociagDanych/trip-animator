@@ -35,6 +35,7 @@ COPY apps/api ./apps/api
 COPY dbt ./dbt
 COPY airflow/src ./airflow/src
 COPY airflow/dags ./airflow/dags
+COPY infra/scripts/airflow-runtime.py /app/airflow-runtime.py
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ -f airflow/uv.lock ]; then \
@@ -57,4 +58,4 @@ USER 10001:10001
 
 EXPOSE 8080
 
-CMD ["airflow", "standalone"]
+CMD ["python", "/app/airflow-runtime.py"]

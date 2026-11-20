@@ -53,9 +53,9 @@ jobs:
       - name: Install Python workspace
         run: uv sync --all-packages --frozen
       - name: Ruff lint
-        run: uv run ruff check apps packages airflow
+        run: uv run ruff check apps packages airflow infra/scripts
       - name: Ruff format check
-        run: uv run ruff format --check apps packages airflow
+        run: uv run ruff format --check apps packages airflow infra/scripts
       - name: Mypy typecheck
         run: uv run mypy apps/api/src apps/worker/src packages/telemetry/src airflow/src
 
@@ -215,7 +215,7 @@ jobs:
       - name: Install Airflow project
         run: uv sync --project airflow --frozen
       - name: Airflow DAG integrity & task suite
-        run: uv run --project airflow pytest --strict-markers -ra airflow/tests
+        run: make test-airflow
 
   web:
     runs-on: ubuntu-latest
@@ -246,7 +246,8 @@ jobs:
       - name: Validate Compose config
         run: |
           docker compose -f infra/compose.yaml --env-file .env.example config --quiet
-          docker compose -f infra/compose.yaml --env-file .env.example --profile airflow config --quiet
+      - name: Build required Airflow runtime
+        run: docker build -f infra/docker/Dockerfile.airflow -t trip-airflow-ci .
 
   terraform:
     runs-on: ubuntu-latest

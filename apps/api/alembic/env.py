@@ -15,12 +15,28 @@ if db_url:
 
 target_metadata = Base.metadata
 
+_EXCLUDED_DB_OBJECTS = frozenset({"ix_vault_activities_name_tsv"})
+
+
+def include_object(
+    object_: object,
+    name: str | None,
+    type_: str,
+    reflected: bool,
+    compare_to: object,
+) -> bool:
+    """Skip Postgres-only expression indexes so autogenerate/check stay dialect-neutral."""
+    if type_ == "index" and name in _EXCLUDED_DB_OBJECTS:
+        return False
+    return True
+
 
 def run_migrations_offline() -> None:
     url = config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
         target_metadata=target_metadata,
+        include_object=include_object,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
@@ -35,7 +51,11 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            include_object=include_object,
+        )
         with context.begin_transaction():
             context.run_migrations()
 

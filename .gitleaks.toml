@@ -1,5 +1,8 @@
 title = "Trip Animator publication secret scanning"
 
+# Historical regression fixtures remain scanned; only these exact non-secret
+# assertions and synthetic verification URL are exempted from the generic rule.
+
 [extend]
 useDefault = true
 
@@ -56,3 +59,17 @@ condition = "AND"
 regexTarget = "line"
 paths = ['''(^|/)docs/ARCHITECTURE\.md$''']
 regexes = ['''^\s*\| `api` \| `infra/docker/Dockerfile\.api` \(`python:3\.12-slim` \+ `uv`\) \| `8000` \(internal\) \| FastAPI REST/SSE API, DuckDB/Polars orchestration; non-root UID `10001`, `read_only`, `tmpfs /tmp`, `cap_drop: ALL` \|$''']
+
+[[rules.allowlists]]
+description = "Split regression assertions compare object-store paths, not API credentials"
+condition = "AND"
+regexTarget = "line"
+paths = ['''(^|/)apps/api/tests/test_projects_gpx_telemetry\.py$''']
+regexes = ['''^\s*assert p[12]_db\.bronze_object_key == orig_s1_bronze_key$''']
+
+[[rules.allowlists]]
+description = "Email verification browser test uses a fixed synthetic token fixture"
+condition = "AND"
+regexTarget = "line"
+paths = ['''(^|/)apps/web/src/test/routes\.test\.tsx$''']
+regexes = ['''^\s*window\.history\.replaceState\(\{\}, "", "/verify-email\?token=tok-valid-123"\);$''']

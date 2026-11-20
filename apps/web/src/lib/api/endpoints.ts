@@ -53,7 +53,35 @@ import type {
   TelemetryChartOut,
   TelemetryGeometryFeature,
   TelemetryGeometryOut,
+  VaultActivityDetailOut,
+  VaultActivityListOut,
+  VaultSyncStatusOut,
 } from "./types";
+
+export interface VaultActivityFilters {
+  name?: string; start_date?: string; end_date?: string; sport?: string;
+  min_distance_m?: number; max_distance_m?: number; min_elevation_gain_m?: number;
+  max_elevation_gain_m?: number; min_moving_seconds?: number; max_moving_seconds?: number;
+  has_gps?: boolean; sort?: string; order?: string; offset?: number; limit?: number;
+}
+
+export const vaultApi = {
+  list(filters: VaultActivityFilters, signal?: AbortSignal): Promise<VaultActivityListOut> {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== "") params.set(key, String(value));
+    const qs = params.toString();
+    return apiClient.get<VaultActivityListOut>(`/api/v1/vault/activities${qs ? `?${qs}` : ""}`, signal);
+  },
+  get(id: string, signal?: AbortSignal): Promise<VaultActivityDetailOut> {
+    return apiClient.get<VaultActivityDetailOut>(`/api/v1/vault/activities/${id}`, signal);
+  },
+  status(signal?: AbortSignal): Promise<VaultSyncStatusOut> {
+    return apiClient.get<VaultSyncStatusOut>("/api/v1/vault/sync/status", signal);
+  },
+  sync(): Promise<VaultSyncStatusOut> {
+    return apiClient.post<VaultSyncStatusOut>("/api/v1/vault/sync/strava", { mode: "incremental", inline_first_page: true });
+  },
+};
 
 export const systemApi = {
   health(signal?: AbortSignal): Promise<HealthResponse> {

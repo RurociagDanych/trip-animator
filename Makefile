@@ -8,14 +8,14 @@ bootstrap:
 	./scripts/bootstrap-local.sh
 
 lint:
-	uv run ruff check apps packages airflow
+	uv run ruff check apps packages airflow infra/scripts
 	pnpm lint:web
 
 format:
-	uv run ruff format apps packages airflow
+	uv run ruff format apps packages airflow infra/scripts
 
 format-check:
-	uv run ruff format --check apps packages airflow
+	uv run ruff format --check apps packages airflow infra/scripts
 
 typecheck:
 	uv run mypy apps/api/src apps/worker/src packages/telemetry/src airflow/src
@@ -67,7 +67,7 @@ dbt-build:
 reap-dry-run:
 	uv run python -m trip_api.cli reap --dry-run
 
-check: lint format-check typecheck test dbt-build
+check: lint format-check typecheck test test-airflow dbt-build compose-config
 
 dev-api:
 	uv run uvicorn trip_api.main:app --reload --host 0.0.0.0 --port 8000
@@ -77,17 +77,16 @@ dev-web:
 
 compose-config:
 	docker compose -f infra/compose.yaml --env-file .env.example config --quiet
-	docker compose -f infra/compose.yaml --env-file .env.example --profile airflow config --quiet
 
 airflow-up:
-	docker compose -f infra/compose.yaml --env-file .env --profile airflow up -d --build
+	docker compose -f infra/compose.yaml --env-file .env up -d --build airflow
 
 airflow-down:
-	docker compose -f infra/compose.yaml --env-file .env --profile airflow down
+	docker compose -f infra/compose.yaml --env-file .env stop airflow
 
 test-airflow:
-	uv sync --project airflow
-	uv run --project airflow pytest --strict-markers -ra airflow/tests
+	uv sync --project airflow --frozen
+	uv run --project airflow pytest --strict-markers -ra airflow/tests infra/scripts/tests
 
 lint-airflow:
 	uv run ruff check airflow

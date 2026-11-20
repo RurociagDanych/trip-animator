@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event, Lock
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -35,12 +35,13 @@ from trip_api.db import (
     SessionRecord,
     Stage,
     User,
+    VaultSyncState,
     create_db_engine,
     create_session_factory,
 )
 from trip_api.main import create_app
 from trip_api.rate_limit import check_rate_limit
-from trip_api.security import hash_password
+from trip_api.security import encrypt_secret, hash_password
 from trip_api.storage import LocalObjectStore
 
 pytestmark = pytest.mark.postgres
@@ -217,6 +218,10 @@ def test_postgres_alembic_upgrade_downgrade_upgrade_roundtrip(pg_temp_db_url: st
         "ingest_jobs",
         "audit_events",
         "rate_limits",
+        "vault_activities",
+        "vault_activity_tiles",
+        "vault_sync_states",
+        "vault_gears",
     }
 
     command.upgrade(cfg, "head")
@@ -235,8 +240,21 @@ def test_postgres_alembic_upgrade_downgrade_upgrade_roundtrip(pg_temp_db_url: st
             "ck_stages_source_format",
             "ck_stages_activity_type",
         } <= stage_checks
+        stage_cols = {c["name"] for c in insp.get_columns("stages")}
+        assert "vault_activity_id" in stage_cols
+        stage_fks = {fk["name"] for fk in insp.get_foreign_keys("stages")}
+        assert "fk_stages_vault_activity_id_vault_activities" in stage_fks
         audit_fks = {fk["name"] for fk in insp.get_foreign_keys("audit_events")}
         assert "fk_audit_events_project_id_projects" in audit_fks
+        with engine.connect() as conn:
+            gin_idx = conn.execute(
+                text(
+                    "SELECT indexname FROM pg_indexes "
+                    "WHERE tablename = 'vault_activities' "
+                    "AND indexname = 'ix_vault_activities_name_tsv'"
+                )
+            ).scalar_one_or_none()
+            assert gin_idx == "ix_vault_activities_name_tsv"
     finally:
         engine.dispose()
 
@@ -256,7 +274,7 @@ def test_postgres_alembic_upgrade_downgrade_upgrade_roundtrip(pg_temp_db_url: st
         assert expected_tables <= set(inspect(engine_reup).get_table_names())
         with engine_reup.connect() as conn:
             ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-            assert ver == "0006_password_reset_tokens"
+            assert ver == "0008_vault_sync_retries"
     finally:
         engine_reup.dispose()
 
@@ -690,3 +708,89 @@ def test_postgres_concurrent_strava_token_refresh_for_update(
 
     assert tokens == ["fresh-pg-access"] * workers
     assert refresh_calls["n"] == 1
+
+
+def test_postgres_concurrent_vault_sync_claims_queued_state_once(
+    pg_app_factory: Any,
+) -> None:
+    from trip_api.vault_sync import process_pending_vault_syncs
+
+    _app, settings, _engine, sf, _store = pg_app_factory()
+    user = _create_pg_user(sf, "vault-sync-pg@example.com")
+    aad = f"oauth:{user.id}:strava".encode()
+    with sf() as db:
+        db.add(
+            OAuthConnection(
+                user_id=user.id,
+                provider="strava",
+                external_athlete_id="771122",
+                access_token_enc=encrypt_secret(
+                    "vault-sync-access", settings.decoded_encryption_key, aad=aad
+                ),
+                refresh_token_enc=encrypt_secret(
+                    "vault-sync-refresh", settings.decoded_encryption_key, aad=aad
+                ),
+                expires_at=datetime.now(UTC) + timedelta(days=365),
+                scope="read,activity:read_all",
+            )
+        )
+        db.add(
+            VaultSyncState(
+                user_id=user.id,
+                provider="strava",
+                status="queued",
+                phase="discovering_pages",
+            )
+        )
+        db.commit()
+
+    request_entered = Event()
+    release_request = Event()
+    request_lock = Lock()
+    provider_fetches = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal provider_fetches
+        if _request.url.path.endswith("/athlete/activities"):
+            with request_lock:
+                provider_fetches += 1
+        request_entered.set()
+        if not release_request.wait(timeout=10.0):
+            raise TimeoutError("Vault sync provider request was not released")
+        return httpx.Response(200, json=[])
+
+    transport = httpx.MockTransport(handler)
+    client_factory = lambda: httpx.Client(transport=transport, follow_redirects=False)  # noqa: E731
+
+    def _run_worker() -> dict[str, int]:
+        with sf() as db:
+            return process_pending_vault_syncs(db, settings, http_client_factory=client_factory)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first_worker = pool.submit(_run_worker)
+        try:
+            assert request_entered.wait(timeout=10.0), "first worker did not reach provider fetch"
+            with sf() as db:
+                second_stats = process_pending_vault_syncs(
+                    db, settings, http_client_factory=client_factory
+                )
+            assert second_stats["claimed"] == 0
+        finally:
+            release_request.set()
+        first_stats = first_worker.result(timeout=15.0)
+
+    assert first_stats["claimed"] == 1
+    assert first_stats["completed"] == 1
+    assert second_stats["completed"] == 0
+    assert provider_fetches == 1
+
+    with sf() as db:
+        state = db.scalar(
+            select(VaultSyncState).where(
+                VaultSyncState.user_id == user.id,
+                VaultSyncState.provider == "strava",
+            )
+        )
+        assert state is not None
+        assert state.status == "completed"
+        assert state.lease_expires_at is None

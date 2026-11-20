@@ -358,8 +358,7 @@ describe("Route tests: DashboardPage, LoginPage, ForgotPasswordPage, ResetPasswo
       });
     });
 
-    it("renders connected Atlas Strava sync status, runs bulk import-all, and opens StravaPickerModal", async () => {
-      let importAllPayload: Record<string, unknown> | null = null;
+    it("renders connected Atlas Strava sync status and opens StravaPickerModal", async () => {
       const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
         const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
         const method = init?.method ?? "GET";
@@ -417,18 +416,7 @@ describe("Route tests: DashboardPage, LoginPage, ForgotPasswordPage, ResetPasswo
             last_error: null,
           });
         }
-        if (url.includes("/api/v1/strava/import-all") && method === "POST") {
-          importAllPayload = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
-          return jsonResponse({
-            queued_count: 5,
-            skipped_existing_count: 2,
-            skipped_no_gps_count: 1,
-            total_scanned: 8,
-            project_id: "proj-atlas-2",
-            project_title: "Fictional Ridge Loop",
-            queued_activity_ids: [101, 102, 103, 104, 105],
-          });
-        }
+
         if (url.includes("/api/v1/strava/activities")) {
           return jsonResponse([
             {
@@ -469,22 +457,7 @@ describe("Route tests: DashboardPage, LoginPage, ForgotPasswordPage, ResetPasswo
       expect(await screen.findByText(/Syncing 2 queued/i)).toBeInTheDocument();
       expect(screen.getByText(/4 imported stages/i)).toBeInTheDocument();
 
-      // Choose second project and trigger bulk import-all
-      const select = screen.getByLabelText("Target trip for Strava import");
-      fireEvent.change(select, { target: { value: "proj-atlas-2" } });
-      fireEvent.click(screen.getByTestId("atlas-import-all-strava"));
-
-      const summary = await screen.findByTestId("atlas-bulk-import-summary");
-      expect(summary).toHaveTextContent("Queued 5 activities");
-      expect(summary).toHaveTextContent("2 already imported");
-      expect(summary).toHaveTextContent("8 scanned");
-      expect(importAllPayload).toEqual({
-        project_id: "proj-atlas-2",
-        max_activities: 200,
-        gps_only: true,
-      });
-
-      // Open StravaPickerModal directly inside Atlas
+      // The Atlas picker remains a single-activity import flow.
       fireEvent.click(screen.getByTestId("atlas-open-strava-picker"));
       expect(await screen.findByRole("dialog", { name: /Import Strava activity/i })).toBeInTheDocument();
       expect(await screen.findByText("Fictional Summit Spin")).toBeInTheDocument();

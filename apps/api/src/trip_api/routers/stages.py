@@ -64,6 +64,10 @@ from trip_api.services import (
     stage_to_out,
     write_audit_event,
 )
+from trip_api.vault_sync import (
+    mirror_stage_to_vault,
+    prepare_vault_geometry_from_parsed_track,
+)
 
 MAX_GPX_BYTES = 25 * 1024 * 1024  # 25 MiB
 _CHUNK_BYTES = 64 * 1024
@@ -219,6 +223,7 @@ async def _handle_track_upload(
         bronze_ext=source_format,
         bronze_content_type=content_type_map[source_format],
     )
+    vault_geom = await asyncio.to_thread(prepare_vault_geometry_from_parsed_track, parsed)
     try:
         stage = persist_prepared_stage(
             db=db,
@@ -230,6 +235,13 @@ async def _handle_track_upload(
             stage_name=resolved_name,
             day_index=day_index,
             activity_type=resolved_activity,
+        )
+        mirror_stage_to_vault(
+            db,
+            user_id=auth.user.id,
+            stage=stage,
+            geometry=vault_geom,
+            recompute_new_tiles=True,
         )
         write_audit_event(
             db,
@@ -564,6 +576,10 @@ def split_stage(
         stage.max_lat = p1_sum.max_lat
         stage.min_lon = p1_sum.min_lon
         stage.max_lon = p1_sum.max_lon
+        split_provenance: dict[str, object] = {"code": "vault_canonical_excluded_split_segment"}
+        stage.warnings_json = list(stage.warnings_json or [])
+        if split_provenance not in stage.warnings_json:
+            stage.warnings_json.append(split_provenance)
 
         p2_sum = prepared.part2_summary
         part2_stage = Stage(
@@ -582,6 +598,7 @@ def split_stage(
             trim_start_s=None,
             trim_end_s=None,
             bronze_object_key=stage.bronze_object_key,
+            vault_activity_id=stage.vault_activity_id,
             silver_object_key=prepared.part2_silver_key,
             started_at=prepared.part2_started_at,
             point_count=p2_sum.point_count,
@@ -598,6 +615,10 @@ def split_stage(
             warnings_json=list(stage.warnings_json or []),
         )
         db.add(part2_stage)
+        db.flush()
+
+        # Both segments reference the unchanged canonical activity. Segment-level
+        # geometry and metrics must never be mirrored into the Activity Library.
 
         project.revision += 1
         project.updated_at = datetime.now(UTC)
