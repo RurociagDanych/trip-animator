@@ -743,6 +743,7 @@ class VaultActivityListOut(BaseModel):
     offset: int
     limit: int
     summary: VaultActivitySummaryOut
+    geographic_excluded_count: int = 0
 
 
 class VaultActivityProjectUsageOut(BaseModel):

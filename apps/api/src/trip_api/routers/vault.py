@@ -2,17 +2,27 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
-from typing import Literal, cast
+from typing import Annotated, Literal, cast
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import Select, case, func, select
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
 from trip_api.db import Project, Stage, VaultActivity
 from trip_api.deps import AppSettings, CsrfAuth, CurrentAuth, DbSession, StoreDep
+from trip_api.library_geometry import (
+    MAX_EVALUATION_CHARS,
+    MAX_RESPONSE_POINTS,
+    canonical_points,
+    intersects_area,
+    map_coordinates,
+    overview_points,
+    parse_area,
+)
 from trip_api.rate_limit import check_rate_limit
 from trip_api.schemas import (
     VaultActivityDetailOut,
@@ -163,8 +173,13 @@ def _summary(db: Session, query: Select[VaultActivity]) -> VaultActivitySummaryO
     )
 
 
-@router.get("/activities", response_model=VaultActivityListOut)
-def list_vault_activities(
+@dataclass
+class LibrarySelection:
+    query: Select[VaultActivity]
+    geographic_excluded_count: int = 0
+
+
+def library_selection(
     auth: CurrentAuth,
     db: DbSession,
     name: str | None = Query(default=None, max_length=200),
@@ -178,14 +193,8 @@ def list_vault_activities(
     min_moving_seconds: float | None = Query(default=None, ge=0),
     max_moving_seconds: float | None = Query(default=None, ge=0),
     has_gps: bool | None = None,
-    sort: str = Query(
-        default="started_at",
-        pattern="^(started_at|local_date|name|distance_m|elevation_gain_m|moving_seconds)$",
-    ),
-    order: str = Query(default="desc", pattern="^(asc|desc)$"),
-    offset: int = Query(default=0, ge=0),
-    limit: int = Query(default=50, ge=1, le=100),
-) -> VaultActivityListOut:
+    area: str | None = Query(default=None, max_length=160),
+) -> LibrarySelection:
     if start_date is not None and end_date is not None and start_date > end_date:
         raise HTTPException(status_code=422, detail="start_date must be on or before end_date")
     for minimum, maximum, label in (
@@ -210,6 +219,56 @@ def list_vault_activities(
         max_moving_seconds=max_moving_seconds,
         has_gps=has_gps,
     )
+    excluded = 0
+    if area is not None:
+        try:
+            bounds = parse_area(area)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        # A hard, explicit evaluation limit prevents unbounded request-time work.
+        count = int(db.scalar(select(func.count()).select_from(filters.subquery())) or 0)
+        if count > 50_000:
+            raise HTTPException(
+                status_code=422,
+                detail="Narrow the selection to 50000 activities before filtering an area",
+            )
+        matched = []
+        geometry_query = filters.with_only_columns(
+            VaultActivity.id, VaultActivity.has_gps, VaultActivity.summary_polyline
+        ).execution_options(yield_per=100)
+        evaluated_chars = 0
+        for activity_id, gps, encoded in db.execute(geometry_query):
+            evaluated_chars += len(encoded or "")
+            if evaluated_chars > MAX_EVALUATION_CHARS:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Narrow the selection: geographic geometry evaluation limit reached",
+                )
+            points = canonical_points(gps, encoded)
+            if points is None:
+                excluded += 1
+            elif intersects_area(points, bounds):
+                matched.append(activity_id)
+        filters = filters.where(VaultActivity.id.in_(matched))
+    return LibrarySelection(filters, excluded)
+
+
+Selection = Annotated[LibrarySelection, Depends(library_selection)]
+
+
+@router.get("/activities", response_model=VaultActivityListOut)
+def list_vault_activities(
+    db: DbSession,
+    selection: Selection,
+    sort: str = Query(
+        default="started_at",
+        pattern="^(started_at|local_date|name|distance_m|elevation_gain_m|moving_seconds)$",
+    ),
+    order: str = Query(default="desc", pattern="^(asc|desc)$"),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=100),
+) -> VaultActivityListOut:
+    filters = selection.query
     sort_column = {
         "started_at": VaultActivity.started_at,
         "local_date": VaultActivity.local_date,
@@ -228,7 +287,107 @@ def list_vault_activities(
         offset=offset,
         limit=limit,
         summary=_summary(db, filters),
+        geographic_excluded_count=selection.geographic_excluded_count,
     )
+
+
+@router.get("/activities/map")
+def map_vault_activities(
+    db: DbSession,
+    selection: Selection,
+    max_features: int = Query(default=500, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0, le=50_000),
+) -> dict[str, object]:
+    features: list[dict[str, object]] = []
+    base = selection.query.subquery()
+    total, no_gps, unavailable = db.execute(
+        select(
+            func.count(),
+            func.coalesce(func.sum(case((base.c.has_gps.is_(False), 1), else_=0)), 0),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            base.c.has_gps.is_(True)
+                            & (base.c.summary_polyline.is_(None) | (base.c.summary_polyline == "")),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+                0,
+            ),
+        ).select_from(base)
+    ).one()
+    candidate_count = int(total) - int(no_gps) - int(unavailable)
+    overview_limit = (
+        max(2, min(200, MAX_RESPONSE_POINTS // candidate_count)) if candidate_count else 2
+    )
+    drawable = point_count = evaluated_chars = consumed = unavailable_in_page = 0
+    candidate_limit = min(max_features, max(0, 50_000 - offset))
+    query = selection.query.with_only_columns(
+        VaultActivity.id,
+        VaultActivity.name,
+        VaultActivity.has_gps,
+        VaultActivity.summary_polyline,
+    )
+    query = (
+        query.where(
+            VaultActivity.has_gps.is_(True),
+            VaultActivity.summary_polyline.is_not(None),
+            VaultActivity.summary_polyline != "",
+        )
+        .order_by(VaultActivity.started_at.desc(), VaultActivity.id.asc())
+        .offset(offset)
+        .limit(candidate_limit)
+    )
+    for activity_id, name, gps, encoded in db.execute(query.execution_options(yield_per=100)):
+        encoded_length = len(encoded or "")
+        # Always make progress on the first row; its encoded size is independently
+        # bounded by MAX_ENCODED_LENGTH. Later rows remain at the next cursor.
+        if consumed and evaluated_chars + encoded_length > MAX_EVALUATION_CHARS:
+            break
+        evaluated_chars += encoded_length
+        consumed += 1
+        points = canonical_points(gps, encoded)
+        if points is None:
+            unavailable += 1
+            unavailable_in_page += 1
+            continue
+        drawable += 1
+        sampled = overview_points(points, overview_limit)
+        point_count += len(sampled)
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": map_coordinates(sampled),
+                },
+                "properties": {
+                    "id": str(activity_id),
+                    "name": name,
+                    "precision": "summary_polyline",
+                },
+            }
+        )
+    consumed_offset = offset + consumed
+    unevaluated = max(0, candidate_count - consumed_offset)
+    next_offset = consumed_offset if consumed_offset < min(candidate_count, 50_000) else None
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+        "total": total,
+        "drawable_count": drawable,
+        "no_gps_count": no_gps,
+        "unavailable_count": unavailable,
+        "returned_count": len(features),
+        "truncated": unevaluated > 0 or len(features) < drawable,
+        "unevaluated_count": unevaluated,
+        "next_offset": next_offset,
+        "unavailable_in_page_count": unavailable_in_page,
+        "geographic_excluded_count": selection.geographic_excluded_count,
+    }
 
 
 @router.get("/activities/{activity_id}", response_model=VaultActivityDetailOut)

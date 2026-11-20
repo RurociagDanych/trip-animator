@@ -13,7 +13,9 @@ export interface VaultActivitySummaryOut {
   moving_seconds_known_count: number; elapsed_seconds: number | null; elapsed_seconds_known_count: number;
   gps_activity_count: number; no_gps_activity_count: number;
 }
-export interface VaultActivityListOut { items: VaultActivityListItemOut[]; total: number; offset: number; limit: number; summary: VaultActivitySummaryOut }
+export interface VaultActivityListOut { items: VaultActivityListItemOut[]; total: number; offset: number; limit: number; summary: VaultActivitySummaryOut; geographic_excluded_count?: number }
+export interface VaultActivityMapFeature { type: "Feature"; geometry: { type: "LineString"; coordinates: number[][] }; properties: { id: string; name: string; precision: "summary_polyline" } }
+export interface VaultActivityMapOut { type: "FeatureCollection"; features: VaultActivityMapFeature[]; total: number; drawable_count: number; no_gps_count: number; unavailable_count: number; returned_count: number; truncated: boolean; geographic_excluded_count: number; unevaluated_count: number; next_offset?: number | null; unavailable_in_page_count?: number }
 export interface VaultActivityDetailOut extends VaultActivityListItemOut {
   strava_activity_id: number | null; started_at_local: string | null; utc_offset_s: number;
   elevation_loss_m: number | null; elev_high_m: number | null; elev_low_m: number | null;

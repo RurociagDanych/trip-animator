@@ -105,16 +105,16 @@ In Docker Compose, run the reaper on a host cron or systemd timer:
 docker compose -f infra/compose.yaml exec -T api python -m trip_api.cli reap
 ```
 
-### Optional Apache Airflow 3 Orchestration (`--profile airflow`)
+### Apache Airflow 3 Orchestration
 
-Airflow is isolated in its own standalone project (`airflow/pyproject.toml`) and disabled by default so the core stack remains lean. When enabled with `--profile airflow`, `airflow-init` provisions a dedicated PostgreSQL database (`${AIRFLOW_DB:-airflow}`) to avoid `alembic_version` collisions, and `airflow` exposes the UI on loopback `127.0.0.1:${AIRFLOW_PORT:-8081}` (`read_only: true`, UID `10001`):
+Airflow is included in the default Compose stack and required for Strava Vault synchronization. Library browsing and GPX import do not depend on Airflow; sync requests remain queued while it is unavailable. `airflow/pyproject.toml` is a standalone project, and `airflow-init` provisions a dedicated PostgreSQL database (`${AIRFLOW_DB:-airflow}`) to avoid `alembic_version` collisions. The UI is exposed on loopback `127.0.0.1:${AIRFLOW_PORT:-8081}` (`read_only: true`, UID `10001`).
 
 - `trip_dbt_gold_pipeline` (`0 * * * *`): Discovers Silver GeoParquet objects, stages them locally, runs `dbt-duckdb`, atomically swaps `trip_analytics.duckdb` into `GOLD_OUTPUT_DIR`, and verifies mart parity.
-- `trip_strava_incremental_sync` (`*/30 * * * *`): Syncs active Strava OAuth connections via dynamic task mapping using AEAD token decryption/refresh, SSRF outbound guards, per-user activity deduplication, and zero tokens in XCom.
+- `trip_strava_incremental_sync` (`* * * * *`): Drains the durable Vault queue in bounded batches, resumes historical backfill and rate-limited jobs, and schedules incremental reconciliation. Activities without GPS are retained; synchronization does not create projects or stages, and tokens are not placed in XCom.
 - `trip_platform_maintenance_and_audit` (`0 3 * * *`): Executes `reap_expired`, reconciles PostgreSQL `Stage`/`RenderJob` records against `ObjectStore`, and validates Silver GeoParquet schemas and metadata.
 
 ```bash
-# Start stack with optional Airflow orchestration
+# Start the stack, including required Strava sync orchestration
 make airflow-up
 
 # Run Airflow DAG integrity + pure-Python task tests
@@ -122,4 +122,4 @@ make test-airflow
 make lint-airflow
 ```
 
-See [security.md](security.md) before exposing a deployment to a network.
+See [SECURITY.md](SECURITY.md) before exposing a deployment to a network.

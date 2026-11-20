@@ -8,7 +8,7 @@ The screenshot is from the running local editor: five consecutive cycling days (
 
 Basemap: [OpenFreeMap](https://openfreemap.org), © [OpenMapTiles](https://openmaptiles.org) and © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright).
 
-**Status:** beta, self-hosted. See [docs/operations.md](docs/operations.md) for what has and has not been validated.
+**Status:** beta, self-hosted. See [docs/OPERATIONS.md](docs/OPERATIONS.md) for what has and has not been validated.
 
 [![CI](https://github.com/RurociagDanych/trip-animator/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/RurociagDanych/trip-animator/actions/workflows/ci.yml)
 
@@ -42,8 +42,8 @@ Data flows Bronze (raw GPX/Strava payloads) → Silver (Parquet via Polars) → 
 - **Columnar ingestion pipeline (Polars/PyArrow → Parquet, DuckDB/dbt for analytics).** Telemetry is normalized once into a canonical point schema with multi-LOD simplification and queried with DuckDB, so charts and map geometry stay responsive on large tracks. Trade-off: more moving parts than storing points in PostgreSQL.
 - **Separate async render worker on a PostgreSQL queue.** Jobs are leased with `FOR UPDATE SKIP LOCKED`, so long renders never block editing and no extra broker is needed. Trade-off: throughput is bounded by PostgreSQL polling and worker count.
 - **Untrusted GPX is parsed in an isolated subprocess.** `defusedxml` with hard size, depth and time limits contains malformed or hostile files. Trade-off: per-upload process overhead.
-- **Airflow is optional (`--profile airflow`).** Scheduled dbt, Strava sync and maintenance DAGs live in a standalone project so the core stack stays small. Trade-off: without it, the retention reaper and Gold refresh must be run by you (cron/systemd).
-- **Fail-closed production config.** With `APP_ENV=production` the API refuses to start on dev auth, weak secrets or missing S3 credentials. Trade-off: more required configuration. See [docs/security.md](docs/security.md).
+- **Airflow is required for Strava Vault synchronization.** It runs alongside the default Compose stack; library browsing and GPX import remain available without it, while sync requests wait for recovery. Other scheduled DAGs are opt-in. Trade-off: an additional service to operate.
+- **Fail-closed production config.** With `APP_ENV=production` the API refuses to start on dev auth, weak secrets or missing S3 credentials. Trade-off: more required configuration. See [docs/SECURITY.md](docs/SECURITY.md).
 
 ## Scale & limits
 
@@ -122,8 +122,8 @@ pnpm --filter @trip-animator/web build
 | `apps/worker` | Playwright + FFmpeg render worker |
 | `packages/telemetry` | GPX parser, Silver ETL, simplification, downsampling |
 | `dbt/` | Silver → Gold SQL models and tests |
-| `airflow/` | Optional scheduled orchestration |
+| `airflow/` | Strava Vault sync orchestration and optional scheduled jobs |
 | `infra/` | Docker Compose, Caddy, nginx |
-| `docs/` | [Architecture](docs/ARCHITECTURE.md), [operations](docs/operations.md), [security](docs/security.md), [threat model](docs/THREAT_MODEL.md), [tasks](docs/TASKS.md), AWS/VPS deployment |
+| `docs/` | [Architecture](docs/ARCHITECTURE.md), [operations](docs/OPERATIONS.md), [security](docs/SECURITY.md), [threat model](docs/THREAT_MODEL.md), [tasks](docs/TASKS.md), AWS/VPS deployment |
 
 License: see [LICENSE](LICENSE). Security reports: [SECURITY.md](SECURITY.md).

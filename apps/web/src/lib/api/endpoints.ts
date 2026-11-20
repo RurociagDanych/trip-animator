@@ -55,6 +55,7 @@ import type {
   TelemetryGeometryOut,
   VaultActivityDetailOut,
   VaultActivityListOut,
+  VaultActivityMapOut,
   VaultSyncStatusOut,
 } from "./types";
 
@@ -62,7 +63,7 @@ export interface VaultActivityFilters {
   name?: string; start_date?: string; end_date?: string; sport?: string;
   min_distance_m?: number; max_distance_m?: number; min_elevation_gain_m?: number;
   max_elevation_gain_m?: number; min_moving_seconds?: number; max_moving_seconds?: number;
-  has_gps?: boolean; sort?: string; order?: string; offset?: number; limit?: number;
+  has_gps?: boolean; sort?: string; order?: string; offset?: number; limit?: number; area?: string;
 }
 
 export const vaultApi = {
@@ -71,6 +72,14 @@ export const vaultApi = {
     for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== "") params.set(key, String(value));
     const qs = params.toString();
     return apiClient.get<VaultActivityListOut>(`/api/v1/vault/activities${qs ? `?${qs}` : ""}`, signal);
+  },
+  map(filters: VaultActivityFilters, signal?: AbortSignal): Promise<VaultActivityMapOut> {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(filters)) {
+      if (key !== "limit" && value !== undefined && value !== "") params.set(key, String(value));
+    }
+    const qs = params.toString();
+    return apiClient.get<VaultActivityMapOut>(`/api/v1/vault/activities/map${qs ? `?${qs}` : ""}`, signal);
   },
   get(id: string, signal?: AbortSignal): Promise<VaultActivityDetailOut> {
     return apiClient.get<VaultActivityDetailOut>(`/api/v1/vault/activities/${id}`, signal);
