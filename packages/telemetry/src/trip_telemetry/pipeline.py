@@ -92,7 +92,6 @@ def _parse_start_date(start_date: datetime | str | None) -> datetime | None:
 def _normalize_strava_streams(
     streams: Mapping[str, Any] | Sequence[Mapping[str, Any]],
 ) -> dict[str, list[Any]]:
-    """Normalize Strava API stream payloads (keyed dict or list of stream objects)."""
     normalized: dict[str, list[Any]] = {}
     if isinstance(streams, Mapping):
         for key, value in streams.items():
@@ -113,7 +112,6 @@ def _extract_strava_track_and_extras(
     start_date: datetime | str | None = None,
     name: str = "",
 ) -> tuple[ParsedTrack, list[float | None], list[float | None], list[bool | None]]:
-    """Parse Strava streams into a ParsedTrack plus aligned optional smoothed streams."""
     raw = _normalize_strava_streams(streams)
     latlng_data = raw.get("latlng")
     if not isinstance(latlng_data, list) or not latlng_data:
@@ -275,7 +273,6 @@ def _compute_summary_from_df(
     trim_start_s: float | None = None,
     trim_end_s: float | None = None,
 ) -> SilverTelemetrySummary:
-    """Compute SilverTelemetrySummary over active (~is_trimmed) rows."""
     active = df.filter(~pl.col("is_trimmed")) if "is_trimmed" in df.columns else df
     if active.height == 0:
         raise ValueError("Trim window excludes all telemetry points")
@@ -427,7 +424,6 @@ def _normalize_split_half(
     trip_id: str,
     stage_id: str,
 ) -> tuple[pl.DataFrame, SilverTelemetrySummary]:
-    """Re-normalize sequence, distance, elapsed time, and unwrapped longitudes for a split half."""
     n = half.height
     unwrapped_lons, _ = unwrap_longitudes(half.get_column("lon").to_list())
     base_cum_dist = float(half.get_column("cum_dist_m")[0])
@@ -551,7 +547,6 @@ def _reject_gps_teleports(
     grade_smooth: list[float | None],
     strava_moving: list[bool | None],
 ) -> tuple[list[TrackPoint], list[float | None], list[float | None], list[bool | None]]:
-    """Filter isolated GPS teleportation spikes (>100 m/s and >500 m) on tracks >=15 pts."""
     if len(pts) < TINY_TRACK_CLEANING_THRESHOLD:
         return pts, vel_smooth, grade_smooth, strava_moving
 
@@ -580,17 +575,14 @@ def _reject_gps_teleports(
 
 
 def _smooth_elev_array(vals: np.ndarray) -> np.ndarray:
-    """Apply 5-point rolling median, 7-point Savitzky-Golay, and 3m directional hysteresis."""
     n = len(vals)
     if n < TINY_TRACK_CLEANING_THRESHOLD:
         return vals
 
-    # 1) 5-point centered rolling median (edge-clamped)
     padded_med = np.pad(vals, 2, mode="edge")
     windows_med = np.lib.stride_tricks.sliding_window_view(padded_med, 5)
     med = np.median(windows_med, axis=1)
 
-    # 2) 7-point quadratic/cubic Savitzky-Golay smoothing (antisymmetric linear boundary pad)
     sg_coeffs = np.array([-2.0, 3.0, 6.0, 7.0, 6.0, 3.0, -2.0], dtype=np.float64) / 21.0
     left_pad = 2.0 * med[0] - med[3:0:-1]
     right_pad = 2.0 * med[-1] - med[-2:-5:-1]
@@ -598,7 +590,6 @@ def _smooth_elev_array(vals: np.ndarray) -> np.ndarray:
     windows_sg = np.lib.stride_tricks.sliding_window_view(padded_sg, 7)
     sg = windows_sg @ sg_coeffs
 
-    # 3) 3m directional hysteresis deadband
     out = np.empty(n, dtype=np.float64)
     anchor = float(sg[0])
     direction = 0
@@ -629,7 +620,6 @@ def _smooth_elev_array(vals: np.ndarray) -> np.ndarray:
 
 
 def _clean_track_elevations(pts: list[TrackPoint]) -> list[float | None]:
-    """Smooth elevations per segment (>=15 valid samples) while keeping tiny tracks exact."""
     raw_elevs: list[float | None] = [p.elev_m for p in pts]
     if len(pts) < TINY_TRACK_CLEANING_THRESHOLD:
         return raw_elevs
@@ -888,12 +878,10 @@ _WKB_POINT_DTYPE = np.dtype(
 
 
 def _encode_wkb_point(lon: float, lat: float) -> bytes:
-    """Encode a 2D WGS84 Point in little-endian Well-Known Binary (WKB)."""
     return struct.pack("<BIdd", 1, 1, lon, lat)
 
 
 def _encode_wkb_points_arrow(lons: Sequence[float], lats: Sequence[float]) -> pa.Array:
-    """Vectorized NumPy->PyArrow WKB Point encoder."""
     n = len(lons)
     if n == 0:
         return pa.array([], type=pa.binary())
@@ -952,7 +940,6 @@ def _to_local_enu_coords(
     lats: Sequence[float],
     unwrapped_lons: Sequence[float],
 ) -> list[tuple[float, float]]:
-    """Project (lat, unwrapped_lon) into isotropic local ENU meters (north_m, east_m)."""
     if not lats:
         return []
     lat0 = float(lats[0])
@@ -1033,7 +1020,6 @@ def _rdp_segment_indices(
     coords: Sequence[tuple[float, float]],
     tol: float,
 ) -> list[int]:
-    """Return kept indices in `coords` using iterative Douglas-Peucker."""
     n = len(coords)
     if n <= 2 or tol <= 0.0:
         return list(range(n))

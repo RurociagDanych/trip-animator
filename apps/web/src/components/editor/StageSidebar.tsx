@@ -586,7 +586,6 @@ export function StageSidebar({
               selectedStage ? "basis-1/2" : ""
             }`}
           >
-            {/* Track Dropzone (.gpx,.fit,.tcx) + Strava Import */}
             <div className="space-y-2">
               <div
                 role="button"
@@ -686,7 +685,6 @@ export function StageSidebar({
               ) : null}
             </div>
 
-            {/* Compact track upload status */}
             {uploads.length > 0 ? (() => {
               const uploadingCount = uploads.filter((u) => u.status === "uploading").length;
               const succeededCount = uploads.filter((u) => u.status === "succeeded").length;
@@ -806,7 +804,6 @@ export function StageSidebar({
               </div>
             ) : null}
 
-            {/* Collapsible Multi-day grouped stage list */}
             {visualStages.length === 0 ? (
               <div className="rounded-md border border-border bg-canvas/40 p-4 text-center text-xs text-ink-muted">
                 No stages yet. Drop a GPX/FIT/TCX file or import a Strava activity to build your trip.

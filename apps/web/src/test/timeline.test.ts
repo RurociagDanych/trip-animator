@@ -1,4 +1,3 @@
-// Activity coordinates below use a constructed numeric grid, not a recorded GPS route.
 import { describe, expect, it } from "vitest";
 import {
   type ClimbHighlightOut,
@@ -148,14 +147,12 @@ describe("Timeline math and formatting", () => {
     spec.intro_hold_seconds = 1;
     spec.outro_hold_seconds = 1;
 
-    // 101 frames -> 0.1s per frame
     expect(frameIndexToProgress(0, 101, spec, 10, false)).toBe(0);
     expect(frameIndexToProgress(10, 101, spec, 10, false)).toBe(0);
     expect(frameIndexToProgress(50, 101, spec, 10, false)).toBeCloseTo(0.5, 4);
     expect(frameIndexToProgress(90, 101, spec, 10, false)).toBe(1);
     expect(frameIndexToProgress(100, 101, spec, 10, false)).toBe(1);
 
-    // 5s preview scales 1s intro/outro holds proportionally to 0.5s each
     expect(frameIndexToProgress(5, 51, spec, 5, true)).toBeCloseTo(0, 4);
     expect(frameIndexToProgress(25, 51, spec, 5, true)).toBeCloseTo(0.5, 4);
     expect(frameIndexToProgress(45, 51, spec, 5, true)).toBeCloseTo(1, 4);
@@ -165,12 +162,10 @@ describe("Timeline math and formatting", () => {
     const manifest = makeSampleManifest();
     const stages = buildTimelineFromManifest(manifest);
 
-    // At 50% distance (1000m / 2000m), we are at end of Day 1 / start of Day 2
     const distMid = evaluateTimeline(stages, { ...manifest.spec, timeline_mode: "distance" }, 0.5);
     expect(distMid.distanceTravelledM).toBeCloseTo(1000, 1);
     expect(distMid.distanceRemainingM).toBeCloseTo(1000, 1);
 
-    // In recorded-time mode (total 300s: Day 1 = 100s, Day 2 = 200s), 50% time = 150s -> 25% into Day 2 (1250m)
     const timeMid = evaluateTimeline(
       stages,
       { ...manifest.spec, timeline_mode: "recorded-time" },
@@ -208,7 +203,6 @@ describe("Timeline math and formatting", () => {
       0.8,
       { durationS: 10 },
     );
-    // Trail window is [0.6, 0.8] -> strictly inside stage s-2
     expect(trailMid.visiblePaths.length).toBe(1);
     expect(trailMid.visiblePaths[0]?.stageId).toBe("s-2");
   });
@@ -456,7 +450,6 @@ describe("Timeline math and formatting", () => {
     spec.follow_zoom_mode = "adaptive";
     spec.target_screen_px_per_sec = 180;
 
-    // Build a 21-day ~2,100 km tour (100 km per day moving East across ~27 deg lon)
     const twentyOneDays: TimelineStage[] = Array.from({ length: 21 }, (_, dayIdx) => {
       const startLon = 2.0 + dayIdx * 1.3;
       const endLon = startLon + 1.3;
@@ -517,7 +510,6 @@ describe("Timeline math and formatting", () => {
     expect(adaptive60.zoom).toBeGreaterThan(6.5);
     expect(adaptive60.zoom).toBeLessThan(10.0);
 
-    // Increasing duration to 180s allows closer zoom while staying comfortable
     const adaptive180 = computeAdaptiveFollowCamera(
       twentyOneDays,
       { ...spec, duration_seconds: 180 },
@@ -527,7 +519,6 @@ describe("Timeline math and formatting", () => {
     expect(adaptive180.zoom).toBeGreaterThan(adaptive60.zoom);
     expect(adaptive180.zoom).toBeLessThan(11.0);
 
-    // Fixed mode falls back to legacy >= 11.0 floor
     const fixedMode = computeAdaptiveFollowCamera(
       twentyOneDays,
       { ...spec, follow_zoom_mode: "fixed" },
@@ -535,7 +526,6 @@ describe("Timeline math and formatting", () => {
     );
     expect(fixedMode.zoom).toBeGreaterThanOrEqual(11.0);
 
-    // Circular mean handles 355 -> 5 deg wrap smoothly (0 deg, not 180 deg)
     const meanWrap = circularMeanBearingDeg([
       { deg: 355, weight: 1 },
       { deg: 5, weight: 1 },
@@ -546,7 +536,6 @@ describe("Timeline math and formatting", () => {
 
   it("evaluates color_by quantized segments, >2km transfer arcs, chapter cards, climb mapping, and unified telemetry readout", () => {
     const manifest = makeSampleManifest();
-    // Day 1 ends at (0.5325, 0.2352), Day 2 starts at (0.6800, 0.3337) -> > 9km transfer gap
     manifest.stages[1]!.points[0]!.lon = 0.7113;
     manifest.stages[1]!.points[0]!.lon_unwrapped = 0.7113;
     manifest.stages[1]!.points[0]!.lat = 0.3337;
@@ -662,7 +651,6 @@ describe("Timeline math and formatting", () => {
     expect(reel.length).toBeGreaterThanOrEqual(4);
     expect(doc).toEqual(generateDirectorKeyframes("expedition-doc", { stages, spec: manifest.spec, climbs }));
 
-    // Map styles
     expect(resolveMapStyleUrl("topo-relief")).toContain("openfreemap");
     expect(resolveMapStyleUrl("satellite-hybrid")).toContain("openfreemap");
     expect(resolveMapStyleUrl("editorial-mono")).toContain("openfreemap");
@@ -679,7 +667,6 @@ describe("Timeline math and formatting", () => {
     const mono = sanitizeMapStyle(baseStyle, "editorial-mono");
     expect((mono.layers[0]?.paint as Record<string, unknown>)["background-color"]).toBe("#f8fafc");
 
-    // Deck.gl layers with elevation curtain + transfer arcs + climb pins
     const evaluated = evaluateTimeline(stages, manifest.spec, 0.8);
     const overlay = buildDeckOverlayProps(evaluated.visiblePaths, evaluated.markerPosition, {
       elevationCurtain: true,
@@ -709,7 +696,6 @@ describe("Timeline math and formatting", () => {
     expect(layerIds).toContain("trip-transfer-arcs");
     expect(layerIds).toContain("trip-climb-pins");
 
-    // uPlot HR & Watts + brush + bands
     const plotData = buildTelemetryPlotData(
       [
         { cum_dist_m: 0, elev_m: 100, speed_mps: 5, grade_pct: 2, hr_bpm: 135, watts: 210 },
@@ -869,7 +855,6 @@ describe("Timeline math and formatting", () => {
     expect(poly1?.props?.data).toBe(poly2?.props?.data);
     expect(ridge1?.props?.data).toBe(ridge2?.props?.data);
 
-    // Changing exaggeration or maxDistanceM returns distinct array data
     const overlayExag = buildDeckOverlayProps(evalDist.visiblePaths, evalDist.markerPosition, {
       elevationCurtain: true,
       terrainExaggeration: 2.6,

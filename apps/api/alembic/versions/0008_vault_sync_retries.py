@@ -1,8 +1,4 @@
-"""Persist the retry budget for resumable Vault synchronization.
-
-Revision ID: 0008_vault_sync_retries
-Revises: 0007_vault_and_explorer_tiles
-"""
+"""Persist the retry budget for resumable Vault synchronization."""
 
 from collections.abc import Sequence
 

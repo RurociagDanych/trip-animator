@@ -184,12 +184,12 @@ def test_build_render_manifest_multi_stage_with_trim_and_antimeridian(tmp_path: 
     first, second = manifest.stages
     assert first.color == "#22C55E"
     assert first.transition == "bed"
-    assert len(first.points) == 3  # Trimmed to [60s, 180s]
+    assert len(first.points) == 3
     assert first.points[0].cum_dist_m == 0.0
     assert first.points[0].elapsed_s == 0.0
-    assert first.points[-1].lon_unwrapped > 180.0  # Antimeridian continuity preserved
+    assert first.points[-1].lon_unwrapped > 180.0
 
-    assert second.color == "#F97316"  # Falls back to default track_color
+    assert second.color == "#F97316"
     assert second.transition == "none"
     assert [p.segment_idx for p in second.points] == [0, 1]
 
@@ -200,7 +200,6 @@ def test_build_render_manifest_preview_caps_duration_and_downsamples(tmp_path: P
     stage_id = uuid.uuid4()
     t0 = datetime(2001, 6, 2, 9, 0, 0, tzinfo=UTC)
 
-    # 300 zig-zag points across 2 segments
     points = [
         TrackPoint(
             lat=0.1 + i * 0.001 + (0.002 if i % 2 == 0 else -0.002),
@@ -447,7 +446,6 @@ def _make_90_deg_zigzag_points(count: int) -> list[ManifestPoint]:
 def _make_duplicate_coord_points(count: int) -> list[ManifestPoint]:
     pts: list[ManifestPoint] = []
     for i in range(count):
-        # Alternate between repeated stationary clusters and small moves.
         lat = round(0.1 + (i // 3) * 0.002, 6)
         lon = round(0.2 + (i // 3) * 0.002, 6)
         pts.append(
@@ -504,28 +502,23 @@ def test_downsample_budget_matrix_collinear_zigzag_and_duplicate_coords() -> Non
                 assert out[0] == pts[0]
             if expected_len >= 2:
                 assert out[-1] == pts[-1]
-            # Output must preserve monotonic original ordering.
             cum_dists = [p.cum_dist_m for p in out]
             assert cum_dists == sorted(cum_dists)
 
-    # Empty list is safe across all budget bounds.
     for max_points in (0, 1, 2, 3, 10):
         assert _downsample_manifest_points([], max_points=max_points) == []
 
-    # 90-degree zig-zag at budget == n-1 keeps endpoints and preserves corner geometry.
     zigzag_n_minus_1 = _downsample_manifest_points(zigzag, max_points=len(zigzag) - 1)
     assert len(zigzag_n_minus_1) == len(zigzag) - 1
     assert zigzag_n_minus_1[0] == zigzag[0]
     assert zigzag_n_minus_1[-1] == zigzag[-1]
 
-    # _fill_stride_indices edge cases: n <= 0, need == 1, and over-full must_keep.
     assert _fill_stride_indices(0, set(), 5) == []
     assert _fill_stride_indices(5, {0, 1, 3, 4}, 5) == [0, 1, 2, 3, 4]
     assert _fill_stride_indices(6, {0, 1, 2, 3, 4, 5}, 3) == [0, 2, 5]
 
 
 def test_manifest_validation_trim_empty_and_timestamp_formatting(tmp_path: Path) -> None:
-    # _format_ts_iso branches
     assert _format_ts_iso(None) is None
     assert _format_ts_iso(1_000_000) == "1970-01-01T00:00:01Z"
     assert _format_ts_iso(datetime(2001, 6, 1, 12, 0, 0)) == "2001-06-01T12:00:00Z"
@@ -663,7 +656,6 @@ def test_build_render_manifest_embeds_photo_data_uris_and_respects_show_photos(
     assert mp.data_uri.startswith("data:image/webp;base64,")
     assert "UklGRhAAAABXRUJQ" in mp.data_uri
 
-    # When show_photos=False, manifest omits photos cleanly
     hidden_manifest = build_render_manifest(
         job_id=uuid.uuid4(),
         project_id=project_id,
@@ -713,7 +705,6 @@ def test_single_pass_fetchnumpy_kpis_virtual_photo_urls_and_color_segments(
     assert sampled[-1].segment_idx == 1
     assert any(p.hr_bpm is not None and p.watts is not None for p in sampled)
 
-    # Virtual photo URLs when embed_photo_data_uris=False
     photo_id = uuid.uuid4()
     thumb_key = f"photos/{project_id}/{photo_id}_thumb.webp"
     thumb_bytes = b"RIFF\x10\x00\x00\x00WEBPVP8 \x04\x00\x00\x00test"
@@ -761,7 +752,6 @@ def test_single_pass_fetchnumpy_kpis_virtual_photo_urls_and_color_segments(
     assert manifest.photos[0].asset_url == f"https://render-assets.local/{photo_id}"
     assert photo_assets == {str(photo_id): thumb_bytes}
 
-    # Pre-binned color_by quantized RGB segments
     for mode in ("grade", "speed", "hr", "watts"):
         segs = build_color_segments(sampled, mode, "#F97316")
         assert segs
@@ -839,16 +829,13 @@ def test_compute_frame_render_spans_deduplicates_holds_and_photo_plateaus(tmp_pa
     )
     spans = compute_frame_render_spans(manifest, 0, manifest.total_frames)
     assert sum(s.repeat_count for s in spans) == manifest.total_frames
-    # Intro (~30f), outro (~45f), and steady photo plateau (~77f) are collapsed -> far fewer spans
     assert len(spans) < manifest.total_frames - 100
     assert any(s.repeat_count > 10 for s in spans)
 
-    # Chunk slice preserves exact total frame count in [50, 200)
     chunk_spans = compute_frame_render_spans(manifest, 50, 200)
     assert sum(s.repeat_count for s in chunk_spans) == 150
     assert chunk_spans[0].frame_idx == 50
 
-    # drone-orbit disables pause_on_photo plateau deduplication
     orbit_manifest = manifest.model_copy(
         update={
             "spec": manifest.spec.model_copy(update={"camera_preset": "drone-orbit"}),
@@ -866,7 +853,6 @@ def test_build_render_manifest_includes_climbs_and_respects_show_climb_callouts(
     stage_id = uuid.uuid4()
     t0 = datetime(2001, 6, 8, 8, 0, 0, tzinfo=UTC)
 
-    # ~4km steady climb gaining 320m (~8% average grade) -> categorized climb
     points = [
         TrackPoint(
             lat=0.100 + i * 0.00045,

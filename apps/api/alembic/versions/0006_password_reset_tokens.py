@@ -1,9 +1,4 @@
-"""Add password reset tokens table.
-
-Revision ID: 0006_password_reset_tokens
-Revises: 0005_email_verification
-Create Date: 2026-11-18 22:00:00.000000
-"""
+"""Add password reset tokens table."""
 
 from __future__ import annotations
 

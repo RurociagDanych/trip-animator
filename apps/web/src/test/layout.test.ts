@@ -1,4 +1,3 @@
-// Activity coordinates below use a constructed numeric grid, not a recorded GPS route.
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { createDefaultRenderSpecV2, type PanelPosition } from "../lib/api/types";
@@ -51,6 +50,8 @@ function makeLinearStage(points: TimelinePoint[]): TimelineStage {
 
 describe("Geo layout & collision solver (layout.ts)", () => {
   it("clamps fitPadding so left+right <= 0.55*W and top+bottom <= 0.55*H across all viewports", () => {
+    // Route running directly North (333 km over 20s): distant trail crosses top edge,
+    // but the active marker stays centered in the padded safe area.
     const stage = makeLinearStage([
       makePoint(0.4512, 0.2173, 0, 0),
       makePoint(0.7113, 0.3552, 15_000, 1500),
@@ -153,7 +154,6 @@ describe("Geo layout & collision solver (layout.ts)", () => {
     expect(centerScr.x).toBeCloseTo(960, 2);
     expect(centerScr.y).toBeCloseTo(540, 2);
 
-    // Facing East (bearing 90 deg), a point slightly East should appear above screen center (y < 540)
     const eastPoint: [number, number] = [0.6493, 0.3128];
     const eastBearing90 = projectLngLatToScreen(eastPoint, center, 12, 45, 90, 1920, 1080);
     expect(eastBearing90.visible).toBe(true);
@@ -162,8 +162,6 @@ describe("Geo layout & collision solver (layout.ts)", () => {
   });
 
   it("keeps HUD anchored at nominal slot during normal follow-marker playback and only repositions if the active marker itself collides", () => {
-    // Route running directly North (333 km over 20s): distant trail crosses top edge,
-    // but the active marker stays centered in the padded safe area.
     const stage = makeLinearStage([
       makePoint(0.4, -1.5, 0, 0),
       makePoint(0.4, 0, 166_500, 16_650),
@@ -194,10 +192,8 @@ describe("Geo layout & collision solver (layout.ts)", () => {
       followCamera: centeredFollowCamera,
       travelDurationS: 20,
     });
-    // Marker is safely centered -> HUD must stay anchored at top-center (no false-positive shifting)
     expect(centeredRun.hud?.slot).toBe("top-center");
 
-    // Offset camera southward so the active marker itself projects right behind the top-center HUD
     const collidingFollowCamera = {
       center: [evaluated.markerPosition[0], evaluated.markerPosition[1] - 0.34] as [number, number],
       zoom: 9.5,
@@ -230,11 +226,9 @@ describe("Geo layout & collision solver (layout.ts)", () => {
       travelDurationS: 20,
     });
 
-    // Pure determinism + shifts away when active marker actually hits nominal HUD
     expect(run1.hud).toEqual(run2.hud);
     expect(run1.hud?.slot).not.toBe("top-center");
 
-    // With collision_avoidance disabled, stays at nominal top-center
     const disabledSpec = {
       ...spec,
       statistics_panel: { ...spec.statistics_panel, collision_avoidance: false },

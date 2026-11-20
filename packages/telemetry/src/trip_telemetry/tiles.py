@@ -1,10 +1,4 @@
-"""Pure deterministic Web Mercator tile explorer engine and polyline codec.
-
-Provides Google Encoded Polyline (1e-5) encoding/decoding, Web Mercator slippy-tile
-projections, Amanatides-Woo 2D DDA supercover rasterization with antimeridian and
-GPS-jump guards, sparse Max Square DP, iterative Max Cluster BFS, global + local
-Max Square Expansion Advisor, and chronological first-visit tile attribution.
-"""
+"""Pure deterministic Web Mercator tile explorer engine and polyline codec."""
 
 from __future__ import annotations
 
@@ -275,7 +269,6 @@ def _rasterize_tile_float_segment(
     max_idx: int,
     out: set[tuple[int, int]],
 ) -> None:
-    """Run drift-free canonical Amanatides-Woo 2D DDA in continuous tile coordinates."""
     # Canonical endpoint ordering guarantees exact bitwise symmetry for (A, B) vs (B, A).
     if (x0, y0) > (x1, y1):
         x0, y0, x1, y1 = x1, y1, x0, y0
@@ -532,12 +525,6 @@ def _partition_spatial_components(
     visited_set: set[tuple[int, int]],
     window_size: int,
 ) -> list[list[tuple[int, int]]]:
-    """Group tiles into 8-connected coarse buckets of side ``window_size``.
-
-    Any two tiles that can coexist inside the same ``window_size x window_size``
-    window lie in identical or 8-adjacent buckets, so no optimal window can ever
-    span multiple components.
-    """
     buckets: dict[tuple[int, int], list[tuple[int, int]]] = {}
     for x, y in visited_set:
         key = (x // window_size, y // window_size)
@@ -621,10 +608,6 @@ def _find_best_windows(
     dp: dict[tuple[int, int], int],
     max_dense_grid_cells: int = _MAX_DENSE_GRID_CELLS,
 ) -> list[tuple[int, int, int, bool, str]]:
-    """Find up to ``max_candidates`` optimal ``window_size x window_size`` windows.
-
-    Returns sorted tuples ``(missing_count, anchor_x, anchor_y, overlaps, direction)``.
-    """
     max_anchor = grid_size - window_size
     if max_anchor < 0 or not visited_set:
         return []
@@ -632,7 +615,6 @@ def _find_best_windows(
     target_area = window_size * window_size
     candidate_missing: dict[tuple[int, int], int] = {}
 
-    # 1. Seed exact local directional shifts around current Max Square(s).
     for ax, ay in local_directions:
         candidate_missing[(ax, ay)] = _count_window_missing(visited_set, ax, ay, window_size)
 
@@ -646,7 +628,6 @@ def _find_best_windows(
         ranked_missing = sorted(candidate_missing.values())
         return ranked_missing[max_candidates - 1]
 
-    # 2. Global optimal window solver across spatial proximity components.
     components = _partition_spatial_components(visited_set, window_size)
     for comp in components:
         cutoff = _current_cutoff()

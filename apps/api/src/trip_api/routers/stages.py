@@ -69,7 +69,7 @@ from trip_api.vault_sync import (
     prepare_vault_geometry_from_parsed_track,
 )
 
-MAX_GPX_BYTES = 25 * 1024 * 1024  # 25 MiB
+MAX_GPX_BYTES = 25 * 1024 * 1024
 _CHUNK_BYTES = 64 * 1024
 _MULTIPART_OVERHEAD_BYTES = 1024 * 1024
 
@@ -619,7 +619,6 @@ def split_stage(
 
         # Both segments reference the unchanged canonical activity. Segment-level
         # geometry and metrics must never be mirrored into the Activity Library.
-
         project.revision += 1
         project.updated_at = datetime.now(UTC)
         write_audit_event(

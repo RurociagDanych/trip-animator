@@ -319,14 +319,12 @@ def test_reap_orphan_jobs_missing_blobs_s3_and_validation(
     user, proj = _seed_project(harness, "orphan@example.com")
     now = datetime.now(UTC)
 
-    # Validation errors on non-positive retention arguments
     with harness.session_factory() as db:
         with pytest.raises(ValueError, match="render_retention_days"):
             reap_expired(db, harness.store, render_retention_days=0)
         with pytest.raises(ValueError, match="rate_limit_retention_hours"):
             reap_expired(db, harness.store, rate_limit_retention_hours=0)
 
-    # Orphaned/expired terminal jobs whose blobs are already missing, plus an active running job
     with harness.session_factory() as db:
         db.add_all(
             [
@@ -379,7 +377,6 @@ def test_reap_orphan_jobs_missing_blobs_s3_and_validation(
         )
         db.commit()
 
-        # Pass naive datetime to exercise UTC normalization
         naive_now = now.replace(tzinfo=None)
         res = reap_expired(db, harness.store, now=naive_now, render_retention_days=7)
         assert res.render_jobs_deleted == 2
@@ -387,7 +384,6 @@ def test_reap_orphan_jobs_missing_blobs_s3_and_validation(
         remaining = db.scalars(select(RenderJob)).all()
         assert [r.idempotency_key for r in remaining] == ["running-preserved"]
 
-    # Non-local store raising FileNotFoundError on delete is treated as safely absent
     class MissingOnDeleteStore(LocalObjectStore):
         def delete(self, key: str) -> None:
             raise FileNotFoundError(key)
@@ -398,7 +394,6 @@ def test_reap_orphan_jobs_missing_blobs_s3_and_validation(
     assert ok is True
     assert deleted is False
 
-    # S3ObjectStore factory and missing-key S3 cleanup
     deleted_s3_keys: list[str] = []
 
     class FakeS3Client:
@@ -532,11 +527,9 @@ def test_cli_reap_dry_run_and_execute(
     finally:
         engine.dispose()
 
-    # Invalid retention value returns exit code 1
     assert cli_main(["reap", "--render-retention-days", "0", "--database-url", db_url]) == 1
     assert "render_retention_days" in capsys.readouterr().err
 
-    # Human-readable dry-run (without --json)
     rc_text = cli_main(["reap", "--dry-run", "--database-url", db_url])
     assert rc_text == 0
     text_out = capsys.readouterr().out

@@ -1,4 +1,3 @@
-// Activity coordinates below use a constructed numeric grid, not a recorded GPS route.
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { createDefaultRenderSpecV2, type RenderSpecV2 } from "../lib/api/types";
@@ -262,7 +261,6 @@ describe("Property-based tests: camera.ts", () => {
     expect(nnw!).toBeGreaterThan(340);
     expect(nnw!).toBeLessThan(360);
 
-    // Coincident points return null
     expect(computeBearingDeg([0.4512, 0.2173], [0.4512, 0.2173])).toBeNull();
   });
 
@@ -309,7 +307,6 @@ describe("Property-based tests: camera.ts", () => {
       makePoint(0.4512, 0.2173, 0, 0),
       makePoint(0.5325, 0.2537, 2000, 200),
     ]);
-    // At progressRatio = 10 / 120, orbitAzimuth = 10 -> 355 + 10 = 365 -> 5 deg
     const evaluated = evaluateTimeline([stage], spec, 10 / 120);
     const frame = computeCameraFrame(spec, evaluated);
     expect(frame.bearing).toBeCloseTo(5, 5);

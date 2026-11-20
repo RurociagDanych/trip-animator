@@ -1,4 +1,3 @@
-// Activity coordinates below use a constructed numeric grid, not a recorded GPS route.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   createMemoryHistory,
@@ -661,7 +660,6 @@ describe("Web UI & timeline fixes", () => {
       </QueryClientProvider>,
     );
 
-    // Repetitive warnings collapsed into one summary pill instead of 2 per-stage boxes
     expect(await screen.findByTestId("stage-warnings-summary")).toHaveTextContent(
       /Collapsed consecutive duplicate coordinate/i,
     );
@@ -893,7 +891,6 @@ describe("Web UI & timeline fixes", () => {
 
       expect(await screen.findByText(/queued \(0%\)/i)).toBeInTheDocument();
 
-      // Emit SSE status event at 42% and verify Render history updates in place
       const statusListeners = listeners["status"] ?? [];
       expect(statusListeners.length).toBeGreaterThan(0);
       for (const cb of statusListeners) {

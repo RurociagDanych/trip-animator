@@ -466,7 +466,6 @@ def test_ssrf_ipv4_ipv6_bypass_vectors_url_normalization_and_ipv6_allowlist(
     allowed = frozenset({"tiles.openfreemap.org", "[2606:4700:4700::1111]:8443"})
     origin = "http://caddy"
 
-    # Restricted IPv4 & IPv6 bypass vectors (including CGNAT, unspecified, metadata, mapped IPv6).
     for bypass_url in (
         "http://127.0.0.1/render/job-1",
         "https://127.0.0.1/tile.pbf",
@@ -518,7 +517,6 @@ def test_ssrf_ipv4_ipv6_bypass_vectors_url_normalization_and_ipv6_allowlist(
             resolve_dns=False,
         )
 
-    # URL normalization & userinfo (@127.0.0.1) bypass vectors.
     for normalized_bypass in (
         "http://caddy/api/../api/v1/projects",
         "http://caddy/assets/../../api/v1/projects",
@@ -538,7 +536,6 @@ def test_ssrf_ipv4_ipv6_bypass_vectors_url_normalization_and_ipv6_allowlist(
             resolve_dns=False,
         ), f"Expected URL normalization/userinfo block for {normalized_bypass}"
 
-    # IPv6 allowlist with brackets and ports (via WorkerSettings and direct policy check).
     settings = WorkerSettings(
         MAP_TILE_ALLOWLIST="https://[2606:4700:4700::1111]:8443/tiles, [2606:4700:4700::1112]:443"
     )
@@ -558,7 +555,6 @@ def test_ssrf_ipv4_ipv6_bypass_vectors_url_normalization_and_ipv6_allowlist(
         resolve_dns=False,
     )
 
-    # IPv6 render_origin with brackets and port.
     v6_origin = "http://[2606:4700:4700::1111]:8080"
     assert is_render_request_allowed(
         "http://[2606:4700:4700::1111]:8080/render/job-1",
@@ -573,7 +569,6 @@ def test_ssrf_ipv4_ipv6_bypass_vectors_url_normalization_and_ipv6_allowlist(
         resolve_dns=False,
     )
 
-    # Sync DNS resolution: public IP allowed, NXDOMAIN blocked.
     monkeypatch.setattr(
         "trip_worker.ssrf.socket.getaddrinfo",
         lambda *_args, **_kwargs: [
@@ -649,7 +644,6 @@ def test_streaming_encoder_nonzero_exit_stderr_capture_and_timeout_cleanup(
 ) -> None:
     import io
 
-    # 1. Non-zero exit captures drained stderr lines in EncoderError.
     class _FakeStdin:
         def __init__(self, *, broken: bool = False) -> None:
             self.broken = broken
@@ -694,7 +688,6 @@ def test_streaming_encoder_nonzero_exit_stderr_capture_and_timeout_cleanup(
     assert "Error line 1: invalid frame" in str(exc_info.value)
     assert "Error line 2: libx264 failed" in str(exc_info.value)
 
-    # 2. BrokenPipeError while writing frame includes captured stderr.
     class _BrokenPipeProc:
         def __init__(self, _args: list[str], **_kwargs: Any) -> None:
             self.stdin = _FakeStdin(broken=True)
@@ -720,7 +713,6 @@ def test_streaming_encoder_nonzero_exit_stderr_capture_and_timeout_cleanup(
     with pytest.raises(EncoderError, match="ffmpeg pipe died"):
         enc_pipe.write_frame(b"FRAME")
 
-    # 3. TimeoutExpired in finish() kills child process, waits for cleanup, and joins stderr.
     timeout_state: dict[str, Any] = {"killed": False, "waits": 0}
 
     class _TimeoutProc:
@@ -756,7 +748,6 @@ def test_streaming_encoder_nonzero_exit_stderr_capture_and_timeout_cleanup(
     assert enc_timeout._stderr_thread is not None
     assert not enc_timeout._stderr_thread.is_alive()
 
-    # 4. abort() terminates running process and escalates to kill() on TimeoutExpired.
     abort_state: dict[str, Any] = {"terminated": False, "killed": False, "waits": 0}
 
     class _StubbornProc:
@@ -791,10 +782,8 @@ def test_streaming_encoder_nonzero_exit_stderr_capture_and_timeout_cleanup(
     enc_abort.start()
     enc_abort.abort()
     assert abort_state == {"terminated": True, "killed": True, "waits": 2}
-    # Second abort() is a no-op.
     enc_abort.abort()
 
-    # 5. Additional encoder guards: unstarted finish, empty frame, Popen OSError, empty output MP4.
     enc_unstarted = StreamingVideoEncoder(
         output_mp4_path=tmp_path / "unstarted.mp4",
         fps=30,
@@ -825,7 +814,6 @@ def test_streaming_encoder_nonzero_exit_stderr_capture_and_timeout_cleanup(
         enc_empty.write_frame(b"")
     with pytest.raises(EncoderError, match="empty or missing MP4"):
         enc_empty.finish()
-    # Second finish() after _closed=True returns path immediately.
     assert enc_empty.finish() == tmp_path / "missing.mp4"
 
     def _raise_oserror(*_args: Any, **_kwargs: Any) -> Any:
@@ -849,7 +837,6 @@ def test_probe_verify_and_thumbnail_error_paths(
     mp4 = tmp_path / "v.mp4"
     thumb = tmp_path / "t.png"
 
-    # Parameter validation coverage for encoder builders.
     with pytest.raises(ValueError, match="Unsupported dimensions"):
         build_ffmpeg_encode_args(
             frame_pattern_path=tmp_path / "f_%06d.png",
@@ -873,7 +860,6 @@ def test_probe_verify_and_thumbnail_error_paths(
     png_args = build_ffmpeg_thumbnail_args(input_mp4_path=mp4, output_thumb_path=thumb)
     assert "png" in png_args
 
-    # probe_video TimeoutExpired & non-zero exit & invalid JSON & empty streams.
     def _timeout_run(args: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         raise subprocess.TimeoutExpired(args, 30.0)
 
@@ -906,7 +892,6 @@ def test_probe_verify_and_thumbnail_error_paths(
     with pytest.raises(EncoderError, match="no video streams"):
         probe_video(mp4)
 
-    # verify_mp4_output codec, pix_fmt, and duration guards.
     def _mock_probe_payload(
         *, codec: str = "h264", pix_fmt: str = "yuv420p", duration: str = "2.0"
     ) -> None:
@@ -951,7 +936,6 @@ def test_probe_verify_and_thumbnail_error_paths(
             duration_tolerance_s=1.0,
         )
 
-    # extract_thumbnail falls back to seek=0.0 on first failure, and raises if both fail.
     seen_seeks: list[str] = []
 
     def _fail_first_thumb(args: list[str], **_kw: Any) -> subprocess.CompletedProcess[str]:
@@ -1107,8 +1091,6 @@ async def test_resolve_and_validate_external_target_and_ip_pinned_transport(
     assert d_ok.target.port == 443
     assert d_ok.target.resolved_ip == "93.184.216.34"
 
-    # Pinned backend connects to resolved_ip without calling getaddrinfo again,
-    # verifies peer IP before TLS handshake, and preserves SNI server_hostname.
     class FakeSock:
         def __init__(self, peer_ip: str) -> None:
             self._peer_ip = peer_ip
@@ -1201,7 +1183,7 @@ async def test_resolve_and_validate_external_target_and_ip_pinned_transport(
     assert inner_ok.last_stream is not None
     assert inner_ok.last_stream.tls_server_hostname == "tiles.openfreemap.org"
 
-    # If connected socket peer IP is restricted (e.g., 169.254.169.254), abort BEFORE TLS
+    # If the connected peer IP is restricted (e.g. link-local metadata), abort BEFORE TLS
     inner_bad_peer = FakeInnerBackend("169.254.169.254")
     transport_bad_peer = PinnedSsrfAsyncTransport(network_backend=inner_bad_peer, resolve_dns=True)
     async with httpx.AsyncClient(transport=transport_bad_peer, follow_redirects=False) as client:

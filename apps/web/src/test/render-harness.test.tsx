@@ -1,4 +1,3 @@
-// Activity coordinates below use a constructed numeric grid, not a recorded GPS route.
 import { QueryClient } from "@tanstack/react-query";
 import { createMemoryHistory } from "@tanstack/react-router";
 import { act, render, screen } from "@testing-library/react";
@@ -100,7 +99,6 @@ describe("Deterministic Render Harness (/render/$jobId)", () => {
     await renderer!.ready;
     expect(renderer!.getFrameCount()).toBe(150);
 
-    // Advance to final frame and verify StatisticsHud updates deterministically
     await act(async () => {
       await renderer!.setFrame(149);
     });
@@ -208,7 +206,6 @@ describe("Deterministic Render Harness (/render/$jobId)", () => {
     expect(renderer).toBeDefined();
     await renderer!.ready;
 
-    // 1 photo at progress 0.5, pause=10s, travel=50s -> pause spans t in [25s, 35s] -> frame 300 (t=30s)
     await act(async () => {
       await renderer!.setFrame(300);
     });
@@ -337,19 +334,16 @@ describe("Deterministic Render Harness (/render/$jobId)", () => {
     const renderer = window.__TRIP_RENDERER__!;
     await renderer.ready;
 
-    // Early frame -> Chapter Card visible
     await act(async () => {
       await renderer.setFrame(5);
     });
     expect(screen.getByTestId("chapter-card")).toHaveTextContent("Fictional Meridian Summit");
 
-    // Mid frame -> Polaroid photo card visible (after photo fade-in at t=4.5s)
     await act(async () => {
       await renderer.setFrame(45);
     });
     expect(screen.getByTestId("photo-stop-card")).toHaveAttribute("data-photo-style", "polaroid");
 
-    // Outro frame -> Finale Poster Card + Climb pin visible
     await act(async () => {
       await renderer.setFrame(95);
     });

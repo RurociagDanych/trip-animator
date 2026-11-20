@@ -571,7 +571,6 @@ export function solveStageLayout(input: SolveStageLayoutInput): StageLayoutSolut
     ? slotToRect(nominalSlot, hudSize.width, hudSize.height, safeW, safeH)
     : null;
 
-  // Base safe padding from nominal HUD & elevation overlay
   const basePad = compact ? 32 : 48;
   const elevSize = spec.elevation_chart_overlay ? estimateElevationOverlaySize(compact) : null;
 
@@ -737,7 +736,6 @@ export function solveStageLayout(input: SolveStageLayoutInput): StageLayoutSolut
     }
   }
 
-  // Place elevation overlay without colliding with HUD or watermark
   let resolvedElevation: StageLayoutSolution["elevation"] = null;
   if (elevSize) {
     const hudRect = resolvedHud?.rect ?? null;
@@ -780,7 +778,6 @@ export function solveStageLayout(input: SolveStageLayoutInput): StageLayoutSolut
     resolvedElevation = { rect: elevRect, anchorLeft };
   }
 
-  // Place color-by micro-legend clear of HUD, elevation overlay, and watermark/aspect badge
   const legendSize = estimateColorLegendSize(spec.color_by, evaluated.colorLegendStops, safeW);
   let resolvedColorLegend: StageLayoutSolution["colorLegend"] = null;
   if (legendSize) {
@@ -874,7 +871,6 @@ export function solveStageLayout(input: SolveStageLayoutInput): StageLayoutSolut
     resolvedColorLegend = { rect: bestLegendRect };
   }
 
-  // Place photo card in a non-colliding corner away from HUD, elevation, legend, watermark, and marker
   const photoStyle: PhotoCardStyle = spec.photo_card_style ?? "corner";
   let resolvedPhotoCard: StageLayoutSolution["photoCard"] = null;
   if (hasActivePhoto) {
@@ -974,7 +970,6 @@ export function solveStageLayout(input: SolveStageLayoutInput): StageLayoutSolut
     resolvedPhotoCard = { ...bestCandidate, style: photoStyle };
   }
 
-  // Place chapter slate card in non-colliding lower-third / edge slot
   const activeChapter = input.hasActiveChapterCard ?? Boolean(evaluated.chapterCard);
   let resolvedChapterCard: StageLayoutSolution["chapterCard"] = null;
   if (activeChapter) {
@@ -1046,7 +1041,6 @@ export function solveStageLayout(input: SolveStageLayoutInput): StageLayoutSolut
     resolvedChapterCard = { rect: bestRect };
   }
 
-  // Place finale poster without colliding with HUD / watermark / photo / elevation
   const activeFinale =
     input.hasActiveFinalePoster ?? (spec.show_finale_poster && evaluated.progressRatio >= 0.999);
   let resolvedFinalePoster: StageLayoutSolution["finalePoster"] = null;
@@ -1102,7 +1096,6 @@ export function solveStageLayout(input: SolveStageLayoutInput): StageLayoutSolut
     resolvedFinalePoster = { rect: bestPosterRect };
   }
 
-  // Place climb callout pills near their summit screen positions without collisions
   const resolvedClimbCallouts: ClimbCalloutSlot[] = [];
   const calloutTargets: { id: string; screenX: number; screenY: number }[] = [];
   const isCalloutAnchorOnScreen = (screenX: number, screenY: number) =>

@@ -92,7 +92,6 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
     const spec = createDefaultRenderSpecV2();
     const stage = makeStage();
 
-    // 1. Exact midpoint timestamp -> progress 0.5, lon 0.25
     const tsPhoto = makePhoto({
       id: "p-ts",
       taken_at_utc: "2040-04-12T08:08:20Z",
@@ -110,7 +109,7 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
 
     const tzMismatchPhoto = makePhoto({
       id: "p-tz",
-      taken_at_utc: "2040-04-12T08:00:00Z", // points to 0.0
+      taken_at_utc: "2040-04-12T08:00:00Z",
       lat: 0.001,
       lon: 0.9, // >50km away from 0.0 -> triggers GPS fallback
     });
@@ -118,7 +117,7 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
     const farPhoto = makePhoto({
       id: "p-far",
       lat: 1.0,
-      lon: 0.5, // > 50km from route -> unmatched
+      lon: 0.5,
     });
 
     const matchedTs = matchPhotosToTimeline([tsPhoto], [stage], spec, (id) => `/thumb/${id}`);
@@ -147,13 +146,11 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
 
     const stage = makeStage();
     const photos = [
-      makePhoto({ id: "p1", taken_at_utc: "2040-04-12T08:04:10Z" }), // 0.25
-      makePhoto({ id: "p2", taken_at_utc: "2040-04-12T08:12:30Z" }), // 0.75
+      makePhoto({ id: "p1", taken_at_utc: "2040-04-12T08:04:10Z" }),
+      makePhoto({ id: "p2", taken_at_utc: "2040-04-12T08:12:30Z" }),
     ];
     const matched = matchPhotosToTimeline(photos, [stage], spec, (id) => `/img/${id}`);
 
-    // Active duration = 18s. Total pause = 2 * 4 = 8s (<= 0.65 * 18 = 11.7s). Travel = 10s.
-    // Stop 1 at activeT = 0.25 * 10 = 2.5s (t = 3.5s) -> holds progress = 0.25 during t in [3.5, 7.5]
     let prevProgress = -1;
     for (let t = 0; t <= 20; t += 0.25) {
       const res = evaluateTimelineSchedule([stage], matched, spec, t, 20, false);
@@ -168,7 +165,6 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
     expect(duringPause1Start.activePhoto?.photo.id).toBe("p1");
     expect(duringPause1Start.travelDurationS).toBeCloseTo(10, 4);
 
-    // Test 65% cap when many photos would exceed activeDuration
     const manyPhotos = Array.from({ length: 10 }, (_, idx) =>
       makePhoto({
         id: `many-${idx}`,
@@ -177,7 +173,6 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
     );
     const matchedMany = matchPhotosToTimeline(manyPhotos, [stage], spec);
     const cappedRes = evaluateTimelineSchedule([stage], matchedMany, spec, 5, 20, false);
-    // activeDuration = 18s -> travelDurationS >= 0.35 * 18 = 6.3s
     expect(cappedRes.travelDurationS).toBeGreaterThanOrEqual(18 * 0.35 - 1e-4);
   });
 
@@ -333,13 +328,11 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
     ];
 
     const stage = makeStage();
-    // Photo at midpoint p = 0.5 (end of 2.5x valley)
     const photos = [
       makePhoto({ id: "p-mid", taken_at_utc: "2040-04-12T08:08:20Z" }),
     ];
     const matched = matchPhotosToTimeline(photos, [stage], spec);
 
-    // Monotonicity across entire timeline
     let prevProgress = -1;
     for (let t = 0; t <= 20; t += 0.25) {
       const res = evaluateTimelineSchedule([stage], matched, spec, t, 20, false);
@@ -347,11 +340,9 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
       prevProgress = res.progressRatio;
     }
 
-    // Halfway through activeDuration (t = 10s), marker is well past 0.5 because first half was 2.5x faster
     const midTimeRes = evaluateTimelineSchedule([stage], matched, spec, 10, 20, false);
     expect(midTimeRes.progressRatio).toBeGreaterThan(0.65);
 
-    // Non-paused photo trigger time matches when marker crosses matchedProgress = 0.5
     const triggerTimeRatio = progressRatioToTimeRatio(matched, spec, 0.5, 20, false);
     const triggerTimeS = triggerTimeRatio * 20;
     const atTrigger = evaluateTimelineSchedule([stage], matched, spec, triggerTimeS, 20, false);
@@ -367,14 +358,12 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
     );
     expect(justBeforeTrigger.activePhoto).toBeNull();
 
-    // Round-trip progressRatioToTimeRatio -> evaluateTimelineSchedule (non-paused)
     for (const target of [0.1, 0.25, 0.5, 0.72, 0.9]) {
       const tr = progressRatioToTimeRatio(matched, spec, target, 20, false);
       const ev = evaluateTimelineSchedule([stage], matched, spec, tr * 20, 20, false);
       expect(ev.progressRatio).toBeCloseTo(target, 4);
     }
 
-    // Uniform speed_multiplier (all 2.0x) normalizes to exact identity T(p) = p
     const uniformSpec = {
       ...spec,
       camera_keyframes: spec.camera_keyframes.map((kf) => ({ ...kf, speed_multiplier: 2.0 })),
@@ -393,7 +382,6 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
     const afterMut = evaluateTimelineSchedule([stage], matched, mutSpec, 10, 20, false);
     expect(afterMut.progressRatio).toBeCloseTo(0.5, 6);
 
-    // pause_on_photo + speed curve preserves travelDurationS, pauses at photo, and round-trips
     const pausedSpec = { ...spec, pause_on_photo: true, photo_display_seconds: 4 };
     const pausedTimeRatio = progressRatioToTimeRatio(matched, pausedSpec, 0.5, 20, false);
     const atPauseStart = evaluateTimelineSchedule(
@@ -518,7 +506,6 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
     expect(spans[2]!.startProgress).toBeCloseTo(2 / 3, 6);
     expect(spans[2]!.endProgress).toBeCloseTo(1, 6);
 
-    // Smooth focus weight ramps 0 -> 0.5 at boundary -> 1 inside stage-street -> 0 in stage-tail
     const inA = evaluateStageCameraFocus(stages, spec, 0.15);
     const atEnterBoundary = evaluateStageCameraFocus(stages, spec, 1 / 3);
     const inB = evaluateStageCameraFocus(stages, spec, 0.5);
@@ -542,17 +529,15 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
     expect(inC.focusWeight).toBeCloseTo(0, 6);
     expect(inC.speedMultiplier).toBeCloseTo(1.0, 6);
 
-    // Stage B runs at 0.2x speed, so it gets much more wall-clock duration than Stage A (1.0x)
     const tEnterB = progressRatioToTimeRatio([], spec, 1 / 3, 30, false, stages) * 30;
     const tExitB = progressRatioToTimeRatio([], spec, 2 / 3, 30, false, stages) * 30;
-    const tEnd = 29; // duration 30 - outro 1
-    const durA = tEnterB - 1; // minus intro 1
+    const tEnd = 29;
+    const durA = tEnterB - 1;
     const durB = tExitB - tEnterB;
     const durC = tEnd - tExitB;
     expect(durB).toBeGreaterThan(durA * 3.5);
     expect(durC).toBeCloseTo(durA, 1);
 
-    // Monotonicity and exact round-trip inversion with stages
     let prevProgress = -1;
     for (let t = 0; t <= 30; t += 0.5) {
       const res = evaluateTimelineSchedule(stages, [], spec, t, 30, false);
@@ -717,7 +702,6 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
     expect(durB).toBeGreaterThan(durA * 12);
     expect(durC).toBeCloseTo(durA, 1);
 
-    // Strictly monotonic across timeline
     let prevProgress = -1;
     for (let t = 0; t <= 60; t += 0.5) {
       const res = evaluateTimelineSchedule(stages, [], singleSlowSpec, t, 60, false);
@@ -725,7 +709,6 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
       prevProgress = res.progressRatio;
     }
 
-    // Accurate round-trip inversion at boundary and interior progress values
     for (const target of [0.05, 0.2, 0.32, 0.3333, 0.35, 0.5, 0.66, 0.6667, 0.8, 0.95]) {
       const timeRatio = progressRatioToTimeRatio([], singleSlowSpec, target, 60, false, stages);
       const evaluated = evaluateTimelineSchedule(

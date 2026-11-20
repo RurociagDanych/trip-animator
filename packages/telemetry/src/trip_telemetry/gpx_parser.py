@@ -15,7 +15,7 @@ from defusedxml.common import DefusedXmlException
 
 from trip_telemetry.schemas import IngestWarning, ParsedTrack, TrackPoint
 
-MAX_GPX_BYTES = 25 * 1024 * 1024  # 25 MiB
+MAX_GPX_BYTES = 25 * 1024 * 1024
 MAX_XML_DEPTH = 64
 MAX_TRACKS = 20
 MAX_SEGMENTS = 1_000
@@ -131,7 +131,6 @@ def _synthesize_uniform_timestamps(
     points: list[TrackPoint],
     speed_mps: float = DEFAULT_SYNTHETIC_SPEED_MPS,
 ) -> list[TrackPoint]:
-    """Fill missing timestamps uniformly by cumulative distance along segments."""
     if not points:
         return points
 

@@ -12,10 +12,7 @@ data "aws_cloudfront_origin_request_policy" "all_viewer_except_host" {
   name = "Managed-AllViewerExceptHostHeader"
 }
 
-# -----------------------------------------------------------------------------
-# KMS Encryption Key for S3 Buckets (Account-scoped OAC avoids CF <-> KMS cycle)
-# -----------------------------------------------------------------------------
-
+# Account-scoped OAC condition avoids a CloudFront <-> KMS dependency cycle
 data "aws_iam_policy_document" "s3_kms" {
   statement {
     sid    = "EnableAccountAdministration"
@@ -69,10 +66,6 @@ resource "aws_kms_alias" "s3" {
   name          = "alias/${var.name_prefix}-s3"
   target_key_id = aws_kms_key.s3.key_id
 }
-
-# -----------------------------------------------------------------------------
-# S3 Bucket: Web SPA Static Assets (served via CloudFront OAC)
-# -----------------------------------------------------------------------------
 
 resource "aws_s3_bucket" "web" {
   bucket        = "${var.name_prefix}-web-${data.aws_caller_identity.current.account_id}"
@@ -166,10 +159,6 @@ resource "aws_s3_bucket_policy" "web" {
 
   depends_on = [aws_s3_bucket_public_access_block.web]
 }
-
-# -----------------------------------------------------------------------------
-# S3 Bucket: Objects / Data Lake (bronze/, silver/, gold/, outputs/, renders/)
-# -----------------------------------------------------------------------------
 
 resource "aws_s3_bucket" "objects" {
   bucket        = var.objects_bucket_name
@@ -325,10 +314,6 @@ resource "aws_s3_bucket_policy" "objects" {
 
   depends_on = [aws_s3_bucket_public_access_block.objects]
 }
-
-# -----------------------------------------------------------------------------
-# AWS WAFv2 WebACL (us-east-1 CLOUDFRONT scope)
-# -----------------------------------------------------------------------------
 
 resource "aws_wafv2_web_acl" "edge" {
   count    = var.enable_waf ? 1 : 0
@@ -499,10 +484,6 @@ resource "aws_wafv2_web_acl" "edge" {
     Name = "${var.name_prefix}-edge-waf"
   })
 }
-
-# -----------------------------------------------------------------------------
-# CloudFront Distribution + Origin Access Control
-# -----------------------------------------------------------------------------
 
 resource "aws_cloudfront_origin_access_control" "web" {
   name                              = "${var.name_prefix}-web-oac"

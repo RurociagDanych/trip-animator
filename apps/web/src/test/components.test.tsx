@@ -1,4 +1,3 @@
-// Activity coordinates below use a constructed numeric grid, not a recorded GPS route.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   createMemoryHistory,
@@ -228,8 +227,6 @@ describe("Component tests: InspectorPanel, StageSidebar, ExportPanel, Statistics
 
       render(<RouterProvider router={router} />);
 
-      // Inline stage editor is rendered below the selected stage in the Stages tab
-      // Color swatch and custom stage color picker
       fireEvent.click(await screen.findByRole("button", { name: "Color #14b8a6" }));
       expect(onStageColorChange).toHaveBeenCalledWith("stage-1", "#14b8a6");
 
@@ -238,7 +235,6 @@ describe("Component tests: InspectorPanel, StageSidebar, ExportPanel, Statistics
       });
       expect(onStageColorChange).toHaveBeenCalledWith("stage-1", "#ec4899");
 
-      // Invalid trim (end <= start)
       fireEvent.change(screen.getByLabelText("Trim start seconds"), {
         target: { value: "600" },
       });
@@ -250,7 +246,6 @@ describe("Component tests: InspectorPanel, StageSidebar, ExportPanel, Statistics
         /Trim end must be greater than trim start/i,
       );
 
-      // Valid trim
       fireEvent.change(screen.getByLabelText("Trim start seconds"), {
         target: { value: "60" },
       });
@@ -263,7 +258,6 @@ describe("Component tests: InspectorPanel, StageSidebar, ExportPanel, Statistics
         expect(onStagesUpdated).toHaveBeenCalled();
       });
 
-      // Clear trim
       fireEvent.click(screen.getByRole("button", { name: /Clear trim/i }));
       await waitFor(() => {
         expect(onStagesUpdated).toHaveBeenCalledTimes(2);
@@ -419,35 +413,29 @@ describe("Component tests: InspectorPanel, StageSidebar, ExportPanel, Statistics
       const splitSection = await screen.findByTestId("stage-split-section");
       expect(splitSection).toBeInTheDocument();
 
-      // Default 50% readout
       const readout = screen.getByTestId("stage-split-readout");
       expect(readout).toHaveTextContent("Part 1: 10.0 km · Part 2: 10.0 km");
 
-      // Playhead on stage-2 (currentTimeRatio = 0.75 -> progress = 0.75, stage-1 span is [0, 0.5])
       useEditorStore.getState().setCurrentTimeRatio(0.75);
       fireEvent.click(screen.getByTestId("stage-split-use-playhead"));
       expect(screen.getByTestId("stage-split-playhead-notice")).toHaveTextContent(
         "Playhead is currently on another stage.",
       );
 
-      // Playhead inside stage-1 at 60% of stage-1 -> global progress = 0.30 -> 12,000 m
       useEditorStore.getState().setCurrentTimeRatio(0.3);
       fireEvent.click(screen.getByTestId("stage-split-use-playhead"));
       expect(screen.queryByTestId("stage-split-playhead-notice")).not.toBeInTheDocument();
       expect((screen.getByTestId("stage-split-slider") as HTMLInputElement).value).toBe("12000");
       expect(readout).toHaveTextContent("Part 1: 12.0 km · Part 2: 8.0 km");
 
-      // Adjust slider manually
       fireEvent.change(screen.getByTestId("stage-split-slider"), { target: { value: "14500" } });
       expect(readout).toHaveTextContent("Part 1: 14.5 km · Part 2: 5.5 km");
 
-      // Default and customized Part 1 / Part 2 names
       const p1Input = screen.getByLabelText("Part 1 stage name") as HTMLInputElement;
       const p2Input = screen.getByLabelText("Part 2 stage name") as HTMLInputElement;
       expect(p1Input.value).toBe("Alpine Pass (Part 1)");
       expect(p2Input.value).toBe("Alpine Pass (Part 2)");
 
-      // Recorded-time mode uses elapsed_seconds when snapping playhead across unequal-speed stages
       const fastStage = makeStage({
         id: "stage-fast",
         name: "Fast Stage",
@@ -489,7 +477,6 @@ describe("Component tests: InspectorPanel, StageSidebar, ExportPanel, Statistics
       fireEvent.change(p1Input, { target: { value: "Climb Start" } });
       fireEvent.change(p2Input, { target: { value: "Town Finish" } });
 
-      // Submit split
       fireEvent.click(screen.getByTestId("stage-split-submit"));
 
       await waitFor(() => {
@@ -624,7 +611,6 @@ describe("Component tests: InspectorPanel, StageSidebar, ExportPanel, Statistics
         /Add at least one stage before exporting GPX/i,
       );
 
-      // With stages present, failed save blocks render
       rerender(
         <QueryClientProvider client={qc}>
           <ExportPanel
@@ -640,7 +626,6 @@ describe("Component tests: InspectorPanel, StageSidebar, ExportPanel, Statistics
         /Resolve unsaved changes or revision conflict before exporting/i,
       );
 
-      // With successful save, submits render job
       rerender(
         <QueryClientProvider client={qc}>
           <ExportPanel

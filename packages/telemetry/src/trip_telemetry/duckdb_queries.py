@@ -43,7 +43,6 @@ def _prepare_filtered_table(
     trim_start_s: float | None,
     trim_end_s: float | None,
 ) -> None:
-    """Materialize a TEMP TABLE `filtered` from Parquet with active trim filters applied."""
     _validate_trim_args(trim_start_s, trim_end_s)
     rel = con.read_parquet(str(parquet_path))
     cols = set(rel.columns)
@@ -235,7 +234,6 @@ def query_stage_kpis(
 
 
 def _lttb_downsample_indices(xs: list[float], ys: list[float], threshold: int) -> list[int]:
-    """Select representative indices via Largest-Triangle-Three-Buckets (LTTB)."""
     n = len(xs)
     if n <= threshold:
         return list(range(n))
@@ -458,7 +456,6 @@ def _select_manifest_indices_numpy(
     seg_arr: np.ndarray,
     max_points: int,
 ) -> np.ndarray:
-    """Vectorized segment-preserving LTTB + stride index selector."""
     n = len(lat_arr)
     if max_points <= 0 or n == 0:
         return np.empty(0, dtype=np.int64)

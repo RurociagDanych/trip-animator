@@ -33,10 +33,6 @@ from trip_telemetry import (
 )
 from trip_telemetry.tiles import _find_best_windows
 
-# ---------------------------------------------------------------------------
-# Constants & Public Exports
-# ---------------------------------------------------------------------------
-
 
 def test_public_constants() -> None:
     assert DEFAULT_EXPLORER_ZOOM == 14
@@ -44,11 +40,6 @@ def test_public_constants() -> None:
     assert VALID_EXPLORER_ZOOMS == frozenset({14, 17})
     assert math.isclose(MAX_MERCATOR_LAT, 85.05112877980659, rel_tol=0.0, abs_tol=1e-12)
     assert MAX_SEGMENT_INTERPOLATION_M == 5_000.0
-
-
-# ---------------------------------------------------------------------------
-# Google Encoded Polyline Codec
-# ---------------------------------------------------------------------------
 
 
 def test_polyline_google_reference_vector() -> None:
@@ -80,12 +71,12 @@ def test_polyline_empty_and_zero_points() -> None:
 @pytest.mark.parametrize(
     "bad_polyline",
     [
-        "_p~i",  # truncated mid-varint (continuation bit set on final char)
-        "_p~iF",  # truncated mid-pair (missing longitude delta)
-        "invalid space",  # ASCII < 63
-        "abc\x7fdef",  # ASCII > 126
-        "~" * 10 + "?",  # varint shift overflow
-        "é",  # non-ASCII
+        "_p~i",
+        "_p~iF",
+        "invalid space",
+        "abc\x7fdef",
+        "~" * 10 + "?",
+        "é",
     ],
 )
 def test_decode_polyline_rejects_malformed(bad_polyline: str) -> None:
@@ -120,29 +111,21 @@ def test_polyline_roundtrip_property(points: list[tuple[float, float]]) -> None:
         assert abs(lon - dlon) <= 1e-5 + 1e-12
 
 
-# ---------------------------------------------------------------------------
-# Web Mercator Projections & Tile Keys
-# ---------------------------------------------------------------------------
-
-
 def test_web_mercator_origin_clamping_and_wrapping() -> None:
     assert lat_lon_to_tile(0.0, 0.0, 0) == (0, 0)
     assert lat_lon_to_tile(0.0, 0.0, 1) == (1, 1)
     assert lat_lon_to_tile(0.0, 0.0, 14) == (8192, 8192)
     assert lat_lon_to_tile(0.0, 0.0, 17) == (65536, 65536)
 
-    # Latitude clamping beyond +-MAX_MERCATOR_LAT
     assert lat_lon_to_tile(90.0, 0.0, 14) == (8192, 0)
     assert lat_lon_to_tile(-90.0, 0.0, 14) == (8192, 16383)
     assert lat_lon_to_tile(-90.0, 0.0, 20) == (524288, 1048575)
 
-    # Longitude wrapping into [-180, 180)
     assert lat_lon_to_tile(0.0, -180.0, 14) == (0, 8192)
     assert lat_lon_to_tile(0.0, 180.0, 14) == (0, 8192)
     assert lat_lon_to_tile(0.0, 540.0, 14) == (0, 8192)
     assert lat_lon_to_tile(0.0, -540.0, 14) == (0, 8192)
 
-    # Continuous float bounds stay strictly below 2**zoom even at zoom=20
     xf, yf = latlon_to_tile_float(-90.0, 179.999999999, 20)
     assert 0.0 <= xf < float(1 << 20)
     assert 0.0 <= yf < float(1 << 20)
@@ -158,7 +141,6 @@ def test_tile_bounds_and_center_inverse() -> None:
             assert south < clat < north
             assert lat_lon_to_tile(clat, clon, zoom) == (x, y)
 
-    # Adjacent tiles share exact borders
     w1, s1, e1, n1 = tile_bounds_wgs84(8912, 5410, 14)
     w2, s2, e2, n2 = tile_bounds_wgs84(8913, 5410, 14)
     w3, s3, e3, n3 = tile_bounds_wgs84(8912, 5411, 14)
@@ -190,11 +172,6 @@ def test_tile_key_pack_unpack_and_validation() -> None:
         unpack_tile_key((14 << 40) | (16384 << 20))
 
 
-# ---------------------------------------------------------------------------
-# Amanatides-Woo 2D DDA Supercover Rasterizer
-# ---------------------------------------------------------------------------
-
-
 def test_dda_exact_diagonal_corner_traversal() -> None:
     # Center of (8192, 8192) to center of (8193, 8193) crosses the exact corner (8193.0, 8193.0).
     lat0, lon0 = tile_center_wgs84(8192, 8192, 14)
@@ -203,7 +180,6 @@ def test_dda_exact_diagonal_corner_traversal() -> None:
     rasterize_segment_dda(lat0, lon0, lat1, lon1, 14, out)
     assert out == {(8192, 8192), (8193, 8193)}
 
-    # Anti-diagonal: center of (8192, 8193) to center of (8193, 8192) crosses exact corner.
     lat2, lon2 = tile_center_wgs84(8192, 8193, 14)
     lat3, lon3 = tile_center_wgs84(8193, 8192, 14)
     out_anti: set[tuple[int, int]] = set()
@@ -212,7 +188,6 @@ def test_dda_exact_diagonal_corner_traversal() -> None:
 
 
 def test_dda_5km_gps_jump_guard() -> None:
-    # ~4.45 km segment at mid-latitude (~1.5 km Z14 tiles) -> interpolates >= 3 tiles.
     lat0, lon0 = 52.0, 21.0
     lat1, lon1 = 52.0, 21.065
     assert haversine_distance_m(lat0, lon0, lat1, lon1) < MAX_SEGMENT_INTERPOLATION_M
@@ -229,7 +204,6 @@ def test_dda_5km_gps_jump_guard() -> None:
 
 
 def test_dda_antimeridian_split_and_symmetry() -> None:
-    # Crosses +-180 deg in Fiji (~2.2 km apart)
     lat0, lon0 = -16.8, 179.99
     lat1, lon1 = -16.802, -179.99
     assert haversine_distance_m(lat0, lon0, lat1, lon1) < MAX_SEGMENT_INTERPOLATION_M
@@ -268,11 +242,6 @@ def test_rasterize_polyline_and_track_segments() -> None:
     assert seg_tiles == {(8912, 5410), (8914, 5410)}
 
 
-# ---------------------------------------------------------------------------
-# Max Square, Max Cluster, Expansion Advisor & Chronological New Tiles
-# ---------------------------------------------------------------------------
-
-
 def test_max_square_empty_single_and_ties() -> None:
     empty = compute_max_square([])
     assert empty.size == 0
@@ -284,14 +253,12 @@ def test_max_square_empty_single_and_ties() -> None:
     assert single.anchors == ((10, 20),)
     assert single.tiles == frozenset({(10, 20)})
 
-    # 3x4 rectangle produces two overlapping 3x3 max squares anchored at (5, 5) and (6, 5)
     rect = {(x, y) for x in range(5, 9) for y in range(5, 8)}
     res = compute_max_square(rect)
     assert res.size == 3
     assert res.anchors == ((5, 5), (6, 5))
     assert res.tiles == frozenset(rect)
 
-    # Two disjoint tied 2x2 squares plus an isolated tile
     disjoint = {
         (0, 0),
         (1, 0),
@@ -313,7 +280,6 @@ def test_max_square_empty_single_and_ties() -> None:
 def test_max_cluster_basic_and_deep_chain_no_recursion_error() -> None:
     assert compute_max_cluster([]).size == 0
 
-    # Cross of 5 tiles -> single cluster tile at center
     cross = {(5, 5), (4, 5), (6, 5), (5, 4), (5, 6)}
     res = compute_max_cluster(cross)
     assert res.cluster_tiles == frozenset({(5, 5)})
@@ -331,23 +297,19 @@ def test_max_cluster_basic_and_deep_chain_no_recursion_error() -> None:
 
 
 def test_expansion_advisor_cardinal_shifts_and_global_obstacle_escape() -> None:
-    # Empty set
     empty = compute_max_square_expansion_advisor([], zoom=14)
     assert empty.target_size == 1
     assert empty.candidates == ()
     assert empty.next_tier_target_size == 2
     assert empty.next_tier_best_missing_count == 4
 
-    # Full zoom=0 grid cannot expand past 1x1
     full_z0 = compute_max_square_expansion_advisor([(0, 0)], zoom=0)
     assert full_z0.target_size == 2
     assert full_z0.candidates == ()
     assert full_z0.next_tier_target_size == 3
     assert full_z0.next_tier_best_missing_count == 0
 
-    # Cardinal shift test: unique 3x3 at (100, 100) with 5 of 7 NE border tiles visited -> 2 gaps
     visited = {(x, y) for x in range(100, 103) for y in range(100, 103)}
-    # NE border for anchor (100, 99), size 4: top row y=99 (x=100..103) + right col x=103
     ne_border = {(x, 99) for x in range(100, 104)} | {(103, y) for y in range(100, 103)}
     gap_tiles = {(101, 99), (103, 101)}
     visited |= ne_border - gap_tiles
@@ -389,7 +351,6 @@ def test_expansion_advisor_cardinal_shifts_and_global_obstacle_escape() -> None:
 
 
 def test_expansion_advisor_clamps_to_world_bounds_and_sparse_fallback() -> None:
-    # Corner tile at (0, 0) at zoom=2 (4x4 world)
     res = compute_max_square_expansion_advisor([(0, 0)], zoom=2, max_candidates=5)
     assert res.target_size == 2
     for cand in res.candidates:
@@ -432,15 +393,14 @@ def test_chronological_new_tile_counts() -> None:
     k2 = tile_key(14, 101, 200)
     k3 = tile_key(14, 102, 200)
     ordered = [
-        ("act-c", [k1, k2, k1]),  # duplicate k1 inside same activity counted once
-        ("act-a", [k2, k3]),  # k3 is new
-        ("act-b", [k1, k3]),  # zero new tiles
+        ("act-c", [k1, k2, k1]),
+        ("act-a", [k2, k3]),
+        ("act-b", [k1, k3]),
     ]
     counts = compute_chronological_new_tile_counts(ordered)
     assert list(counts.keys()) == ["act-c", "act-a", "act-b"]
     assert counts == {"act-c": 2, "act-a": 1, "act-b": 0}
 
-    # Tuple coordinates also supported
     tuple_counts = compute_chronological_new_tile_counts(
         [
             (1, [(10, 10), (10, 11)]),
@@ -448,11 +408,6 @@ def test_chronological_new_tile_counts() -> None:
         ]
     )
     assert tuple_counts == {1: 2, 2: 1}
-
-
-# ---------------------------------------------------------------------------
-# Brute-Force Oracles & Hypothesis Property-Based Tests
-# ---------------------------------------------------------------------------
 
 
 def _brute_force_max_square(
@@ -584,7 +539,6 @@ def test_expansion_advisor_matches_brute_force_oracle(visited: set[tuple[int, in
     assert len(advisor.candidates) >= 1
     assert advisor.candidates[0].missing_count == oracle_best
 
-    # Verify every returned candidate's missing_tiles matches its window exactly
     for cand in advisor.candidates:
         assert 0 <= cand.anchor_x <= grid_size - cand.size
         assert 0 <= cand.anchor_y <= grid_size - cand.size
@@ -626,10 +580,8 @@ def test_dda_continuity_symmetry_and_supercover_property(
     rasterize_segment_dda(lat0, lon0, lat1, lon1, zoom, fwd)
     rasterize_segment_dda(lat1, lon1, lat0, lon0, zoom, rev)
 
-    # 1. Exact symmetry
     assert fwd == rev
 
-    # 2. Both endpoints emitted and no overshoot outside endpoint tile bounding box
     t0 = lat_lon_to_tile(lat0, lon0, zoom)
     t1 = lat_lon_to_tile(lat1, lon1, zoom)
     assert t0 in fwd
@@ -641,7 +593,6 @@ def test_dda_continuity_symmetry_and_supercover_property(
         assert min_x <= tx <= max_x
         assert min_y <= ty <= max_y
 
-    # 3. 8-connected continuity (adjacent steps differ by <= 1 in x and y)
     visited_bfs: set[tuple[int, int]] = {t0}
     queue: deque[tuple[int, int]] = deque((t0,))
     while queue:
@@ -656,7 +607,6 @@ def test_dda_continuity_symmetry_and_supercover_property(
                     queue.append(nb)
     assert visited_bfs == fwd
 
-    # 4. Supercover check against dense midpoint sampling in Web Mercator tile space
     x0, y0 = latlon_to_tile_float(lat0, lon0, zoom)
     x1, y1 = latlon_to_tile_float(lat1, lon1, zoom)
     samples = 64

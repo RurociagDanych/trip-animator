@@ -116,7 +116,6 @@ def test_settings_validators_and_security_edge_cases(monkeypatch: pytest.MonkeyP
     valid_key = base64.urlsafe_b64encode(b"k" * 32).decode("ascii")
     prod_db_url = "postgresql+psycopg://trip_app:strong-prod-secret@db:5432/trip_animator"
 
-    # Settings property & validator edge cases
     cfg = Settings(
         app_env="test",
         strava_webhook_subscription_id="",
@@ -147,7 +146,6 @@ def test_settings_validators_and_security_edge_cases(monkeypatch: pytest.MonkeyP
             token_encryption_key=valid_key,
         )
 
-    # security.py edge cases
     with pytest.raises(ValueError, match="at least 12"):
         hash_password("too-short")
     with pytest.raises(ValueError, match="Unsupported encrypted secret version"):
@@ -237,7 +235,6 @@ def test_local_object_store_blocks_path_traversal(tmp_path: Path) -> None:
     assert store.get_bytes("bronze/test.gpx") == b"<gpx/>"
     with pytest.raises(ValueError):
         store.put_bytes("../escape.txt", b"bad")
-    # Deleting non-existent key is a safe no-op
     store.delete("bronze/never-existed.gpx")
 
 
@@ -286,7 +283,6 @@ def test_parse_byte_range_and_local_store_streaming_edges(
     assert open_end_stream.end == 15
     assert b"".join(open_end_stream.chunks) == b"ABCDEF"
 
-    # File handle is closed if seek fails mid-open_stream
     orig_open = Path.open
 
     class _ExplodingHandle:
@@ -389,7 +385,6 @@ def test_metrics_prometheus_exposition_gating_and_zero_pii(tmp_path: Path) -> No
             )
             db.commit()
 
-        # Token-gated metrics in test/prod
         gated_app = create_app(
             Settings(
                 app_env="production",
@@ -424,7 +419,6 @@ def test_metrics_prometheus_exposition_gating_and_zero_pii(tmp_path: Path) -> No
         assert "secret-pii@example.com" not in body
         assert "Confidential Tour Title" not in body
 
-        # Fail closed in production when METRICS_TOKEN is unset
         prod_no_token = create_app(
             Settings(
                 app_env="production",
@@ -440,7 +434,6 @@ def test_metrics_prometheus_exposition_gating_and_zero_pii(tmp_path: Path) -> No
         )
         assert TestClient(prod_no_token).get("/metrics").status_code == 403
 
-        # DB failure during /metrics sets trip_db_up 0 gracefully
         def _broken_sf() -> Any:
             class _BrokenCtx:
                 def __enter__(self) -> Any:
@@ -488,10 +481,8 @@ def test_unhandled_exception_handler_and_rate_limiter_branches(
         with pytest.raises(ValueError, match="cost must be >= 1"):
             check_rate_limit(db, bucket_key="k", limit=5, window_seconds=60, cost=0)
 
-        # Non-positive limit or window disables enforcement cleanly
         check_rate_limit(db, bucket_key="disabled", limit=0, window_seconds=60, cost=1)
 
-        # Expired window resets count, and cost > limit on reset returns 429
         past = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=120)
         db.add(
             RateLimitRecord(
@@ -512,7 +503,6 @@ def test_unhandled_exception_handler_and_rate_limiter_branches(
             check_rate_limit(db, bucket_key="reset-bucket", limit=5, window_seconds=60, cost=6)
         assert exc_info.value.status_code == 429
 
-        # IntegrityError insert race recovery
         orig_commit = db.commit
         race_state = {"triggered": False}
 
@@ -544,7 +534,6 @@ def test_production_s3_allows_iam_role_and_rejects_partial_keys() -> None:
     valid_key = base64.urlsafe_b64encode(b"k" * 32).decode("ascii")
     prod_db_url = "postgresql+psycopg://trip_app:strong-prod-secret@db:5432/trip_animator"
 
-    # Both static S3 keys omitted -> valid IAM role credentials configuration
     cfg = Settings(
         app_env="production",
         dev_auth_enabled=False,
@@ -700,7 +689,6 @@ def test_s3_object_store_normalizes_empty_creds_and_maps_not_found(
     with pytest.raises(InvalidRangeError):
         store.open_stream("invalid-range.mp4", range_header="bytes=0-3")
 
-    # Full stream iterates chunks without buffering via .read()
     full_stream = store.open_stream("video.mp4", chunk_size=5)
     assert full_stream.total_size == 16
     assert full_stream.content_length == 16
@@ -711,7 +699,6 @@ def test_s3_object_store_normalizes_empty_creds_and_maps_not_found(
     assert fake_client.last_body.read_called is False
     assert fake_client.last_body.closed is True
 
-    # Byte range stream
     part_stream = store.open_stream("video.mp4", range_header="bytes=2-7", chunk_size=4)
     assert part_stream.is_partial is True
     assert part_stream.start == 2
@@ -723,7 +710,6 @@ def test_s3_object_store_normalizes_empty_creds_and_maps_not_found(
     with pytest.raises(InvalidRangeError):
         store.open_stream("video.mp4", range_header="bytes=100-200")
 
-    # delete handles 404/NoSuchKey gracefully and re-raises non-404 errors
     store.delete("missing-nokey.mp4")
     with pytest.raises(ClientError):
         store.delete("boom-delete.mp4")

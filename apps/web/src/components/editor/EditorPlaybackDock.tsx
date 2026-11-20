@@ -71,7 +71,6 @@ export const EditorPlaybackDock = memo(function EditorPlaybackDock({
   const setPlaybackSpeed = useEditorStore((s) => s.setPlaybackSpeed);
   const resetPlayback = useEditorStore((s) => s.resetPlayback);
 
-  // Playback animation loop
   useEffect(() => {
     if (!isPlaying) {
       return;

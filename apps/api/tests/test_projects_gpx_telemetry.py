@@ -23,7 +23,6 @@ def test_project_crud_optimistic_locking_and_bola(harness: AppHarness) -> None:
     alice, alice_csrf = harness.login_client("alice@example.com")
     bob, bob_csrf = harness.login_client("bob@example.com")
 
-    # Missing CSRF blocked
     assert alice.post("/api/v1/projects", json={"title": "Fictional"}).status_code == 403
 
     create_resp = alice.post(
@@ -36,7 +35,6 @@ def test_project_crud_optimistic_locking_and_bola(harness: AppHarness) -> None:
     project_id = proj["id"]
     assert proj["revision"] == 1
 
-    # Bob cannot access or mutate Alice's project
     assert bob.get(f"/api/v1/projects/{project_id}").status_code == 404
     assert (
         bob.patch(
@@ -54,7 +52,6 @@ def test_project_crud_optimistic_locking_and_bola(harness: AppHarness) -> None:
         == 404
     )
 
-    # Valid update increments revision
     upd1 = alice.patch(
         f"/api/v1/projects/{project_id}",
         json={"revision": 1, "title": "Fictional Tour"},
@@ -64,7 +61,6 @@ def test_project_crud_optimistic_locking_and_bola(harness: AppHarness) -> None:
     assert upd1.json()["revision"] == 2
     assert upd1.json()["title"] == "Fictional Tour"
 
-    # Stale revision triggers 409 Conflict
     conflict = alice.patch(
         f"/api/v1/projects/{project_id}",
         json={"revision": 1, "title": "Stale Write"},
@@ -72,7 +68,6 @@ def test_project_crud_optimistic_locking_and_bola(harness: AppHarness) -> None:
     )
     assert conflict.status_code == 409
 
-    # Foreign stage ID in stage_colors / stage_transitions rejected with 422
     foreign_stage_id = str(uuid.uuid4())
     bad_settings = alice.patch(
         f"/api/v1/projects/{project_id}",
@@ -101,7 +96,6 @@ def test_gpx_upload_stages_reorder_trim_and_duckdb_telemetry(
     )
     project_id = proj_resp.json()["id"]
 
-    # Upload Stage 1
     up1 = client.post(
         f"/api/v1/projects/{project_id}/gpx",
         files={"file": ("day1.gpx", sample_gpx, "application/gpx+xml")},
@@ -116,7 +110,6 @@ def test_gpx_upload_stages_reorder_trim_and_duckdb_telemetry(
     assert stage1["distance_m"] > 300.0
     assert stage1["elevation_gain_m"] == 85.0
 
-    # Upload Stage 2
     up2 = client.post(
         f"/api/v1/projects/{project_id}/gpx",
         files={"file": ("day2.gpx", sample_gpx, "application/gpx+xml")},
@@ -126,7 +119,6 @@ def test_gpx_upload_stages_reorder_trim_and_duckdb_telemetry(
     assert up2.status_code == 201
     stage2 = up2.json()
 
-    # Validate stage_colors & stage_transitions with real stage IDs
     patch_ok = client.patch(
         f"/api/v1/projects/{project_id}",
         json={
@@ -140,7 +132,6 @@ def test_gpx_upload_stages_reorder_trim_and_duckdb_telemetry(
     )
     assert patch_ok.status_code == 200
 
-    # Reorder stages (reverse order) + reject invalid permutation
     bad_reorder = client.post(
         f"/api/v1/projects/{project_id}/stages/reorder",
         json={"stage_ids": [stage1["id"]]},
@@ -162,7 +153,6 @@ def test_gpx_upload_stages_reorder_trim_and_duckdb_telemetry(
     assert reordered[0]["day_index"] == 1
     assert reordered[1]["day_index"] == 2
 
-    # Non-destructive trim validation
     bad_trim = client.patch(
         f"/api/v1/projects/{project_id}/stages/{stage1['id']}",
         json={"trim_start_s": 120.0, "trim_end_s": 60.0},
@@ -178,7 +168,6 @@ def test_gpx_upload_stages_reorder_trim_and_duckdb_telemetry(
     assert good_trim.status_code == 200
     assert good_trim.json()["trim_start_s"] == 30.0
 
-    # DuckDB telemetry chart, geometry & KPIs
     chart_resp = client.get(f"/api/v1/projects/{project_id}/telemetry/chart?max_points=20")
     assert chart_resp.status_code == 200
     chart = chart_resp.json()
@@ -202,7 +191,6 @@ def test_gpx_upload_stages_reorder_trim_and_duckdb_telemetry(
     assert kpis_body["stage_count"] == 2
     assert kpis_body["total_distance_m"] < (stage1["distance_m"] + stage2["distance_m"])
 
-    # Deleting stage cleans up settings references and compacts order
     del_resp = client.delete(
         f"/api/v1/projects/{project_id}/stages/{stage1['id']}",
         headers={"X-CSRF-Token": csrf},
@@ -225,7 +213,6 @@ def test_gpx_security_xxe_size_cap_magic_bytes_and_malformed_multipart(
         headers={"X-CSRF-Token": csrf},
     ).json()["id"]
 
-    # 1. XXE DTD payload rejected
     xxe_payload = b"""<?xml version="1.0"?>
 <!DOCTYPE gpx [ <!ENTITY xxe SYSTEM "file:///etc/passwd"> ]>
 <gpx><trk><trkseg><trkpt lat="0.1" lon="0.2"><name>&xxe;</name></trkpt></trkseg></trk></gpx>"""
@@ -238,7 +225,6 @@ def test_gpx_security_xxe_size_cap_magic_bytes_and_malformed_multipart(
     assert "traceback" not in r_xxe.text.lower()
     assert "/etc/passwd" not in r_xxe.text
 
-    # 2. Billion-laughs entity expansion rejected
     billion_laughs = b"""<?xml version="1.0"?>
 <!DOCTYPE lolz [
  <!ENTITY lol "lol">
@@ -252,7 +238,6 @@ def test_gpx_security_xxe_size_cap_magic_bytes_and_malformed_multipart(
     )
     assert r_lol.status_code == 422
 
-    # 3. Non-XML magic bytes rejected
     r_bin = client.post(
         f"/api/v1/projects/{project_id}/gpx",
         files={"file": ("fake.gpx", b"\x89PNG\r\n\x1a\nnot-xml", "application/gpx+xml")},
@@ -260,7 +245,6 @@ def test_gpx_security_xxe_size_cap_magic_bytes_and_malformed_multipart(
     )
     assert r_bin.status_code == 422
 
-    # 4. Oversized upload > 25 MiB rejected with 413
     oversized = b"<gpx>" + (b" " * (25 * 1024 * 1024 + 100)) + b"</gpx>"
     r_big = client.post(
         f"/api/v1/projects/{project_id}/gpx",
@@ -269,7 +253,6 @@ def test_gpx_security_xxe_size_cap_magic_bytes_and_malformed_multipart(
     )
     assert r_big.status_code == 413
 
-    # 5. Malformed multipart boundary returns sanitized RFC 7807 JSON without stack traces
     r_malformed = client.post(
         f"/api/v1/projects/{project_id}/gpx",
         content=b"--broken-boundary\r\nnot valid multipart",
@@ -299,7 +282,6 @@ def test_gpx_upload_edge_cases_empty_binary_1point_bom_and_size_bounds(
         headers={"X-CSRF-Token": csrf},
     ).json()["id"]
 
-    # 1. Empty upload -> 422
     r_empty = client.post(
         f"/api/v1/projects/{proj_id}/gpx",
         files={"file": ("empty.gpx", b"", "application/gpx+xml")},
@@ -307,7 +289,6 @@ def test_gpx_upload_edge_cases_empty_binary_1point_bom_and_size_bounds(
     )
     assert r_empty.status_code == 422
 
-    # 2. Binary garbage -> 422
     r_garbage = client.post(
         f"/api/v1/projects/{proj_id}/gpx",
         files={"file": ("garbage.gpx", b"\x00\xff\xfe\xfd\x7fELF", "application/octet-stream")},
@@ -315,7 +296,6 @@ def test_gpx_upload_edge_cases_empty_binary_1point_bom_and_size_bounds(
     )
     assert r_garbage.status_code == 422
 
-    # 3. Valid XML prefix but broken XML / 0 trackpoints -> 422
     r_truncated = client.post(
         f"/api/v1/projects/{proj_id}/gpx",
         files={"file": ("broken.gpx", b'<?xml version="1.0"?><gpx><trk>', "application/gpx+xml")},
@@ -336,7 +316,6 @@ def test_gpx_upload_edge_cases_empty_binary_1point_bom_and_size_bounds(
     )
     assert r_no_pts.status_code == 422
 
-    # 4. Oversized upload > MAX_GPX_BYTES via streaming reader -> 413 (patched tight cap)
     one_pt_gpx = (
         b'\xef\xbb\xbf  \n<gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1">'
         b"<trk><name>Solo Point</name><trkseg>"
@@ -351,7 +330,6 @@ def test_gpx_upload_edge_cases_empty_binary_1point_bom_and_size_bounds(
     )
     assert r_over_stream.status_code == 413
 
-    # Exact MAX_GPX_BYTES boundary + UTF-8 BOM + 1-point GPX succeeds -> 201
     monkeypatch.setattr(stages_router, "MAX_GPX_BYTES", len(one_pt_gpx))
     r_1pt = client.post(
         f"/api/v1/projects/{proj_id}/gpx",
@@ -364,7 +342,6 @@ def test_gpx_upload_edge_cases_empty_binary_1point_bom_and_size_bounds(
     assert stage_1pt["distance_m"] == 0.0
     assert stage_1pt["has_timestamps"] is False
 
-    # Downstream KPIs, chart, geometry, and exports handle 1-point stage cleanly
     assert client.get(f"/api/v1/projects/{proj_id}/kpis").status_code == 200
     assert client.get(f"/api/v1/projects/{proj_id}/telemetry/chart").status_code == 200
     geom_1pt = client.get(f"/api/v1/projects/{proj_id}/stages/{stage_1pt['id']}/geometry?lod=full")
@@ -374,7 +351,6 @@ def test_gpx_upload_edge_cases_empty_binary_1point_bom_and_size_bounds(
     assert gpx_1pt.status_code == 200
     assert parse_gpx_bytes(gpx_1pt.content).point_count == 1
 
-    # 5. Content-Length guard unit check (bad header -> 400; > MAX + overhead -> 413)
     import asyncio
     import io
 
@@ -510,7 +486,6 @@ def test_stage_trim_validation_and_geojson_export_accuracy(
         headers={"X-CSRF-Token": csrf},
     ).json()["id"]
 
-    # 1. GPX track without <time> tags cannot be trimmed
     no_time_gpx = b"""<?xml version="1.0" encoding="UTF-8"?>
 <gpx version="1.1" creator="pytest" xmlns="http://www.topografix.com/GPX/1/1">
   <trk><name>Untimed</name><trkseg>
@@ -540,7 +515,6 @@ def test_stage_trim_validation_and_geojson_export_accuracy(
         == 422
     )
 
-    # 2. Timestamped GPX stage (0s, 60s, 120s, 180s -> elapsed_seconds=180.0)
     timed_stage = client.post(
         f"/api/v1/projects/{proj_id}/gpx",
         files={"file": ("timed.gpx", sample_gpx, "application/gpx+xml")},
@@ -550,7 +524,6 @@ def test_stage_trim_validation_and_geojson_export_accuracy(
     lod_key = stage_lod_cache_key(uuid.UUID(proj_id), uuid.UUID(sid))
     assert harness.store.resolve_existing_path(lod_key).is_file()
 
-    # Exceeds bounds completely
     assert (
         client.patch(
             f"/api/v1/projects/{proj_id}/stages/{sid}",
@@ -559,7 +532,6 @@ def test_stage_trim_validation_and_geojson_export_accuracy(
         ).status_code
         == 422
     )
-    # trim_end_s exceeds stage.elapsed_seconds
     assert (
         client.patch(
             f"/api/v1/projects/{proj_id}/stages/{sid}",
@@ -568,7 +540,6 @@ def test_stage_trim_validation_and_geojson_export_accuracy(
         ).status_code
         == 422
     )
-    # Within [0, 180] but leaves 0 points (between 60s and 120s)
     assert (
         client.patch(
             f"/api/v1/projects/{proj_id}/stages/{sid}",
@@ -578,7 +549,6 @@ def test_stage_trim_validation_and_geojson_export_accuracy(
         == 422
     )
 
-    # Failed trims did NOT persist or destroy LOD cache or break downstream endpoints
     assert harness.store.resolve_existing_path(lod_key).is_file()
     detail = client.get(f"/api/v1/projects/{proj_id}").json()
     timed_after_bad = next(s for s in detail["stages"] if s["id"] == sid)
@@ -587,7 +557,6 @@ def test_stage_trim_validation_and_geojson_export_accuracy(
     assert client.get(f"/api/v1/projects/{proj_id}/telemetry/geometry").status_code == 200
     assert client.get(f"/api/v1/projects/{proj_id}/kpis").status_code == 200
 
-    # Delete untimed stage so we test clean GeoJSON export on trimmed stage
     assert (
         client.delete(
             f"/api/v1/projects/{proj_id}/stages/{untimed_stage['id']}",
@@ -596,7 +565,6 @@ def test_stage_trim_validation_and_geojson_export_accuracy(
         == 204
     )
 
-    # Valid trim [60.0, 120.0] leaves 2 points
     trimmed = client.patch(
         f"/api/v1/projects/{proj_id}/stages/{sid}",
         json={"trim_start_s": 60.0, "trim_end_s": 120.0},
@@ -612,7 +580,6 @@ def test_stage_trim_validation_and_geojson_export_accuracy(
     assert feat["properties"]["distance_m"] < timed_stage["distance_m"]
     assert feat["properties"]["elevation_gain_m"] == pytest.approx(kpis["elevation_gain_m"])
 
-    # Trim down to a single point [60.0, 61.0] -> GeoJSON duplicates point per RFC 7946 §3.1.4
     one_pt_trim = client.patch(
         f"/api/v1/projects/{proj_id}/stages/{sid}",
         json={"trim_start_s": 60.0, "trim_end_s": 61.0},
@@ -625,7 +592,6 @@ def test_stage_trim_validation_and_geojson_export_accuracy(
     assert coords_1pt[0] == coords_1pt[1]
     assert geojson_1pt["features"][0]["properties"]["distance_m"] == 0.0
 
-    # Clearing trim restores full untrimmed GeoJSON export
     cleared = client.patch(
         f"/api/v1/projects/{proj_id}/stages/{sid}",
         json={"trim_start_s": None, "trim_end_s": None},
@@ -694,7 +660,6 @@ def test_trim_export_reimport_roundtrip_and_multisegment_gpx(
     assert st["point_count"] == 5
     assert st["activity_type"] == "hiking"
 
-    # Trim middle window [60.0, 180.0] -> keeps 3 points (elev 1020, 1055, 1080; gain = 60.0)
     trimmed = user_client.patch(
         f"/api/v1/projects/{p1}/stages/{sid}",
         json={"trim_start_s": 60.0, "trim_end_s": 180.0},
@@ -740,7 +705,6 @@ def test_trim_export_reimport_roundtrip_and_multisegment_gpx(
     assert b"2000-01-02T08:01:00Z" in gpx_bytes
     assert b"2000-01-02T08:03:00Z" in gpx_bytes
 
-    # Re-import exported GPX into a fresh project and verify telemetry parity
     p2 = user_client.post(
         "/api/v1/projects",
         json={"title": "Reimported Roundtrip"},
@@ -759,7 +723,6 @@ def test_trim_export_reimport_roundtrip_and_multisegment_gpx(
     assert re_stage["distance_m"] == pytest.approx(trimmed_dist, rel=1e-4)
     assert re_stage["elapsed_seconds"] == pytest.approx(120.0)
 
-    # Multi-segment GPX export preserves separate <trkseg> blocks and MultiLineString lines
     multi_seg_gpx = b"""<?xml version="1.0" encoding="UTF-8"?>
 <gpx version="1.1" creator="pytest" xmlns="http://www.topografix.com/GPX/1/1">
   <trk><name>Two Segments</name>
@@ -800,7 +763,6 @@ def test_stage_reorder_delete_project_list_and_cascade_cleanup(
     client, csrf = harness.login_client("cascade@example.com")
     me_id = uuid.UUID(client.get("/api/v1/auth/me").json()["user"]["id"])
 
-    # Export on 0-stage project fails with 422
     empty_proj = client.post(
         "/api/v1/projects",
         json={"title": "Empty Export"},
@@ -814,7 +776,6 @@ def test_stage_reorder_delete_project_list_and_cascade_cleanup(
         headers={"X-CSRF-Token": csrf},
     ).json()["id"]
 
-    # List projects returns both in updated_at desc order
     listed = client.get("/api/v1/projects").json()
     assert len(listed) == 2
     assert listed[0]["id"] == proj_id
@@ -842,7 +803,6 @@ def test_stage_reorder_delete_project_list_and_cascade_cleanup(
         headers={"X-CSRF-Token": csrf},
     )
 
-    # Reorder edge cases: duplicate IDs, invalid day_index, foreign stage ID -> 422
     assert (
         client.post(
             f"/api/v1/projects/{proj_id}/stages/reorder",
@@ -871,7 +831,6 @@ def test_stage_reorder_delete_project_list_and_cascade_cleanup(
         == 422
     )
 
-    # Patch day_index and missing stage -> 404
     assert (
         client.patch(
             f"/api/v1/projects/{proj_id}/stages/{s1['id']}",
@@ -897,7 +856,6 @@ def test_stage_reorder_delete_project_list_and_cascade_cleanup(
         == 404
     )
 
-    # Delete middle stage s1: removes its blobs, cleans settings, compacts order [0, 1]
     from trip_api.db import Stage as StageModel
 
     with harness.session_factory() as db:
@@ -932,7 +890,6 @@ def test_stage_reorder_delete_project_list_and_cascade_cleanup(
     assert s1["id"] not in detail["settings"]["stage_colors"]
     assert s1["id"] not in detail["settings"]["stage_transitions"]
 
-    # Seed a render job on the project and delete the entire project
     job_id = uuid.uuid4()
     mp4_key = f"outputs/{job_id}.mp4"
     thumb_key = f"outputs/{job_id}.webp"
@@ -1000,7 +957,6 @@ def test_telemetry_missing_stage_and_corrupt_parquet_errors(
         == 404
     )
 
-    # Corrupt Silver Parquet + delete LOD cache -> sanitized 500 without stack trace
     from fastapi.testclient import TestClient
     from trip_api.db import Stage as StageModel
 
@@ -1052,7 +1008,6 @@ def test_stage_camera_overrides_and_climb_callout_duration_api_lifecycle(
     s2_id = stage2["id"]
     foreign_stage_id = str(uuid.uuid4())
 
-    # PATCH rejects foreign stage UUID in stage_camera_overrides with HTTP 422
     bad_patch = client.patch(
         f"/api/v1/projects/{proj_id}",
         json={
@@ -1068,7 +1023,6 @@ def test_stage_camera_overrides_and_climb_callout_duration_api_lifecycle(
     assert bad_patch.status_code == 422
     assert "stage_camera_overrides" in bad_patch.text
 
-    # POST /renders rejects foreign stage UUID in stage_camera_overrides with HTTP 422
     bad_render = client.post(
         f"/api/v1/projects/{proj_id}/renders",
         json={
@@ -1084,7 +1038,6 @@ def test_stage_camera_overrides_and_climb_callout_duration_api_lifecycle(
     assert bad_render.status_code == 422
     assert "stage_camera_overrides" in bad_render.text
 
-    # PATCH accepts valid project stage IDs and applies preset defaults + climb_callout_duration_s
     good_patch = client.patch(
         f"/api/v1/projects/{proj_id}",
         json={
@@ -1120,7 +1073,6 @@ def test_stage_camera_overrides_and_climb_callout_duration_api_lifecycle(
         "transition_margin": 0.04,
     }
 
-    # Lowered speed_multiplier bounds: 0.05 and 3.0 accepted; 0.04 and 3.01 rejected
     for bad_speed in (0.04, 3.01):
         bad_speed_resp = client.patch(
             f"/api/v1/projects/{proj_id}",
@@ -1157,7 +1109,6 @@ def test_stage_camera_overrides_and_climb_callout_duration_api_lifecycle(
         "speed_multiplier"
     ] == pytest.approx(3.0)
 
-    # POST /renders accepts valid project stage IDs in stage_camera_overrides
     good_render = client.post(
         f"/api/v1/projects/{proj_id}/renders",
         json={
@@ -1177,7 +1128,6 @@ def test_stage_camera_overrides_and_climb_callout_duration_api_lifecycle(
     assert render_spec["stage_camera_overrides"][s1_id]["target_zoom"] == pytest.approx(13.8)
     assert render_spec["stage_camera_overrides"][s1_id]["speed_multiplier"] == pytest.approx(0.7)
 
-    # DELETE stage prunes its stage_camera_overrides entry while keeping other stages intact
     del_resp = client.delete(
         f"/api/v1/projects/{proj_id}/stages/{s1_id}",
         headers={"X-CSRF-Token": csrf},
@@ -1253,7 +1203,6 @@ def test_stage_split_api_lifecycle_and_shared_bronze_deletion(
         headers={"X-CSRF-Token": csrf},
     ).json()
 
-    # Attach settings and strava/external metadata to s1 to verify preservation vs Part 2 clearing
     patch_resp = client.patch(
         f"/api/v1/projects/{proj_id}",
         json={
@@ -1277,7 +1226,6 @@ def test_stage_split_api_lifecycle_and_shared_bronze_deletion(
         bronze_path = s1_db.bronze_object_key
         orig_s1_silver_key = s1_db.silver_object_key
 
-    # Security / error checks: missing CSRF -> 403, BOLA -> 404, unknown stage -> 404
     assert (
         client.post(
             f"/api/v1/projects/{proj_id}/stages/{s1['id']}/split",
@@ -1302,7 +1250,6 @@ def test_stage_split_api_lifecycle_and_shared_bronze_deletion(
         == 404
     )
 
-    # Validation 422s: neither axis, both axes, non-positive, leaving <2 pts, untimed elapsed
     for bad_payload in (
         {},
         {"split_distance_m": 200.0, "split_elapsed_s": 120.0},
@@ -1328,7 +1275,6 @@ def test_stage_split_api_lifecycle_and_shared_bronze_deletion(
         == 422
     )
 
-    # Split middle stage s1 by distance with default names
     split1 = client.post(
         f"/api/v1/projects/{proj_id}/stages/{s1['id']}/split",
         json={"split_distance_m": s1["distance_m"] / 2.0},
@@ -1360,7 +1306,6 @@ def test_stage_split_api_lifecycle_and_shared_bronze_deletion(
     assert [st["id"] for st in ordered1] == [s0["id"], p1["id"], p2["id"], s2["id"]]
     assert [st["stage_order"] for st in ordered1] == [0, 1, 2, 3]
 
-    # Verify settings preserved for Part 1, ObjectStore keys updated, and old Silver key deleted
     detail1 = client.get(f"/api/v1/projects/{proj_id}").json()
     assert detail1["settings"]["stage_colors"][p1["id"]] == "#FF5500"
     assert detail1["settings"]["stage_camera_overrides"][p1["id"]]["focus_mode"] == "street"
@@ -1391,7 +1336,6 @@ def test_stage_split_api_lifecycle_and_shared_bronze_deletion(
     ):
         assert harness.store.resolve_existing_path(expected_key).is_file()
 
-    # Downstream telemetry endpoints reflect all 4 stages cleanly
     assert client.get(f"/api/v1/projects/{proj_id}/kpis").json()["stage_count"] == 4
     geom = client.get(f"/api/v1/projects/{proj_id}/telemetry/geometry?lod=full").json()
     assert len(geom["features"]) == 4
@@ -1399,13 +1343,11 @@ def test_stage_split_api_lifecycle_and_shared_bronze_deletion(
     assert client.get(f"/api/v1/projects/{proj_id}/export?format=gpx").status_code == 200
     assert client.get(f"/api/v1/projects/{proj_id}/export?format=geojson").status_code == 200
 
-    # Audit event recorded
     audit_events = client.get(f"/api/v1/projects/{proj_id}/audit").json()
     split_events = [e for e in audit_events if e["event_type"] == "stage.split"]
     assert len(split_events) == 1
     assert split_events[0]["metadata"]["part2_id"] == p2["id"]
 
-    # Split Part 2 by elapsed_s with custom names
     split2 = client.post(
         f"/api/v1/projects/{proj_id}/stages/{p2['id']}/split",
         json={
@@ -1424,8 +1366,6 @@ def test_stage_split_api_lifecycle_and_shared_bronze_deletion(
     assert body2["part2"]["point_count"] == 2
     p2b = body2["part2"]
 
-    # Shared bronze_object_key deletion safety:
-    # Deleting Part 1 keeps shared bronze blob while Part 2 and Part 2b still reference it
     assert (
         client.delete(
             f"/api/v1/projects/{proj_id}/stages/{p1['id']}",
@@ -1447,7 +1387,6 @@ def test_stage_split_api_lifecycle_and_shared_bronze_deletion(
     )
     assert harness.store.resolve_existing_path(bronze_path).is_file()
 
-    # Deleting Part 2b (last reference) finally deletes the shared bronze blob
     assert (
         client.delete(
             f"/api/v1/projects/{proj_id}/stages/{p2b['id']}",
@@ -1458,7 +1397,6 @@ def test_stage_split_api_lifecycle_and_shared_bronze_deletion(
     with pytest.raises(FileNotFoundError):
         harness.store.resolve_existing_path(bronze_path)
 
-    # DB failure during split rolls back newly uploaded blobs and leaves Part 1 sidecars untouched
     s0_lod_key = stage_lod_cache_key(uuid.UUID(proj_id), uuid.UUID(s0["id"]))
     orig_s0_lod_bytes = harness.store.get_bytes(s0_lod_key)
 
@@ -1478,7 +1416,6 @@ def test_stage_split_api_lifecycle_and_shared_bronze_deletion(
     )
     assert fail_resp.status_code == 500
     assert harness.store.get_bytes(s0_lod_key) == orig_s0_lod_bytes
-    # Stage count unchanged (still s0 and s2)
     after_fail = client.get(f"/api/v1/projects/{proj_id}").json()
     assert [st["id"] for st in after_fail["stages"]] == [s0["id"], s2["id"]]
 
@@ -1538,7 +1475,6 @@ def test_stage_split_concurrent_change_returns_409_and_strava_delete_keeps_share
     )
     assert conflict_resp.status_code == 409
 
-    # Clear the simulated trim and verify real split succeeds while Strava delete keeps bronze
     monkeypatch.undo()
     with harness.session_factory() as db:
         row = db.get(Stage, uuid.UUID(st["id"]))

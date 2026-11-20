@@ -27,10 +27,6 @@ locals {
   active_listener_arn = var.alb_acm_certificate_arn != "" ? aws_lb_listener.https[0].arn : aws_lb_listener.http.arn
 }
 
-# -----------------------------------------------------------------------------
-# KMS Encryption Key for ECR, CloudWatch Logs, and App Secrets
-# -----------------------------------------------------------------------------
-
 data "aws_iam_policy_document" "compute_kms" {
   statement {
     sid    = "EnableAccountAdministration"
@@ -86,10 +82,6 @@ resource "aws_kms_alias" "compute" {
   name          = "alias/${var.name_prefix}-compute"
   target_key_id = aws_kms_key.compute.key_id
 }
-
-# -----------------------------------------------------------------------------
-# ECR Repositories (api, worker, airflow)
-# -----------------------------------------------------------------------------
 
 resource "aws_ecr_repository" "services" {
   for_each = local.ecr_services
@@ -149,10 +141,6 @@ resource "aws_ecr_lifecycle_policy" "services" {
   })
 }
 
-# -----------------------------------------------------------------------------
-# Application Runtime Secrets (zero plaintext secrets in Task Definitions)
-# -----------------------------------------------------------------------------
-
 resource "random_password" "session_secret" {
   length  = 48
   special = false
@@ -200,10 +188,6 @@ resource "aws_secretsmanager_secret_version" "app" {
   }
 }
 
-# -----------------------------------------------------------------------------
-# CloudWatch Log Groups
-# -----------------------------------------------------------------------------
-
 resource "aws_cloudwatch_log_group" "ecs" {
   for_each = local.log_services
 
@@ -216,10 +200,6 @@ resource "aws_cloudwatch_log_group" "ecs" {
     Service = each.key
   })
 }
-
-# -----------------------------------------------------------------------------
-# Application Load Balancer + Target Group + Origin Cloaking Listeners
-# -----------------------------------------------------------------------------
 
 resource "aws_lb" "main" {
   name_prefix                = "ta-"
@@ -381,10 +361,6 @@ resource "aws_lb_listener_rule" "allow_verified_origin" {
   }
 }
 
-# -----------------------------------------------------------------------------
-# ECS Cluster & Capacity Providers
-# -----------------------------------------------------------------------------
-
 resource "aws_ecs_cluster" "main" {
   name = "${var.name_prefix}-cluster"
 
@@ -410,10 +386,6 @@ resource "aws_ecs_cluster_capacity_providers" "main" {
   }
 }
 
-# -----------------------------------------------------------------------------
-# Least-Privilege IAM Roles
-# -----------------------------------------------------------------------------
-
 data "aws_iam_policy_document" "ecs_tasks_assume" {
   statement {
     effect  = "Allow"
@@ -426,7 +398,6 @@ data "aws_iam_policy_document" "ecs_tasks_assume" {
   }
 }
 
-# ECS Task Execution Role (pulls ECR images, writes logs, resolves Secrets Manager ARNs)
 resource "aws_iam_role" "execution" {
   name_prefix        = "${var.name_prefix}-ecs-exec-"
   assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
@@ -468,7 +439,6 @@ resource "aws_iam_role_policy" "execution_secrets" {
   policy = data.aws_iam_policy_document.execution_secrets.json
 }
 
-# API Task Role (S3 objects read/write/delete + KMS via S3)
 resource "aws_iam_role" "api_task" {
   name_prefix        = "${var.name_prefix}-api-task-"
   assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
@@ -519,7 +489,6 @@ resource "aws_iam_role_policy" "api_task_s3" {
   policy = data.aws_iam_policy_document.api_task_s3.json
 }
 
-# Worker Task Role (S3 bronze/silver read + outputs/renders put/delete + KMS via S3)
 resource "aws_iam_role" "worker_task" {
   name_prefix        = "${var.name_prefix}-worker-task-"
   assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
@@ -589,7 +558,7 @@ resource "aws_iam_role_policy" "worker_task_s3" {
   policy = data.aws_iam_policy_document.worker_task_s3.json
 }
 
-# Migrate Task Role (no S3 permissions required)
+# Migrate task role intentionally has no S3 permissions
 resource "aws_iam_role" "migrate_task" {
   name_prefix        = "${var.name_prefix}-migrate-task-"
   assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
@@ -597,7 +566,6 @@ resource "aws_iam_role" "migrate_task" {
   tags = var.tags
 }
 
-# Reaper Task Role (S3 list + delete expired outputs/ and renders/)
 resource "aws_iam_role" "reap_task" {
   name_prefix        = "${var.name_prefix}-reap-task-"
   assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
@@ -652,7 +620,6 @@ resource "aws_iam_role_policy" "reap_task_s3" {
   policy = data.aws_iam_policy_document.reap_task_s3.json
 }
 
-# dbt Task Role (read silver/, write gold/)
 resource "aws_iam_role" "dbt_task" {
   name_prefix        = "${var.name_prefix}-dbt-task-"
   assume_role_policy = data.aws_iam_policy_document.ecs_tasks_assume.json
@@ -711,10 +678,6 @@ resource "aws_iam_role_policy" "dbt_task_s3" {
   role   = aws_iam_role.dbt_task.id
   policy = data.aws_iam_policy_document.dbt_task_s3.json
 }
-
-# -----------------------------------------------------------------------------
-# ECS Task Definitions (api, worker, migrate, reap, dbt)
-# -----------------------------------------------------------------------------
 
 resource "aws_ecs_task_definition" "api" {
   family                   = "${var.name_prefix}-api"
@@ -1204,10 +1167,6 @@ resource "aws_ecs_task_definition" "ingest" {
   })
 }
 
-# -----------------------------------------------------------------------------
-# ECS Services & Application Auto Scaling
-# -----------------------------------------------------------------------------
-
 resource "aws_ecs_service" "api" {
   name                               = "${var.name_prefix}-api"
   cluster                            = aws_ecs_cluster.main.id
@@ -1425,10 +1384,6 @@ resource "aws_cloudwatch_metric_alarm" "worker_queue_empty" {
   tags          = var.tags
 }
 
-# -----------------------------------------------------------------------------
-# EventBridge Scheduler (Daily Retention Reaper + Optional dbt Gold Build)
-# -----------------------------------------------------------------------------
-
 data "aws_iam_policy_document" "scheduler_assume" {
   statement {
     effect  = "Allow"
@@ -1584,10 +1539,6 @@ resource "aws_scheduler_schedule" "ingest" {
     }
   }
 }
-
-# -----------------------------------------------------------------------------
-# Render Queue Depth Metric Publisher (TripAnimator/RenderQueueDepth)
-# -----------------------------------------------------------------------------
 
 resource "aws_service_discovery_private_dns_namespace" "internal" {
   count = local.enable_metric_publisher ? 1 : 0

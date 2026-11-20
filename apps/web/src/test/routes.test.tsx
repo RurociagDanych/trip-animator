@@ -1,4 +1,3 @@
-// Activity coordinates below use a constructed numeric grid, not a recorded GPS route.
 import { QueryClient } from "@tanstack/react-query";
 import { createMemoryHistory } from "@tanstack/react-router";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -121,13 +120,11 @@ describe("Route tests: DashboardPage, LoginPage, ForgotPasswordPage, ResetPasswo
         "/account",
       );
 
-      // Submitting empty title shows validation alert
       fireEvent.click(screen.getByRole("button", { name: /Create trip/i }));
       expect(await screen.findByRole("alert")).toHaveTextContent(
         /Enter a trip name to create a project/i,
       );
 
-      // Creating a valid project navigates to editor
       fireEvent.change(screen.getByLabelText("New trip title"), {
         target: { value: "Fictional Meridian Route" },
       });
@@ -189,12 +186,10 @@ describe("Route tests: DashboardPage, LoginPage, ForgotPasswordPage, ResetPasswo
       renderAtRoute("/");
       expect(await screen.findByText("Fictional Meridian Raid")).toBeInTheDocument();
 
-      // First click arms confirm, second click triggers DELETE
       fireEvent.click(screen.getByRole("button", { name: /Delete Fictional Meridian Raid/i }));
       fireEvent.click(screen.getByRole("button", { name: /^Confirm$/i }));
       expect(await screen.findByRole("alert")).toHaveTextContent(/Cannot delete locked project/i);
 
-      // Retry delete succeeds
       fireEvent.click(screen.getByRole("button", { name: /^Confirm$/i }));
       expect(await screen.findByText(/No trip projects yet/i)).toBeInTheDocument();
     });
@@ -457,7 +452,6 @@ describe("Route tests: DashboardPage, LoginPage, ForgotPasswordPage, ResetPasswo
       expect(await screen.findByText(/Syncing 2 queued/i)).toBeInTheDocument();
       expect(screen.getByText(/4 imported stages/i)).toBeInTheDocument();
 
-      // The Atlas picker remains a single-activity import flow.
       fireEvent.click(screen.getByTestId("atlas-open-strava-picker"));
       expect(await screen.findByRole("dialog", { name: /Import Strava activity/i })).toBeInTheDocument();
       expect(await screen.findByText("Fictional Summit Spin")).toBeInTheDocument();
@@ -744,7 +738,6 @@ describe("Route tests: DashboardPage, LoginPage, ForgotPasswordPage, ResetPasswo
       );
       expect(capturedPayload).toBeNull();
 
-      // Mismatched passwords show inline feedback and block submission
       fireEvent.change(screen.getByLabelText(/^Password$/i), {
         target: { value: "secure-alpine-pass" },
       });
@@ -757,7 +750,6 @@ describe("Route tests: DashboardPage, LoginPage, ForgotPasswordPage, ResetPasswo
       expect(await screen.findByRole("alert")).toHaveTextContent(/Passwords do not match\./i);
       expect(capturedPayload).toBeNull();
 
-      // Invalid invite code surfaces API 403 error
       fireEvent.change(screen.getByLabelText(/Confirm password/i), {
         target: { value: "secure-alpine-pass" },
       });
@@ -770,7 +762,6 @@ describe("Route tests: DashboardPage, LoginPage, ForgotPasswordPage, ResetPasswo
         /Invalid registration invite code/i,
       );
 
-      // Valid invite code transitions to Check your email screen
       fireEvent.change(screen.getByLabelText(/Invite code/i), {
         target: { value: "alpine-2026" },
       });
@@ -787,14 +778,12 @@ describe("Route tests: DashboardPage, LoginPage, ForgotPasswordPage, ResetPasswo
       expect(screen.getByText("alpine@example.com")).toBeInTheDocument();
       expect(router.state.location.pathname).toBe("/login");
 
-      // Supports resending verification email
       fireEvent.click(screen.getByRole("button", { name: /Resend verification email/i }));
       expect(await screen.findByRole("status")).toHaveTextContent(
         /a new verification link has been sent/i,
       );
       expect(resendPayload).toEqual({ email: "alpine@example.com" });
 
-      // Supports returning to sign in view
       fireEvent.click(screen.getByRole("button", { name: /Back to sign in/i }));
       expect(
         await screen.findByRole("heading", { name: /Sign in to workspace/i }),

@@ -292,7 +292,6 @@ async def test_render_manifest_with_page_streams_frames_to_encoder() -> None:
     assert page.routes[0][0] == "**/*"
     assert len(page.init_scripts) == 1
     assert "window.__TRIP_RENDER_MANIFEST__" in page.init_scripts[0]
-    # Ensure injected manifest JSON parses cleanly
     raw_arg = page.init_scripts[0].split("JSON.parse(", 1)[1].rsplit(");", 1)[0]
     parsed_manifest = json.loads(json.loads(raw_arg))
     assert parsed_manifest["job_id"] == manifest.job_id
@@ -316,7 +315,7 @@ async def test_render_manifest_with_page_aborts_on_mid_render_cancellation() -> 
     encoder = FakeEncoder()
 
     def _on_progress(done: int, _total: int) -> bool:
-        return done < 2  # Simulate cancel observed at frame 2
+        return done < 2
 
     with pytest.raises(RenderCancelledError):
         await render_manifest_with_page(
@@ -412,7 +411,6 @@ async def test_ssrf_route_handler_blocks_bypass_vectors_and_nxdomain_allows_ipv6
 
 
 async def test_render_manifest_with_page_png_cancellation_and_pageerror_handling() -> None:
-    # 1. build_chromium_launch_args includes --no-sandbox only when enabled and WebRTC guards.
     args_default = build_chromium_launch_args(WorkerSettings(chromium_no_sandbox=False))
     assert "--no-sandbox" not in args_default
     assert "--use-angle=swiftshader" in args_default
@@ -422,7 +420,6 @@ async def test_render_manifest_with_page_png_cancellation_and_pageerror_handling
     args_no_sandbox = build_chromium_launch_args(WorkerSettings(chromium_no_sandbox=True))
     assert "--no-sandbox" in args_no_sandbox
 
-    # 2. Pre-start cancellation aborts immediately before touching page.
     manifest = _sample_manifest(total_frames=2)
     page = FakePage(js_frame_count=2)
     encoder = FakeEncoder()
@@ -437,7 +434,6 @@ async def test_render_manifest_with_page_png_cancellation_and_pageerror_handling
         )
     assert encoder.started is False
 
-    # 3. Mid-render cancellation triggered by is_cancelled check on frame loop.
     cancel_calls = 0
 
     def _cancel_on_second_check() -> bool:
@@ -458,7 +454,6 @@ async def test_render_manifest_with_page_png_cancellation_and_pageerror_handling
         )
     assert encoder2.aborted is True
 
-    # 4. PNG frame format uses screenshot(type="png") and pageerror surfaces in RenderError.
     seen_types: list[str] = []
 
     class _PngErrorPage(FakePage):
@@ -493,7 +488,6 @@ async def test_render_manifest_with_page_preroll_and_hold_deduplication() -> Non
     page = FakePage(js_frame_count=20)
     encoder = FakeEncoder()
 
-    # Render chunk [2, 19) with 2 preroll frames: silently settles frames 0, 1 first
     written = await render_manifest_with_page(
         page,  # type: ignore[arg-type]
         manifest,
@@ -506,7 +500,6 @@ async def test_render_manifest_with_page_preroll_and_hold_deduplication() -> Non
     )
     assert written == 17
     assert len(encoder.frames) == 17
-    # Preroll frames 0, 1 were evaluated, and intro/outro duplicates inside [2, 19) were collapsed
     assert page.frames_rendered[:2] == [0, 1]
     assert len(page.frames_rendered) < 19
 
@@ -557,7 +550,6 @@ async def test_virtual_photo_route_and_ssrf_first_tile_cache(
             http_client=client,
         )
 
-        # 1. Virtual photo route serves in-memory bytes and 404s unknown IDs without network
         photo_ok = FakeRoute("https://render-assets.local/photo-1")
         await handler(photo_ok)  # type: ignore[arg-type]
         assert photo_ok.fulfilled is not None
@@ -569,13 +561,12 @@ async def test_virtual_photo_route_and_ssrf_first_tile_cache(
         assert photo_missing.fulfilled is not None
         assert photo_missing.fulfilled["status"] == 404
 
-        # 2. SSRF runs BEFORE tile_cache: pre-seed cache for rebind host and verify block
+        # SSRF runs BEFORE tile_cache: pre-seed cache for rebind host and verify block
         cache.put("https://rebind.openfreemap.org/tile.pbf", b"secret", "application/octet-stream")
         rebind_route = FakeRoute("https://rebind.openfreemap.org/tile.pbf")
         await handler(rebind_route)  # type: ignore[arg-type]
         assert rebind_route.aborted_reason == "blockedbyclient"
 
-        # 3. Allowlisted GET fetches on miss, stores sharded .bin + .meta.json, hits on 2nd req
         tile_url = "https://tiles.openfreemap.org/styles/liberty"
         r1 = FakeRoute(tile_url)
         await handler(r1)  # type: ignore[arg-type]
@@ -587,14 +578,13 @@ async def test_virtual_photo_route_and_ssrf_first_tile_cache(
         await handler(r2)  # type: ignore[arg-type]
         assert r2.fulfilled is not None and r2.fulfilled["status"] == 200
         assert r2.fulfilled["body"] == b'{"ok":1}'
-        assert len(fetch_calls) == 1  # Served from disk cache
+        assert len(fetch_calls) == 1
 
-        # 4. Redirect response is aborted and never cached
+        # Redirect response is aborted and never cached
         redir = FakeRoute("https://tiles.openfreemap.org/redirect")
         await handler(redir)  # type: ignore[arg-type]
         assert redir.aborted_reason == "blockedbyclient"
 
-        # 5. Bounded LRU eviction keeps total .bin bytes <= max_bytes (32)
         for idx in range(3):
             big_route = FakeRoute(f"https://tiles.openfreemap.org/big/{idx}.pbf")
             await handler(big_route)  # type: ignore[arg-type]
@@ -702,7 +692,6 @@ def test_warm_playwright_browser_reuses_browser_isolates_context_and_recycles_af
             browser = host.run_coro(host.acquire_browser())
             host.run_coro(render_manifest_to_mp4(manifest, out_mp4, settings, browser=browser))
 
-        # Renders 1 & 2 shared browser #1; render 3 recycled into browser #2
         assert len(launch_records) == 2
         assert launch_records[0]["browser"].closed is True
         assert launch_records[1]["browser"].closed is False
@@ -788,7 +777,6 @@ def test_warm_playwright_browser_crash_recovery(
             )
         assert launched_browsers[0].closed is True
 
-        # Next render launches a fresh clean browser automatically
         res = runner_mod._execute_render(
             flaky_render,
             manifest,
@@ -841,7 +829,6 @@ async def test_ssrf_route_handler_external_without_tile_cache_blocks_redirects_a
             http_client=client,
         )
 
-        # 1. External GET with tile_cache=None uses fulfill(), never continue_()
         get_route = FakeRoute("https://tiles.openfreemap.org/styles/liberty", method="GET")
         await handler(get_route)  # type: ignore[arg-type]
         assert get_route.continued is False
@@ -849,7 +836,6 @@ async def test_ssrf_route_handler_external_without_tile_cache_blocks_redirects_a
         assert get_route.fulfilled["status"] == 200
         assert get_route.fulfilled["body"] == b'{"v":1}'
 
-        # 2. External HEAD with tile_cache=None uses fulfill() with empty body
         head_route = FakeRoute("https://tiles.openfreemap.org/styles/liberty", method="HEAD")
         await handler(head_route)  # type: ignore[arg-type]
         assert head_route.continued is False
@@ -857,19 +843,16 @@ async def test_ssrf_route_handler_external_without_tile_cache_blocks_redirects_a
         assert head_route.fulfilled["status"] == 200
         assert head_route.fulfilled["body"] == b""
 
-        # 3. DNS rebinding on 3rd lookup is aborted before HTTP fetch
         rebind_route = FakeRoute("https://tiles.openfreemap.org/rebinding.pbf", method="GET")
         await handler(rebind_route)  # type: ignore[arg-type]
         assert rebind_route.aborted_reason == "blockedbyclient"
         assert rebind_route.continued is False
 
-        # 4. 3xx redirect with tile_cache=None is aborted
         redir_route = FakeRoute("https://tiles.openfreemap.org/redir", method="GET")
         await handler(redir_route)  # type: ignore[arg-type]
         assert redir_route.aborted_reason == "blockedbyclient"
         assert redir_route.continued is False
 
-        # 5. Non-GET/HEAD external methods are aborted
         post_route = FakeRoute("https://tiles.openfreemap.org/mutate", method="POST")
         await handler(post_route)  # type: ignore[arg-type]
         assert post_route.aborted_reason == "blockedbyclient"

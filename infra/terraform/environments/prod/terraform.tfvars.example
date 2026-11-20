@@ -2,39 +2,28 @@ aws_region   = "eu-central-1"
 project_name = "trip-animator"
 environment  = "prod"
 
-# High-availability Multi-AZ NAT Gateways + S3 Gateway Endpoint
 enable_nat_gateway = true
 single_nat_gateway = false
 
-# CloudFront WAFv2 + origin cloaking (CloudFront prefix list + X-Origin-Verify)
 restrict_alb_to_cloudfront = true
 enable_origin_verify       = true
 enable_waf                 = true
 
-# Multi-AZ RDS PostgreSQL 17 (Graviton)
 db_instance_class          = "db.t4g.small"
 db_multi_az                = true
 db_backup_retention_period = 14
 db_deletion_protection     = true
 db_skip_final_snapshot     = false
 
-# Immutable git SHA tag pushed by CI/CD & Graviton ARM64 runtime
 image_tag        = "v1.0.0"
 cpu_architecture = "ARM64"
 
-# HA API tasks (2-8) + Fargate Spot render workers (0-6)
 api_min_capacity    = 2
 api_max_capacity    = 8
 worker_min_capacity = 0
 worker_max_capacity = 6
 
-# Enable scheduled daily retention reaper + hourly/daily dbt Gold build
 enable_dbt_schedule = true
-
-# Custom domain + ACM certificates (recommended for prod)
-# domain_name                    = "trips.example.com"
-# cloudfront_acm_certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/..."
-# alb_acm_certificate_arn        = "arn:aws:acm:eu-central-1:123456789012:certificate/..."
 
 tags = {
   Owner      = "platform-team"

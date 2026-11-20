@@ -90,7 +90,6 @@ _DEFAULT_CHART_CACHE_POINTS = 1200
 
 
 def current_etl_version() -> int:
-    """Return CURRENT_ETL_VERSION from trip_telemetry."""
     return int(CURRENT_ETL_VERSION)
 
 
@@ -407,7 +406,6 @@ def _persist_stage_events_sidecar(
     trim_start_s: float | None = None,
     trim_end_s: float | None = None,
 ) -> None:
-    """Persist `_events.parquet` sidecar via trip_telemetry."""
     events_key = stage_events_cache_key(project_id, stage_id)
     with tempfile.TemporaryDirectory(prefix="trip_events_") as tmpdir:
         out_path = Path(tmpdir) / f"{stage_id}_events.parquet"

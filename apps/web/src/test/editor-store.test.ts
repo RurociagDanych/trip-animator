@@ -83,10 +83,8 @@ describe("editor-store.ts", () => {
 
     expect(useEditorStore.getState().undoStack).toHaveLength(0);
     expect(useEditorStore.getState().redoStack).toHaveLength(MAX_UNDO_HISTORY);
-    // Earliest retained snapshot is Title 5 (since 1..5 were pushed before the 30-item window)
     expect(useEditorStore.getState().title).toBe("Title 5");
 
-    // No-op when undoStack is empty
     useEditorStore.getState().undo();
     expect(useEditorStore.getState().title).toBe("Title 5");
 
@@ -96,7 +94,6 @@ describe("editor-store.ts", () => {
     expect(useEditorStore.getState().redoStack).toHaveLength(0);
     expect(useEditorStore.getState().title).toBe(`Title ${MAX_UNDO_HISTORY + 5}`);
 
-    // New edit clears redoStack
     useEditorStore.getState().undo();
     expect(useEditorStore.getState().redoStack).toHaveLength(1);
     useEditorStore.getState().updateSpec({ terrain_3d: true });
@@ -111,7 +108,6 @@ describe("editor-store.ts", () => {
     useEditorStore.getState().updateSpec({ camera_pitch_deg: 35 });
     expect(useEditorStore.getState().undoStack).toHaveLength(1);
 
-    // Different key does not coalesce
     useEditorStore.getState().updateStatisticsPanel({ text_size: 16 });
     expect(useEditorStore.getState().undoStack).toHaveLength(2);
 
@@ -144,12 +140,10 @@ describe("editor-store.ts", () => {
     expect(useEditorStore.getState().conflictError).toBeNull();
     expect(useEditorStore.getState().lastSavedAt).not.toBeNull();
 
-    // Re-hydrating same project keeps undoStack and valid selectedStageId
     store.hydrateProject(makeProject({ revision: 3 }));
     expect(useEditorStore.getState().undoStack).toHaveLength(1);
     expect(useEditorStore.getState().selectedStageId).toBe("s2");
 
-    // Hydrating a different project clears undoStack and resets selectedStageId
     store.hydrateProject(makeProject({ id: "proj-2", stages: [makeStage("s9", 0)] }));
     expect(useEditorStore.getState().undoStack).toHaveLength(0);
     expect(useEditorStore.getState().selectedStageId).toBe("s9");
@@ -162,7 +156,6 @@ describe("editor-store.ts", () => {
     useEditorStore.getState().setStageTransition("s2", "tent");
     useEditorStore.getState().selectStage("s2");
 
-    // Reorder: s2 before s1
     useEditorStore.getState().setStages([makeStage("s2", 0), makeStage("s1", 1)]);
     expect(useEditorStore.getState().stages.map((s) => s.id)).toEqual(["s2", "s1"]);
     expect(useEditorStore.getState().selectedStageId).toBe("s2");
@@ -171,7 +164,6 @@ describe("editor-store.ts", () => {
       s2: "#00ff00",
     });
 
-    // Trim s1
     useEditorStore
       .getState()
       .setStages([
@@ -181,13 +173,11 @@ describe("editor-store.ts", () => {
     expect(useEditorStore.getState().stages[1]?.trim_start_s).toBe(120);
     expect(useEditorStore.getState().stages[1]?.trim_end_s).toBe(1500);
 
-    // Delete s2: cleans up s2 color/transition and selects s1
     useEditorStore.getState().setStages([makeStage("s1", 0)]);
     expect(useEditorStore.getState().selectedStageId).toBe("s1");
     expect(useEditorStore.getState().spec.stage_colors).toEqual({ s1: "#ff0000" });
     expect(useEditorStore.getState().spec.stage_transitions).toEqual({});
 
-    // Delete last stage: selectedStageId becomes null
     useEditorStore.getState().setStages([]);
     expect(useEditorStore.getState().selectedStageId).toBeNull();
   });
@@ -247,7 +237,6 @@ describe("editor-store.ts", () => {
     expect(useEditorStore.getState().spec.director_preset).toBe("expedition-doc");
     expect(useEditorStore.getState().spec.color_by).toBe("grade");
 
-    // Undo restores defaults and redo restores keyframes
     store.undo();
     expect(useEditorStore.getState().spec.camera_keyframes).toEqual([]);
     expect(useEditorStore.getState().spec.director_preset).toBe("none");
@@ -257,7 +246,6 @@ describe("editor-store.ts", () => {
     expect(useEditorStore.getState().spec.camera_keyframes).toHaveLength(1);
     expect(useEditorStore.getState().spec.camera_keyframes[0]?.label).toBe("Summit");
 
-    // Coalesces rapid terrain_exaggeration edits
     vi.advanceTimersByTime(1000);
     const undoBefore = useEditorStore.getState().undoStack.length;
     store.updateSpec({ terrain_exaggeration: 1.8 });
@@ -265,7 +253,6 @@ describe("editor-store.ts", () => {
     store.updateSpec({ terrain_exaggeration: 2.2 });
     expect(useEditorStore.getState().undoStack).toHaveLength(undoBefore + 1);
 
-    // Switching projects resets pinModePhotoId and sidebarTab
     store.hydrateProject(makeProject({ id: "proj-new" }));
     expect(useEditorStore.getState().pinModePhotoId).toBeNull();
     expect(useEditorStore.getState().sidebarTab).toBe("stages");

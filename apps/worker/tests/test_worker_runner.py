@@ -698,7 +698,6 @@ def test_claim_sql_uses_skip_locked_and_processes_job_to_succeeded(
     assert store.get_bytes(f"outputs/{job_id}.webp") == b"RIFF_WEBP"
     assert db.audit_events[-1]["event_type"] == "render_succeeded"
 
-    # Empty queue returns False
     assert run_once(WorkerSettings(), conn_factory=cf, store=store, render_fn=fake_render) is False
 
 
@@ -710,7 +709,7 @@ def test_runner_preserves_cancelled_status_and_retries_transient_failures(
     owner_id, project_id, _ = _seed_project_and_stage(db, store)
     cf = db.conn_factory()
 
-    # 1. Mid-render cancellation must leave status='cancelled' untouched
+    # Mid-render cancellation must leave status='cancelled' untouched
     cancel_job_id = uuid.uuid4()
     db.jobs[cancel_job_id] = {
         "id": cancel_job_id,
@@ -753,7 +752,6 @@ def test_runner_preserves_cancelled_status_and_retries_transient_failures(
     assert db.jobs[cancel_job_id]["output_object_key"] is None
     assert db.audit_events[-1]["event_type"] == "render_cancelled"
 
-    # 2. Transient error re-queues below max_attempts, then fails terminally at max_attempts
     db.cancel_after_progress_calls = None
     retry_job_id = uuid.uuid4()
     db.jobs[retry_job_id] = {
@@ -805,7 +803,6 @@ def test_runner_preserves_cancelled_status_and_retries_transient_failures(
     assert db.jobs[retry_job_id]["attempt_count"] == 2
     assert db.jobs[retry_job_id]["error_message"] == "Render worker encountered an internal error"
 
-    # 3. Expired running job with attempt_count >= max_attempts is reaped to failed
     stale_id = uuid.uuid4()
     db.jobs[stale_id] = {
         "id": stale_id,
@@ -826,7 +823,6 @@ def test_runner_preserves_cancelled_status_and_retries_transient_failures(
     assert run_once(settings, conn_factory=cf, store=store, render_fn=failing_render) is False
     assert db.jobs[stale_id]["status"] == "failed"
 
-    # 4. Zero-stage project fails fatally without retry
     empty_proj_id = uuid.uuid4()
     db.projects[empty_proj_id] = "Empty Trip"
     db.stages[empty_proj_id] = []
@@ -887,7 +883,6 @@ def test_fencing_token_prevents_stale_worker_overwrites(
         stale_claim = claim_next_job(c, max_attempts=3, lease_seconds=60)
     assert stale_claim is not None and stale_claim.attempt_count == 1
 
-    # Simulate lease expiration and reclaim by Worker 2 (attempt_count -> 2)
     db.jobs[job_id]["lease_expires_at"] = datetime.now(UTC) - timedelta(seconds=5)
     with cf() as c:
         active_claim = claim_next_job(c, max_attempts=3, lease_seconds=60)
@@ -1075,12 +1070,9 @@ def test_runner_reuses_connection_throttles_heartbeats_and_renews_during_post_re
         render_fn=rapid_render,
     )
     assert res == "succeeded"
-    # Single persistent connection reused for load, heartbeats, completion, and audit event
     assert db.conn_open_count == 1
-    # 50 rapid frames throttled: first frame + final frame + 97% + 99% = 4 DB updates (not 52!)
     assert db.progress_updates == 4
 
-    # Now verify background lease renewal fires during slow post-render phases
     job2_id = uuid.uuid4()
     db.jobs[job2_id] = {
         "id": job2_id,
@@ -1132,7 +1124,6 @@ def test_runner_reuses_connection_throttles_heartbeats_and_renews_during_post_re
         render_fn=slow_finish_render,
     )
     assert res2 == "succeeded"
-    # More than the 3 deterministic checkpoints (95%, 97%, 99%) due to background renewals
     assert db.progress_updates > 3
 
 
@@ -1142,7 +1133,6 @@ def test_audit_events_handle_deleted_projects_without_crashing(tmp_path: Path) -
     owner_id, project_id, _ = _seed_project_and_stage(db, store)
     cf = db.conn_factory()
 
-    # 1. Direct record_audit_event with missing project falls back to project_id=None
     missing_proj_id = uuid.uuid4()
     with cf() as conn:
         record_audit_event(
@@ -1155,7 +1145,6 @@ def test_audit_events_handle_deleted_projects_without_crashing(tmp_path: Path) -
     assert db.audit_events[-1]["project_id"] is None
     assert db.audit_events[-1]["event_type"] == "render_failed"
 
-    # 2. Project deleted before load_project_title -> fatal failure + graceful audit event
     deleted_proj_job = uuid.uuid4()
     db.jobs[deleted_proj_job] = {
         "id": deleted_proj_job,
@@ -1182,7 +1171,6 @@ def test_audit_events_handle_deleted_projects_without_crashing(tmp_path: Path) -
     assert db.audit_events[-1]["event_type"] == "render_failed"
     assert db.audit_events[-1]["project_id"] is None
 
-    # 3. Project deleted mid-render while cancelled -> graceful audit event
     cancel_job = uuid.uuid4()
     db.jobs[cancel_job] = {
         "id": cancel_job,
@@ -1489,7 +1477,6 @@ def test_chunked_job_fanout_render_concat_notifications_and_failure(
         (240, 300, 15, True, {}),
     ]
     assert store.get_bytes(f"outputs/{job_id}.mp4") == b"CHUNK_0_120+CHUNK_120_240+CHUNK_240_300"
-    # Intermediate chunk blobs are cleaned up after assembly
     for c_idx in range(3):
         try:
             store.get_bytes(f"outputs/chunks/{job_id}/chunk_{c_idx:04d}.mp4")
@@ -1497,12 +1484,10 @@ def test_chunked_job_fanout_render_concat_notifications_and_failure(
         except FileNotFoundError:
             pass
 
-    # Verify pg_notify events were emitted for running -> progress -> succeeded
     job_notifs = [n for n in db.notifications if n["job_id"] == str(job_id)]
     assert job_notifs[0]["status"] == "running"
     assert job_notifs[-1] == {"job_id": str(job_id), "status": "succeeded", "progress_pct": 100}
 
-    # Chunk fatal failure fails parent job and cancels remaining queued chunks
     fail_job_id = uuid.uuid4()
     db.jobs[fail_job_id] = {
         "id": fail_job_id,
@@ -1685,7 +1670,6 @@ def test_chunked_job_uses_pre_serialized_manifest_without_rebuilding(
     assert run_once(settings, conn_factory=cf, store=store, render_fn=fake_chunk_render) is True
     assert db.jobs[job_id]["status"] == "succeeded"
 
-    # Manifest was built exactly once (in _prepare_chunked with load_assets=False)
     assert len(build_calls) == 1
     assert build_calls[0]["load_assets"] is False
     assert manifest_seen_in_chunks == [True, True]
@@ -1693,14 +1677,11 @@ def test_chunked_job_uses_pre_serialized_manifest_without_rebuilding(
         {str(photo_id): b"RIFFwebp-thumb"},
         {str(photo_id): b"RIFFwebp-thumb"},
     ]
-    # Silver Parquet was NOT read via get_bytes (LocalObjectStore resolves path in build once)
     assert silver_key not in store.get_keys
-    # Pre-serialized manifest was read by chunks + finalize and deleted on completion
     assert chunk_manifest_key(job_id) in store.get_keys
     with pytest.raises(FileNotFoundError):
         store.resolve_existing_path(chunk_manifest_key(job_id))
 
-    # Fatal chunk failure also deletes the pre-serialized manifest
     fail_job_id = uuid.uuid4()
     db.jobs[fail_job_id] = {
         "id": fail_job_id,
@@ -1729,7 +1710,6 @@ def test_chunked_job_uses_pre_serialized_manifest_without_rebuilding(
     with pytest.raises(FileNotFoundError):
         store.resolve_existing_path(chunk_manifest_key(fail_job_id))
 
-    # Cancellation during chunked run also deletes the pre-serialized manifest
     cancel_job_id = uuid.uuid4()
     db.jobs[cancel_job_id] = {
         "id": cancel_job_id,

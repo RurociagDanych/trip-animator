@@ -84,13 +84,11 @@ def test_duckdb_kpis_lttb_and_lod_geometry(tmp_path: Path) -> None:
     assert kpis["avg_hr_bpm"] is not None
     assert kpis["avg_watts"] is not None
 
-    # Trimmed query excludes the spike at t=300s when trimming [0, 250s]
     trimmed_kpis = query_stage_kpis(pq_path, trim_start_s=0.0, trim_end_s=250.0)
     assert trimmed_kpis["point_count"] == 26
     assert trimmed_kpis["elapsed_time_s"] == pytest.approx(250.0)
     assert trimmed_kpis["max_elev_m"] == pytest.approx(1050.0)
 
-    # LTTB preserves endpoints and the sharp spike at elev=1310.0
     lttb_points = query_telemetry_profile(pq_path, max_points=10)
     assert len(lttb_points) == 10
     assert lttb_points[0]["dist_m"] == pytest.approx(0.0)
@@ -102,7 +100,6 @@ def test_duckdb_kpis_lttb_and_lod_geometry(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="max_points"):
         query_telemetry_profile(pq_path, max_points=1)
 
-    # Map preview geometry at requested LODs preserves both segments
     geom_full = query_map_geometry(pq_path, lod="full")
     geom_low = query_map_geometry(pq_path, lod="low")
     assert geom_full["geometry"]["type"] == "MultiLineString"
@@ -136,7 +133,6 @@ def test_duckdb_empty_tables_and_missing_columns(tmp_path: Path) -> None:
     track = _build_synthetic_climb_track(10)
     df, _ = build_silver_dataframe(track, trip_id="trip-empty", stage_id="stage-empty")
 
-    # 1) 0-row Parquet table
     empty_df = df.clear()
     empty_pq = tmp_path / "empty.parquet"
     empty_df.write_parquet(empty_pq)
@@ -155,7 +151,6 @@ def test_duckdb_empty_tables_and_missing_columns(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="No telemetry points found"):
         build_lod_cache_from_parquet(empty_pq)
 
-    # 2) Valid table queried with trim window excluding all points
     valid_pq = write_silver_parquet(df, tmp_path / "valid.parquet")
     with pytest.raises(ValueError, match="Trim window excludes all telemetry points"):
         query_stage_kpis(valid_pq, trim_start_s=5000.0, trim_end_s=6000.0)
@@ -167,7 +162,6 @@ def test_duckdb_empty_tables_and_missing_columns(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="No telemetry points found"):
         query_map_geometry(valid_pq, lod="low", trim_start_s=5000.0, trim_end_s=6000.0)
 
-    # 3) Parquet table without `is_trimmed` column + `is_moving=False` (VAM uses elapsed_time_s)
     df_no_trim_col = df.drop("is_trimmed").with_columns(
         df.get_column("is_moving").clear().extend_constant(False, df.height)
     )
@@ -178,7 +172,6 @@ def test_duckdb_empty_tables_and_missing_columns(tmp_path: Path) -> None:
     assert kpis_no_moving["elapsed_time_s"] > 0.0
     assert kpis_no_moving["vam"] > 0.0
 
-    # 4) Parquet table with no elevations (all None) and partial elevations
     no_ele_gpx = b"""<?xml version="1.0"?>
 <gpx version="1.1"><trk><trkseg>
   <trkpt lat="0.1200" lon="0.3400"><time>2001-07-01T08:00:00Z</time></trkpt>
@@ -214,7 +207,6 @@ def test_duckdb_boundary_limits_offsets_and_helpers(tmp_path: Path) -> None:
     df, _ = build_silver_dataframe(track, trip_id="t-bound", stage_id="s-bound")
     pq_path = write_silver_parquet(df, tmp_path / "bound.parquet")
 
-    # Boundary max_points: max_points == 2 (endpoints only), max_points >= n (all points)
     prof_2 = query_telemetry_profile(pq_path, max_points=2)
     assert len(prof_2) == 2
     assert prof_2[0]["dist_m"] == pytest.approx(0.0)
@@ -224,7 +216,6 @@ def test_duckdb_boundary_limits_offsets_and_helpers(tmp_path: Path) -> None:
     prof_over = query_telemetry_profile(pq_path, max_points=500)
     assert len(prof_over) == 8
 
-    # Trimmed profile shifts dist_m offset so first point starts at 0.0
     prof_trimmed = query_telemetry_profile(
         pq_path, max_points=4, trim_start_s=20.0, trim_end_s=70.0
     )
@@ -232,12 +223,10 @@ def test_duckdb_boundary_limits_offsets_and_helpers(tmp_path: Path) -> None:
     assert prof_trimmed[0]["dist_m"] == pytest.approx(0.0)
     assert prof_trimmed[-1]["dist_m"] > 0.0
 
-    # Direct LTTB helper edge cases
     assert _lttb_downsample_indices([0.0, 1.0, 2.0], [10.0, 20.0, 30.0], 5) == [0, 1, 2]
     assert _lttb_downsample_indices([0.0, 1.0, 2.0, 3.0], [1.0, 5.0, 2.0, 4.0], 2) == [0, 3]
     assert len(_lttb_downsample_indices([0.0, 1.0, 2.0, 3.0], [1.0, 5.0, 2.0, 4.0], 3)) == 3
 
-    # _validate_trim_args invalid bounds
     for bad_start, bad_end in (
         (-0.01, None),
         (float("nan"), None),
@@ -249,7 +238,6 @@ def test_duckdb_boundary_limits_offsets_and_helpers(tmp_path: Path) -> None:
         with pytest.raises(ValueError):
             _validate_trim_args(bad_start, bad_end)
 
-    # _normalize_ts_utc branches
     assert _normalize_ts_utc(None) is None
     assert _normalize_ts_utc(True) is None
     assert _normalize_ts_utc("not-a-timestamp") is None
@@ -269,7 +257,6 @@ def test_dbt_resolution_and_validation_guards(
         with pytest.raises(ValueError, match="Invalid silver_glob"):
             run_dbt_gold_build(invalid_glob, tmp_path / "gold")
 
-    # Explicit dbt_project_dir validation
     fake_dbt_dir = tmp_path / "fake_dbt"
     fake_dbt_dir.mkdir()
     with pytest.raises(FileNotFoundError, match="dbt_project.yml not found"):
@@ -282,7 +269,6 @@ def test_dbt_resolution_and_validation_guards(
     assert _resolve_dbt_project_dir(None) == fake_dbt_dir.resolve()
     monkeypatch.delenv("TRIP_DBT_PROJECT_DIR", raising=False)
 
-    # _resolve_dbt_executable fallback to shutil.which and FileNotFoundError
     monkeypatch.setattr(sys, "executable", str(tmp_path / "no_venv" / "python"))
     monkeypatch.setattr(shutil, "which", lambda _name: "/usr/local/bin/dbt")
     assert _resolve_dbt_executable() == "/usr/local/bin/dbt"
@@ -292,7 +278,6 @@ def test_dbt_resolution_and_validation_guards(
         _resolve_dbt_executable()
     monkeypatch.undo()
 
-    # Subprocess non-zero returncode raises RuntimeError
     def _mock_failed_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(
             args=["dbt", "build"],
@@ -467,7 +452,6 @@ def test_lod_cache_tuple_parity_export_and_activity_inference(tmp_path: Path) ->
     df, _ = build_silver_dataframe(track, trip_id="trip-cache", stage_id="stage-cache")
     pq_path = write_silver_parquet(df, tmp_path / "stage-cache.parquet")
 
-    # Fast tuple GeoJSON builder matches TrackPoint builder identically
     tuples = [(p.lat, p.lon, p.segment_idx) for p in track.points]
     feat_tp = build_lod_geojson_feature(
         track.points, lod="medium", tolerance_deg=LOD_TOLERANCES_DEG["medium"]
@@ -477,23 +461,18 @@ def test_lod_cache_tuple_parity_export_and_activity_inference(tmp_path: Path) ->
     )
     assert feat_tuple == feat_tp
 
-    # .lod.json.gz cache payload & Parquet extraction roundtrip + trim invalidation
     gz_from_pts = build_lod_cache_payload(track.points)
     gz_from_pq = build_lod_cache_from_parquet(pq_path)
     feat_cached = extract_lod_feature_from_cache(gz_from_pq, "medium")
     assert feat_cached == feat_tp
     assert extract_lod_feature_from_cache(gz_from_pts, "low") is not None
-    # Trim mismatch returns None so stale caches are never served
     assert extract_lod_feature_from_cache(gz_from_pq, "medium", trim_start_s=10.0) is None
-    # Corrupt bytes return None safely
     assert extract_lod_feature_from_cache(b"not-gzip", "medium") is None
 
-    # Export points query respects trim
     export_pts = query_stage_export_points(pq_path, trim_start_s=0.0, trim_end_s=100.0)
     assert len(export_pts) == 11
     assert export_pts[0][2] == pytest.approx(1000.0)
 
-    # RenderSpecV2 camera presets & bearing defaults + bounds
     default_spec = RenderSpecV2()
     assert default_spec.camera_preset == "flat"
     assert default_spec.camera_bearing_deg == 0.0
@@ -503,7 +482,6 @@ def test_lod_cache_tuple_parity_export_and_activity_inference(tmp_path: Path) ->
     with pytest.raises(ValueError):
         RenderSpecV2(camera_bearing_deg=200.0)
 
-    # Activity type inference across Strava sport types + GPX <type>
     assert len(VALID_ACTIVITY_TYPES) == 14
     assert infer_activity_type_from_strava("Ride", "Morning Spin") == "cycling"
     assert infer_activity_type_from_strava("Ride", "Strade Bianche Gravel") == "gravel_mtb"
@@ -538,7 +516,6 @@ def test_lod_cache_tuple_parity_export_and_activity_inference(tmp_path: Path) ->
 
 
 def test_infer_activity_type_word_boundary_and_sport_vs_name_handling() -> None:
-    # Substring false-positives must not trigger misclassifications
     for stage_name in (
         "Pacific Crest Trail",
         "Morning Training",
@@ -550,12 +527,10 @@ def test_infer_activity_type_word_boundary_and_sport_vs_name_handling() -> None:
         assert infer_activity_type_from_strava("", stage_name) == "cycling"
         assert infer_activity_type_from_strava(None, stage_name, fallback="hiking") == "hiking"
 
-    # Explicit sport_type takes priority over unrelated words in activity_name
     assert infer_activity_type_from_strava("Ride", "Train Station Loop") == "cycling"
     assert infer_activity_type_from_strava("Ride", "Mountain Bike Singletrack") == "gravel_mtb"
     assert infer_activity_type_from_strava("Run", "Pacific Crest Trail") == "trail_run"
 
-    # Name-based inference with clean token boundaries when sport_type is empty or generic
     assert infer_activity_type_from_strava("", "Morning Trail Run") == "trail_run"
     assert infer_activity_type_from_strava("", "Ridge Hike ridge_hike.gpx") == "hiking"
     assert infer_activity_type_from_strava("", "SUP Paddle Session") == "kayak"
@@ -590,7 +565,6 @@ def test_render_spec_v2_validates_stage_colors_hex_regex() -> None:
 
 
 def test_render_spec_v2_extended_bounds_and_backward_compatibility() -> None:
-    # Legacy persisted JSON without any new fields must validate with defaults
     legacy_payload = {
         "version": 2,
         "resolution": "1920x1080",
@@ -619,7 +593,6 @@ def test_render_spec_v2_extended_bounds_and_backward_compatibility() -> None:
     assert parsed.pause_on_photo is False
     assert parsed.statistics_panel.collision_avoidance is True
 
-    # Extended 180s duration & photo/zoom knobs
     extended = RenderSpecV2(
         duration_seconds=180.0,
         follow_zoom_mode="fixed",
@@ -695,7 +668,6 @@ def test_dbt_gold_incremental_stage_add_zero_row_edit_and_delete(tmp_path: Path)
     silver_dir = tmp_path / "silver"
     gold_dir = tmp_path / "gold"
 
-    # Initial build: stage-1 (climb + dwell) and stage-2 (climb)
     t1 = _build_climb_and_dwell_track(
         base_dt=datetime(2002, 7, 1, 8, 0, 0, tzinfo=UTC),
         lat0=0.120,
@@ -730,7 +702,6 @@ def test_dbt_gold_incremental_stage_add_zero_row_edit_and_delete(tmp_path: Path)
         assert c1 is not None and c1[0] == 1
         assert d1 is not None and d1[0] == 1
 
-    # Incremental run 2: add stage-3; stage-1 and stage-2 keep original _dbt_invocation_id
     t3 = _build_climb_and_dwell_track(
         base_dt=datetime(2002, 7, 3, 8, 0, 0, tzinfo=UTC),
         lat0=0.320,
@@ -761,7 +732,6 @@ def test_dbt_gold_incremental_stage_add_zero_row_edit_and_delete(tmp_path: Path)
         assert geo_cnt is not None and geo_cnt[0] == 3
         assert h3_cnt is not None and h3_cnt[0] == 3
 
-    # Incremental run 3: edit stage-1 so climbs and dwells drop to 0 (zero-row delta pruning)
     t1_flat = _build_climb_and_dwell_track(
         base_dt=datetime(2002, 7, 1, 8, 0, 0, tzinfo=UTC),
         lat0=0.120,
@@ -791,7 +761,6 @@ def test_dbt_gold_incremental_stage_add_zero_row_edit_and_delete(tmp_path: Path)
         assert d1_after is not None and d1_after[0] == 0
         assert climbs_stages is not None and climbs_stages[0] == 2
 
-    # Incremental run 4: delete stage-2 Silver Parquet -> purged from all 6 marts + rollups match
     (silver_dir / "stage-2.parquet").unlink()
     run_dbt_gold_build(silver_dir / "*.parquet", gold_dir, full_refresh=False)
     with duckdb.connect(str(duckdb_path), read_only=True) as con:

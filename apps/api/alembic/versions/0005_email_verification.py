@@ -1,9 +1,4 @@
-"""Add user email verification timestamp and verification token table.
-
-Revision ID: 0005_email_verification
-Revises: 0004_etl_chunks_ingest
-Create Date: 2026-11-18 21:30:00.000000
-"""
+"""Add user email verification timestamp and verification token table."""
 
 from __future__ import annotations
 

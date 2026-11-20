@@ -1,5 +1,23 @@
 # Activity Library — Product and Implementation Specification
 
+> Purpose: Specify the Activity Library product scope, contracts and acceptance criteria.
+> Audience: contributors, reviewers
+> Last reviewed: 2026-11-20
+
+Sections:
+
+- Provider-policy risk — deferred by the product owner
+- Confirmed decisions
+- Delivery contract
+- Domain and persistence contracts
+- Query and statistics contracts
+- Synchronization and lifecycle contracts
+- Acceptance and verification
+- Existing-system observations
+- Deferred details and explicit release gates
+- Evidence and constraints to resolve
+- Glossary
+
 Status: first-release scope approved for incremental implementation; implementation and verification in progress.
 Product name: provisional.
 
@@ -147,3 +165,7 @@ Implementation references: `apps/web/src/components/dashboard/AtlasView.tsx`, `a
 - Validate actual application limits and permissions rather than assuming a whole account can be imported immediately.
 
 Public references: https://www.statshunters.com/faq ; https://developers.strava.com/docs/rate-limits/ ; https://developers.strava.com/docs/reference/ ; https://developers.strava.com/ .
+
+## Glossary
+
+The Activity Library domain language (Activity Library, Historical Import, Library Activity, Atlas, Project-local Split) is defined in [GLOSSARY.md](../../GLOSSARY.md).

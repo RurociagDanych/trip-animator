@@ -45,11 +45,8 @@ class CustomExistsStore:
 class UnsupportedStore:
     """Store that does not implement any expected interface."""
 
-    pass
-
 
 def test_normalize_prefix_safety() -> None:
-    """Verify traversal attempts are rejected and leading slashes normalized."""
     assert _normalize_prefix("") == ""
     assert _normalize_prefix("/silver/stage") == "silver/stage"
     assert _normalize_prefix("silver/stage/") == "silver/stage/"
@@ -60,8 +57,6 @@ def test_normalize_prefix_safety() -> None:
 
 
 def test_list_objects_with_mtime_backends(tmp_path: Path) -> None:
-    """Test list_objects_with_mtime across Local, Fake, minimal, and unsupported stores."""
-    # 1. LocalObjectStore
     local_dir = tmp_path / "local_store"
     local_dir.mkdir()
     store = LocalObjectStore(local_dir)
@@ -75,7 +70,6 @@ def test_list_objects_with_mtime_backends(tmp_path: Path) -> None:
         assert isinstance(mt, datetime)
         assert mt.tzinfo == UTC
 
-    # 2. FakeObjectStore
     fake = FakeObjectStore()
     fake.put_bytes("outputs/vid1.mp4", b"video")
     fake.put_bytes("outputs/thumb1.jpg", b"thumb")
@@ -84,41 +78,33 @@ def test_list_objects_with_mtime_backends(tmp_path: Path) -> None:
     for mt in fake_mtimes.values():
         assert isinstance(mt, datetime)
 
-    # 3. MinimalKeysStore (no mtime support)
     min_store = MinimalKeysStore(["silver/a.parquet", "silver/b.parquet", "bronze/c.gpx"])
     min_mtimes = list_objects_with_mtime(min_store, prefix="silver/")
     assert min_mtimes == {"silver/a.parquet": None, "silver/b.parquet": None}
 
-    # 4. Unsupported store raises TypeError
     with pytest.raises(TypeError, match="Unsupported ObjectStore"):
         list_objects_with_mtime(UnsupportedStore(), prefix="")
 
 
 def test_object_exists_backends(tmp_path: Path, monkeypatch: Any) -> None:
-    """Test object_exists across Local, Fake, CustomExists, Minimal, and S3 stores."""
-    # 1. LocalObjectStore
     local_store = LocalObjectStore(tmp_path / "obj_store")
     local_store.put_bytes("test/file.txt", b"hello")
     assert object_exists(local_store, "test/file.txt")
     assert not object_exists(local_store, "test/missing.txt")
 
-    # 2. FakeObjectStore
     fake = FakeObjectStore()
     fake.put_bytes("data/file.csv", b"csv")
     assert object_exists(fake, "data/file.csv")
     assert not object_exists(fake, "data/missing.csv")
 
-    # 3. CustomExistsStore
     custom = CustomExistsStore({"item1", "item2"})
     assert object_exists(custom, "item1")
     assert not object_exists(custom, "item3")
 
-    # 4. MinimalKeysStore fallback
     min_store = MinimalKeysStore(["a/b/c"])
     assert object_exists(min_store, "a/b/c")
     assert not object_exists(min_store, "a/b/missing")
 
-    # 5. S3ObjectStore mock with ClientError
     class MockS3Client:
         def head_object(self, Bucket: str, Key: str) -> dict[str, Any]:
             if Key == "s3/found.mp4":
@@ -148,7 +134,6 @@ def test_object_exists_backends(tmp_path: Path, monkeypatch: Any) -> None:
     with pytest.raises(ClientError):
         object_exists(s3_store, "s3/server_error.mp4")
 
-    # 6. Unsafe keys raise ValueError
     with pytest.raises(ValueError, match="Unsafe object prefix"):
         object_exists(local_store, "../escape")
 

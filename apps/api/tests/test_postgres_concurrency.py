@@ -101,7 +101,6 @@ def _fake_public_getaddrinfo(
 
 @pytest.fixture
 def pg_temp_db_url(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
-    """Provision an isolated temporary PostgreSQL database for a single test."""
     base_url = _base_postgres_url()
     admin_psycopg_url = _to_psycopg_url(base_url)
     temp_db_name = f"trip_api_test_{uuid.uuid4().hex[:12]}"
@@ -388,11 +387,9 @@ def test_postgres_optimistic_concurrency_revision_409_conflict(pg_app_factory: A
     proj_id = created.json()["id"]
     assert created.json()["revision"] == 1
 
-    # Both clients observe revision 1 before writing.
     assert client_a.get(f"/api/v1/projects/{proj_id}").json()["revision"] == 1
     assert client_b.get(f"/api/v1/projects/{proj_id}").json()["revision"] == 1
 
-    # First writer wins and advances revision to 2.
     winner = client_a.patch(
         f"/api/v1/projects/{proj_id}",
         json={"revision": 1, "title": "Winner Title"},
@@ -402,7 +399,6 @@ def test_postgres_optimistic_concurrency_revision_409_conflict(pg_app_factory: A
     assert winner.json()["revision"] == 2
     assert winner.json()["title"] == "Winner Title"
 
-    # Second writer using stale revision 1 fails with 409 Conflict.
     stale = client_b.patch(
         f"/api/v1/projects/{proj_id}",
         json={"revision": 1, "title": "Stale Overwrite"},
@@ -495,7 +491,6 @@ def test_postgres_concurrent_render_idempotency_and_project_delete_audit_set_nul
     assert all(code == 202 for code, _ in render_results)
     assert len({jid for _, jid in render_results}) == 1
 
-    # Deleting project removes stages/render_jobs via ON DELETE CASCADE and keeps audit_events
     del_resp = client.delete(
         f"/api/v1/projects/{proj_id}",
         headers={"X-CSRF-Token": csrf},

@@ -1268,7 +1268,6 @@ export function TripStageCanvas({
 
   const is3dActive = is3dCameraActive(spec);
 
-  // Initialize MapLibre + Deck.gl when WebGL is available (layout phase so camera/overlay commit runs on mount)
   useLayoutEffect(() => {
     const container = mapContainerRef.current;
     if (!container || !webglAvailable) {
@@ -1363,7 +1362,6 @@ export function TripStageCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [webglAvailable, renderMode]);
 
-  // Switch OpenFreeMap style dynamically without recreating map instance
   useEffect(() => {
     const map = mapRef.current;
     if (!map || loadedStyleRef.current === spec.map_style) {
@@ -1375,7 +1373,6 @@ export function TripStageCanvas({
     });
   }, [spec.map_style]);
 
-  // Sync 3D building extrusions, DEM terrain exaggeration, & horizon sky when 3D mode changes
   useEffect(() => {
     const map = mapRef.current;
     if (!map) {
@@ -1384,7 +1381,6 @@ export function TripStageCanvas({
     sync3dBuildingsAndSky(map, is3dActive, spec.terrain_exaggeration, spec.map_style);
   }, [is3dActive, spec.terrain_exaggeration, spec.map_style]);
 
-  // Interactive click-to-pin handler on MapLibre
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !pinModeActive || !onMapPinClick) {
@@ -1399,7 +1395,6 @@ export function TripStageCanvas({
     };
   }, [pinModeActive, onMapPinClick, webglAvailable]);
 
-  // Update Deck.gl layers and MapLibre camera synchronously in commit phase
   useLayoutEffect(() => {
     const map = mapRef.current;
     const overlay = overlayRef.current;
@@ -1647,7 +1642,6 @@ export function TripStageCanvas({
     viewportSize.height,
   ]);
 
-  // Resize MapLibre whenever container or exactSize changes
   useEffect(() => {
     const map = mapRef.current;
     const container = mapContainerRef.current;
@@ -1686,10 +1680,10 @@ export function TripStageCanvas({
       waitForFrameSettle: async (cameraChanged = true) => {
         const map = mapRef.current;
         if (!map) {
+          // Await 1 rAF so useLayoutEffect's jumpTo/fitBounds commits and MapLibre's _render() updates _inViewTiles
           await awaitNextAnimationFrames(1);
           return;
         }
-        // Await 1 rAF so useLayoutEffect's jumpTo/fitBounds commits and MapLibre's _render() updates _inViewTiles
         await awaitNextAnimationFrames(1);
         const tilesCached =
           typeof map.loaded === "function" &&
@@ -1784,7 +1778,6 @@ export function TripStageCanvas({
         />
       )}
 
-      {/* Interactive Pin Mode Banner */}
       {pinModeActive ? (
         <div
           data-testid="pin-mode-banner"
@@ -1805,7 +1798,6 @@ export function TripStageCanvas({
         </div>
       ) : null}
 
-      {/* Projected crisp icons for overnight stops, climb summits, photo pins, and active stage activity marker */}
       {webglAvailable &&
       (projectedStops.length > 0 ||
         layout.climbCallouts.length > 0 ||
@@ -1925,7 +1917,6 @@ export function TripStageCanvas({
         </div>
       ) : null}
 
-      {/* Incremental Geometry Loading / Error UX */}
       {geometryStatus && (geometryStatus.pendingCount > 0 || geometryStatus.errorCount > 0) ? (
         <div className="absolute top-3 left-3 z-30 flex flex-col gap-1.5">
           {geometryStatus.pendingCount > 0 ? (
@@ -1965,7 +1956,6 @@ export function TripStageCanvas({
         </div>
       ) : null}
 
-      {/* Crisp HTML/SVG Statistics HUD */}
       <StatisticsHud
         config={spec.statistics_panel}
         units={spec.units}
@@ -1975,7 +1965,6 @@ export function TripStageCanvas({
         onMeasuredUnscaledSize={renderMode === "interactive" ? setMeasuredHudSize : undefined}
       />
 
-      {/* Burned-in / Interactive Elevation Profile Overlay */}
       {spec.elevation_chart_overlay && miniElevation && layout.elevation ? (
         <div
           data-testid="canvas-elevation-overlay"
@@ -2043,7 +2032,6 @@ export function TripStageCanvas({
         </div>
       ) : null}
 
-      {/* Color-by Micro-Legend */}
       {spec.color_by !== "stage" &&
       evaluated.colorLegendStops &&
       evaluated.colorLegendStops.length > 0 &&
@@ -2075,7 +2063,6 @@ export function TripStageCanvas({
         </div>
       ) : null}
 
-      {/* Non-colliding Active Photo Stop Card (corner | polaroid + leader | cinematic Ken Burns) */}
       {activePhoto && layout.photoCard && activePhoto.opacity > 0.01 && activePhoto.photo.src ? (() => {
         const cardStyle = spec.photo_card_style ?? "corner";
         const cardRect = layout.photoCard.rect;
@@ -2159,7 +2146,6 @@ export function TripStageCanvas({
         );
       })() : null}
 
-      {/* Stage Chapter Card (lower-third slate on stage/day entry) */}
       {hasActiveChapterCard && evaluated.chapterCard && layout.chapterCard ? (
         <div
           data-testid="chapter-card"
@@ -2191,7 +2177,6 @@ export function TripStageCanvas({
         </div>
       ) : null}
 
-      {/* Trip Finale Poster Card */}
       {hasActiveFinalePoster && layout.finalePoster ? (() => {
         const summaryDistance =
           totalStats?.distanceM ??
@@ -2251,7 +2236,6 @@ export function TripStageCanvas({
         );
       })() : null}
 
-      {/* Optional 5s Preview Watermark */}
       {isPreview || spec.is_preview ? (
         <div
           data-testid="preview-watermark"
@@ -2261,7 +2245,6 @@ export function TripStageCanvas({
         </div>
       ) : null}
 
-      {/* Interactive mode subtle aspect badge */}
       {renderMode === "interactive" && !isPreview && !spec.is_preview ? (
         <div className="pointer-events-none absolute right-3 bottom-3 z-10 flex items-center gap-1.5 rounded border border-border/80 bg-canvas/80 px-2 py-0.5 text-[10px] text-ink-muted backdrop-blur-sm">
           <span className="tabular-telemetry">{spec.resolution}</span>

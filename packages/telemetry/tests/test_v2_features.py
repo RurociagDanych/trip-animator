@@ -81,7 +81,6 @@ def _fit_crc(data: bytes) -> int:
 
 
 def _build_minimal_fit_bytes(points: list[tuple[float, float, float, datetime, int]]) -> bytes:
-    """Construct a valid binary FIT file (file_id + sport + record messages) with CRC16."""
     fit_epoch = datetime(1989, 12, 31, 0, 0, 0, tzinfo=UTC)
     deg_to_semi = float(1 << 31) / 180.0
     body = bytearray()
@@ -92,10 +91,8 @@ def _build_minimal_fit_bytes(points: list[tuple[float, float, float, datetime, i
 
     # Local msg 1: sport (global 12) -> sport=0(enum,1B), sub_sport=1(enum,1B)
     body += bytes([0x41, 0x00, 0x00, 12, 0, 2, 0, 1, 0, 1, 1, 0])
-    body += bytes([0x01]) + struct.pack("<BB", 2, 46)  # cycling (2), gravel_cycling (46)
+    body += bytes([0x01]) + struct.pack("<BB", 2, 46)
 
-    # Local msg 2: record (global 20)
-    # timestamp(253,4B uint32), lat(0,4B sint32), lon(1,4B sint32), alt(2,2B uint16), hr(3,1B uint8)
     body += bytes(
         [
             0x42,
@@ -140,7 +137,7 @@ def _encode_rgb_png(rgb_rows: list[list[tuple[int, int, int]]]) -> bytes:
     width = len(rgb_rows[0])
     raw = bytearray()
     for row in rgb_rows:
-        raw.append(0)  # filter type 0
+        raw.append(0)
         for r, g, b in row:
             raw.extend((r, g, b))
 
@@ -177,13 +174,11 @@ def test_render_spec_v2_new_fields_and_keyframe_validation() -> None:
     assert spec.color_by == "grade"
     assert spec.statistics_panel.enabled is True
 
-    # New HUD metrics validate cleanly
     spec_hud = RenderSpecV2(
         statistics_panel={"metrics": ["grade", "hr", "power", "vam"]}  # type: ignore[arg-type]
     )
     assert spec_hud.statistics_panel.metrics == ["grade", "hr", "power", "vam"]
 
-    # Non-finite floats rejected
     with pytest.raises(ValueError):
         CameraKeyframe(progress=0.5, pitch_deg=float("nan"))
     with pytest.raises(ValueError):
@@ -191,7 +186,6 @@ def test_render_spec_v2_new_fields_and_keyframe_validation() -> None:
 
 
 def test_stage_camera_override_and_climb_callout_duration_validation() -> None:
-    # Mode defaults: street -> 15.8 / 0.2, close -> 13.8 / 0.7, auto -> None / 1.0
     street_mode: StageFocusMode = "street"
     street = StageCameraOverride(focus_mode=street_mode)
     assert street.target_zoom == pytest.approx(15.8)
@@ -230,7 +224,6 @@ def test_stage_camera_override_and_climb_callout_duration_validation() -> None:
     assert auto.target_zoom is None
     assert auto.speed_multiplier == pytest.approx(1.0)
 
-    # Bounds and finiteness checks for StageCameraOverride
     for bad_zoom in (2.9, 18.1, float("nan"), float("inf")):
         with pytest.raises(ValueError):
             StageCameraOverride(focus_mode="custom", target_zoom=bad_zoom)
@@ -241,7 +234,6 @@ def test_stage_camera_override_and_climb_callout_duration_validation() -> None:
         with pytest.raises(ValueError):
             StageCameraOverride(focus_mode="custom", transition_margin=bad_margin)
 
-    # RenderSpecV2 defaults, stage_camera_overrides, and climb_callout_duration_s bounds
     default_spec = RenderSpecV2()
     assert default_spec.stage_camera_overrides == {}
     assert default_spec.climb_callout_duration_s == pytest.approx(4.0)
@@ -345,7 +337,6 @@ def test_fit_tcx_and_multitrack_gpx_parsers() -> None:
 def test_signal_cleaning_tiny_track_invariant_teleports_and_enu_rdp(tmp_path: Path) -> None:
     t0 = datetime(2001, 7, 1, 8, 0, 0, tzinfo=UTC)
 
-    # Tiny track (< 15 points) keeps exact raw elevation gain
     tiny_pts = [
         TrackPoint(lat=0.1200, lon=0.3400, elev_m=1000.0, ts_utc=t0),
         TrackPoint(lat=0.12025, lon=0.5405, elev_m=1001.5, ts_utc=t0 + timedelta(seconds=10)),
@@ -360,7 +351,6 @@ def test_signal_cleaning_tiny_track_invariant_teleports_and_enu_rdp(tmp_path: Pa
     assert tiny_sum.etl_version == CURRENT_ETL_VERSION
     assert "elev_raw_m" in tiny_df.columns
 
-    # >= 15 points: removes GPS teleport + smooths 1m jitter + removes 1-pt spike (keeps elev_raw_m)
     noisy_pts: list[TrackPoint] = []
     for i in range(30):
         jitter = 1.2 if (i % 2 == 0) else -1.2
@@ -383,8 +373,8 @@ def test_signal_cleaning_tiny_track_invariant_teleports_and_enu_rdp(tmp_path: Pa
         points=noisy_pts, point_count=30, segment_count=1, has_timestamps=True, has_elevation=True
     )
     clean_df, clean_sum = build_silver_dataframe(noisy_track, trip_id="t", stage_id="s-clean")
-    assert clean_sum.point_count == 29  # teleport dropped
-    assert clean_sum.elevation_gain_m < 5.0  # <3m jitter + 1-pt spike eliminated
+    assert clean_sum.point_count == 29
+    assert clean_sum.elevation_gain_m < 5.0
     assert max(clean_df.get_column("elev_raw_m").to_list()) == pytest.approx(1198.8)
 
     pq_path = write_silver_parquet(clean_df, tmp_path / "clean.parquet")
@@ -432,7 +422,6 @@ def test_analytics_climbs_splits_dwells_peaks_geo_and_color_bins(tmp_path: Path)
                 watts=290,
             )
         )
-    # 10 stationary points (5 minutes dwell at summit cafe)
     for j in range(1, 11):
         pts.append(
             TrackPoint(
@@ -464,14 +453,12 @@ def test_analytics_climbs_splits_dwells_peaks_geo_and_color_bins(tmp_path: Path)
     assert "Veneto" in bundle.geo_context.regions
     assert "Passo Giau" in bundle.geo_context.passes
 
-    # Events sidecar roundtrip + trim mismatch invalidation
     events_path = tmp_path / "giau_events.parquet"
     build_stage_events_parquet(pq_path, events_path, stage_id="stage-giau", ref_dir=ref_dir)
     loaded = read_stage_events_parquet(events_path)
     assert loaded is not None and loaded.climbs[0].name == bundle.climbs[0].name
     assert read_stage_events_parquet(events_path, trim_start_s=10.0) is None
 
-    # color_by ribbon binning
     sample_dicts = [
         {"grade_pct": -1.0, "speed_mps": 10.0, "hr_bpm": 115, "watts": 120},
         {"grade_pct": 1.0, "speed_mps": 6.0, "hr_bpm": 130, "watts": 180},
@@ -479,7 +466,7 @@ def test_analytics_climbs_splits_dwells_peaks_geo_and_color_bins(tmp_path: Path)
         {"grade_pct": 8.0, "speed_mps": 3.5, "hr_bpm": 170, "watts": 320},
     ]
     segs = bin_track_color_segments(sample_dicts, "grade")
-    assert len(segs) == 3  # <0%, 0-3%, 6-9% (last 2 merged)
+    assert len(segs) == 3
     assert len(compute_color_legend_stops("grade")) == 6
 
 
@@ -505,7 +492,6 @@ def test_photo_alignment_clock_skew_and_pin_snap(tmp_path: Path) -> None:
     pq_path = write_silver_parquet(df, tmp_path / "st1.parquet")
     stages = [StageTrackInput(stage_id="st-1", stage_order=0, parquet_path=pq_path)]
 
-    # Camera clock is 2 hours ahead (+7200s): photo taken at t0+15m recorded as 10:15 UTC
     cam_photos = [
         PhotoAlignmentInput(
             id="p1",
@@ -546,7 +532,6 @@ def test_photo_alignment_clock_skew_and_pin_snap(tmp_path: Path) -> None:
     assert aligned[1].matched_progress == pytest.approx(2.0 / 3.0, abs=0.05)
     assert aligned[2].match_method == "manual"
 
-    # Pin snap by coordinate and by progress
     pin_coord = snap_photo_pin(stages, lat=0.1245, lon=0.3445)
     assert pin_coord.stage_id == "st-1"
     assert pin_coord.matched_progress == pytest.approx(0.5, abs=0.02)
@@ -566,11 +551,9 @@ def test_dem_terrarium_backfill_and_offline_fallback() -> None:
         has_timestamps=False,
         has_elevation=False,
     )
-    # Offline safe fallback returns track unchanged
     unchanged = backfill_track_elevation(no_ele)
     assert unchanged.has_elevation is False
 
-    # Synthetic Terrarium tile: 1500m -> 1500 + 32768 = 34268 -> R=133, G=220, B=0
     png_bytes = _encode_rgb_png([[(133, 220, 0)] * 256 for _ in range(256)])
     provider = TerrariumDemProvider(tile_fetcher=lambda _z, _x, _y: png_bytes)
     filled = backfill_track_elevation(no_ele, provider=provider)
@@ -667,7 +650,6 @@ def test_split_silver_dataframe_by_distance_elapsed_trimmed_and_untimed() -> Non
     )
     df, full_summary = build_silver_dataframe(track, trip_id="trip-1", stage_id="stage-orig")
 
-    # 1. Split by distance at midpoint
     mid_dist = full_summary.distance_m / 2.0
     p1_df, p1_sum, p2_df, p2_sum = split_silver_dataframe(
         df,
@@ -700,7 +682,6 @@ def test_split_silver_dataframe_by_distance_elapsed_trimmed_and_untimed() -> Non
     assert p2_sum.distance_m > 0.0
     assert p1_sum.distance_m + p2_sum.distance_m < full_summary.distance_m
 
-    # 2. Split by elapsed_s at 120s (rows 0,1,2 -> 3 pts; rows 3..7 -> 5 pts)
     e1_df, e1_sum, e2_df, e2_sum = split_silver_dataframe(
         df,
         trip_id="trip-1",
@@ -714,7 +695,6 @@ def test_split_silver_dataframe_by_distance_elapsed_trimmed_and_untimed() -> Non
     assert e2_sum.elapsed_seconds == pytest.approx(240.0)
     assert e2_df.get_column("ts_utc")[0] == t0 + timedelta(seconds=180)
 
-    # 3. Split trimmed DataFrame uses only active rows and resets is_trimmed=False
     trimmed_df, _ = build_silver_dataframe(
         track,
         trip_id="trip-1",
@@ -736,7 +716,6 @@ def test_split_silver_dataframe_by_distance_elapsed_trimmed_and_untimed() -> Non
     assert not any(t1_df.get_column("is_trimmed").to_list())
     assert not any(t2_df.get_column("is_trimmed").to_list())
 
-    # 4. Untimed track splits cleanly by distance, rejects elapsed split
     untimed_pts = [
         TrackPoint(lat=0.1000 + i * 0.001, lon=0.2000 + i * 0.001, elev_m=1000.0 + i * 5.0)
         for i in range(6)
@@ -775,7 +754,6 @@ def test_split_silver_dataframe_by_distance_elapsed_trimmed_and_untimed() -> Non
             split_elapsed_s=60.0,
         )
 
-    # 5. Validation errors: both/neither axis, <4 active pts, <2 pts on a side, non-finite
     with pytest.raises(ValueError):
         split_silver_dataframe(df, trip_id="t", part1_stage_id="p1", part2_stage_id="p2")
     with pytest.raises(ValueError):
@@ -820,7 +798,6 @@ def test_split_silver_dataframe_by_distance_elapsed_trimmed_and_untimed() -> Non
             split_distance_m=float("nan"),
         )
 
-    # 6. Timestamp jitter guarantees contiguous slicing (never interleaves rows across halves)
     jitter_pts = [
         TrackPoint(lat=0.1000, lon=0.2000, elev_m=1000.0, ts_utc=t0),
         TrackPoint(lat=0.1010, lon=0.2010, elev_m=1010.0, ts_utc=t0 + timedelta(seconds=60)),

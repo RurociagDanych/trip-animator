@@ -178,7 +178,6 @@ export function StoryTrackStrip({
         }}
         className="relative h-7 w-full cursor-pointer overflow-hidden rounded border border-border bg-canvas/85 select-none"
       >
-        {/* Stage proportional blocks */}
         {stageBlocks.map(({ stage, start, width }) => {
           const isSelected = selectedStageId === stage.id;
           return (
@@ -206,7 +205,6 @@ export function StoryTrackStrip({
           );
         })}
 
-        {/* Photo pins */}
         {matchedPhotos.map((photo) => {
           if (photo.matchedProgress === null) return null;
           return (
@@ -227,7 +225,6 @@ export function StoryTrackStrip({
           );
         })}
 
-        {/* Camera keyframe cue markers */}
         {cameraKeyframes.map((kf, idx) => {
           const isSelected = selectedIdx === idx;
           return (
@@ -275,7 +272,6 @@ export function StoryTrackStrip({
           );
         })}
 
-        {/* Synchronized Playhead */}
         <div
           className="pointer-events-none absolute top-0 bottom-0 z-30 w-0.5 bg-amber-accent"
           style={{ left: `${clamped * 100}%` }}

@@ -153,7 +153,6 @@ def test_strava_oauth_pkce_aead_activities_import_and_webhook(
     client, csrf = harness.login_client("strava@example.com")
     other_client, _ = harness.login_client("other@example.com")
 
-    # 1. Connect returns PKCE S256 authorize URL + state
     conn_resp = client.get("/api/v1/strava/connect")
     assert conn_resp.status_code == 200
     auth_url = conn_resp.json()["authorize_url"]
@@ -163,21 +162,17 @@ def test_strava_oauth_pkce_aead_activities_import_and_webhook(
     assert len(qs["code_challenge"][0]) >= 43
     assert qs["state"] == [state]
 
-    # 2. Other user cannot hijack callback with Alice's state
     hijack = other_client.get(f"/api/v1/strava/callback?code=abc&state={state}")
     assert hijack.status_code == 400
 
-    # 3. Valid callback exchanges PKCE verifier and stores AEAD-encrypted tokens
     cb = client.get(f"/api/v1/strava/callback?code=auth-code-123&state={state}")
     assert cb.status_code == 200, cb.text
     assert cb.json()["connected"] is True
     assert cb.json()["athlete_id"] == "987654321"
 
-    # Replaying the same state must fail (single-use)
     replay = client.get(f"/api/v1/strava/callback?code=auth-code-123&state={state}")
     assert replay.status_code == 400
 
-    # Verify DB stores AEAD ciphertext, not plaintext
     with harness.session_factory() as db:
         row = db.scalar(select(OAuthConnection).where(OAuthConnection.user_id == user.id))
         assert row is not None
@@ -191,7 +186,6 @@ def test_strava_oauth_pkce_aead_activities_import_and_webhook(
             == "strava-access-secret-111"
         )
 
-    # Verify PKCE challenge matches verifier sent to Strava
     token_req = next(r for r in captured_requests if r.url.path == "/oauth/token")
     sent_verifier = parse_qs(token_req.content.decode("utf-8"))["code_verifier"][0]
     expected_challenge = (
@@ -201,7 +195,6 @@ def test_strava_oauth_pkce_aead_activities_import_and_webhook(
     )
     assert expected_challenge == qs["code_challenge"][0]
 
-    # 4. List activities & import Strava streams into a project
     acts = client.get("/api/v1/strava/activities")
     assert acts.status_code == 200
     assert acts.json()[0]["id"] == 424242
@@ -225,7 +218,6 @@ def test_strava_oauth_pkce_aead_activities_import_and_webhook(
     assert stage["point_count"] == 3
     assert stage["elevation_gain_m"] == 90.0
 
-    # 5. Webhook verification & deauthorization cleanup
     bad_wh = client.get(
         "/api/v1/strava/webhook?hub.mode=subscribe&hub.challenge=xyz&hub.verify_token=wrong"
     )
@@ -237,7 +229,6 @@ def test_strava_oauth_pkce_aead_activities_import_and_webhook(
     assert ok_wh.status_code == 200
     assert ok_wh.json() == {"hub.challenge": "xyz"}
 
-    # Unauthenticated or wrong-token POST webhook must be rejected and preserve OAuthConnection
     unauth_wh = client.post(
         "/api/v1/strava/webhook",
         json={
@@ -276,7 +267,6 @@ def test_strava_oauth_pkce_aead_activities_import_and_webhook(
     with harness.session_factory() as db:
         assert db.scalar(select(OAuthConnection)) is None
 
-    # 6. Disconnect is idempotent
     disc = client.post("/api/v1/strava/disconnect", headers={"X-CSRF-Token": csrf})
     assert disc.status_code == 200
     assert disc.json()["connected"] is False
@@ -288,7 +278,6 @@ def test_strava_oauth_refresh_reconnect_error_paths_and_disconnect_resilience(
 ) -> None:
     monkeypatch.setattr(socket, "getaddrinfo", _fake_public_getaddrinfo)
 
-    # Unconfigured Strava -> 503 on /connect
     unconf = make_harness(strava_client_id="", strava_client_secret="")
     unconf.create_user("no-strava@example.com")
     c_unconf, _ = unconf.login_client("no-strava@example.com")
@@ -298,14 +287,11 @@ def test_strava_oauth_refresh_reconnect_error_paths_and_disconnect_resilience(
     user = h.create_user("refresh@example.com")
     client, csrf = h.login_client("refresh@example.com")
 
-    # Unconnected user cannot list activities -> 400
     assert client.get("/api/v1/strava/activities").status_code == 400
 
-    # Callback error & missing parameter validation
     assert client.get("/api/v1/strava/callback?error=access_denied").status_code == 400
     assert client.get("/api/v1/strava/callback?code=only-code").status_code == 400
 
-    # Upstream token exchange errors -> 502
     state1 = str(client.get("/api/v1/strava/connect").json()["state"])
     h.app.state.http_client_factory = lambda: httpx.AsyncClient(
         transport=httpx.MockTransport(lambda _req: httpx.Response(500)),
@@ -325,7 +311,6 @@ def test_strava_oauth_refresh_reconnect_error_paths_and_disconnect_resilience(
     )
     assert client.get(f"/api/v1/strava/callback?code=c&state={state2}").status_code == 502
 
-    # Seed expired connection and test refresh failure -> 502, then refresh success -> 200
     _seed_strava_connection(
         h,
         user.id,
@@ -364,7 +349,6 @@ def test_strava_oauth_refresh_reconnect_error_paths_and_disconnect_resilience(
     assert acts_ok.status_code == 200
     assert acts_ok.json() == []
 
-    # Verify refreshed encrypted tokens persisted
     with h.session_factory() as db:
         conn = db.scalar(select(OAuthConnection).where(OAuthConnection.user_id == user.id))
         assert conn is not None
@@ -374,7 +358,6 @@ def test_strava_oauth_refresh_reconnect_error_paths_and_disconnect_resilience(
             == "fresh-access-tok"
         )
 
-    # Re-connecting overwrites existing OAuthConnection row cleanly
     state3 = str(client.get("/api/v1/strava/connect").json()["state"])
     h.app.state.http_client_factory = lambda: httpx.AsyncClient(
         transport=httpx.MockTransport(
@@ -398,7 +381,6 @@ def test_strava_oauth_refresh_reconnect_error_paths_and_disconnect_resilience(
     assert reconn.status_code == 200
     assert reconn.json()["athlete_id"] == "666777"
 
-    # Disconnect tolerates upstream deauthorize failure and still clears local DB connection
     h.app.state.http_client_factory = lambda: httpx.AsyncClient(
         transport=httpx.MockTransport(refresh_ok_handler),
         follow_redirects=False,
@@ -417,10 +399,8 @@ def test_strava_ssrf_guard_blocks_metadata_and_redirects(
     user = h.create_user("ssrf@example.com")
     client, _ = h.login_client("ssrf@example.com")
 
-    # /connect validates URL and refuses metadata IP
     assert client.get("/api/v1/strava/connect").status_code == 502
 
-    # Also test redirect blocking during token exchange
     h2 = make_harness(strava_api_base_url="https://www.strava.com")
     monkeypatch.setattr(socket, "getaddrinfo", _fake_public_getaddrinfo)
     user = h2.create_user("redir@example.com")
@@ -450,7 +430,6 @@ def test_render_jobs_idempotency_sse_cancel_and_downloads(
         headers={"X-CSRF-Token": csrf},
     ).json()["id"]
 
-    # Empty project cannot be rendered
     empty_r = client.post(
         f"/api/v1/projects/{project_id}/renders",
         json={"resolution": "1280x720"},
@@ -458,14 +437,12 @@ def test_render_jobs_idempotency_sse_cancel_and_downloads(
     )
     assert empty_r.status_code == 422
 
-    # Upload a GPX stage
     stage_id = client.post(
         f"/api/v1/projects/{project_id}/gpx",
         files={"file": ("stage.gpx", sample_gpx, "application/gpx+xml")},
         headers={"X-CSRF-Token": csrf},
     ).json()["id"]
 
-    # Missing / invalid Idempotency-Key rejected
     assert (
         client.post(
             f"/api/v1/projects/{project_id}/renders",
@@ -483,7 +460,6 @@ def test_render_jobs_idempotency_sse_cancel_and_downloads(
         == 400
     )
 
-    # Foreign stage_colors key rejected
     assert (
         client.post(
             f"/api/v1/projects/{project_id}/renders",
@@ -509,7 +485,6 @@ def test_render_jobs_idempotency_sse_cancel_and_downloads(
     job_id = r1.json()["id"]
     assert r1.json()["status"] == "queued"
 
-    # List & Get render jobs
     listed = client.get(f"/api/v1/projects/{project_id}/renders")
     assert listed.status_code == 200
     assert [j["id"] for j in listed.json()] == [job_id]
@@ -518,7 +493,6 @@ def test_render_jobs_idempotency_sse_cancel_and_downloads(
     assert fetched.json()["id"] == job_id
     assert client.get(f"/api/v1/renders/{uuid.uuid4()}").status_code == 404
 
-    # Idempotent replay with identical payload returns same job
     r2 = client.post(
         f"/api/v1/projects/{project_id}/renders",
         json=spec_payload,
@@ -527,7 +501,6 @@ def test_render_jobs_idempotency_sse_cancel_and_downloads(
     assert r2.status_code == 202
     assert r2.json()["id"] == job_id
 
-    # Same Idempotency-Key with modified payload triggers 409 Conflict
     r_conflict = client.post(
         f"/api/v1/projects/{project_id}/renders",
         json={**spec_payload, "fps": 60},
@@ -535,17 +508,14 @@ def test_render_jobs_idempotency_sse_cancel_and_downloads(
     )
     assert r_conflict.status_code == 409
 
-    # Download before completion returns 409; missing thumbnail returns 404
     assert client.get(f"/api/v1/renders/{job_id}/download").status_code == 409
     assert client.get(f"/api/v1/renders/{job_id}/thumbnail").status_code == 404
 
-    # SSE stream on non-terminal job loops across polls cleanly
     with client.stream("GET", f"/api/v1/renders/{job_id}/events") as sse_queued:
         assert sse_queued.status_code == 200
         queued_body = "".join(sse_queued.iter_text())
         assert '"status": "queued"' in queued_body
 
-    # Cancel queued job; cancelling a terminal job returns 409
     c_resp = client.post(f"/api/v1/renders/{job_id}/cancel", headers={"X-CSRF-Token": csrf})
     assert c_resp.status_code == 200
     assert c_resp.json()["status"] == "cancelled"
@@ -554,7 +524,6 @@ def test_render_jobs_idempotency_sse_cancel_and_downloads(
         == 409
     )
 
-    # SSE stream emits cancelled terminal status and closes cleanly; unauthenticated rejected
     anon = TestClient(h.app)
     assert anon.get(f"/api/v1/renders/{job_id}/events").status_code == 401
     with client.stream("GET", f"/api/v1/renders/{job_id}/events") as sse:
@@ -563,7 +532,6 @@ def test_render_jobs_idempotency_sse_cancel_and_downloads(
         assert "event: status" in body
         assert '"status": "cancelled"' in body
 
-    # Simulate worker finishing another job and test download/thumbnail
     r3 = client.post(
         f"/api/v1/projects/{project_id}/renders",
         json=spec_payload,
@@ -591,7 +559,6 @@ def test_render_jobs_idempotency_sse_cancel_and_downloads(
     assert th.content == b"FAKE-WEBP-BYTES"
     assert th.headers["content-type"] == "image/webp"
 
-    # Rate limit on renders (max=9; 8 calls made so far -> 9th succeeds, 10th hits 429)
     r4 = client.post(
         f"/api/v1/projects/{project_id}/renders",
         json=spec_payload,
@@ -625,7 +592,6 @@ def test_render_sse_deleted_job_and_idempotency_integrity_race(
         headers={"X-CSRF-Token": csrf},
     )
 
-    # 1. SSE emits event: error if job disappears before poll executes
     from trip_api.routers import renders as renders_router
 
     job = client.post(
@@ -641,7 +607,6 @@ def test_render_sse_deleted_job_and_idempotency_integrity_race(
         # Only delete during SSE pre-check by inspecting call stack or deleting on second check
         return found
 
-    # Delete job inside a racing session wrapper on poll
     orig_sf = h.session_factory
     call_count = {"n": 0}
 
@@ -663,7 +628,6 @@ def test_render_sse_deleted_job_and_idempotency_integrity_race(
         assert "Render job not found" in err_text
     h.app.state.session_factory = orig_sf
 
-    # 2. Render creation IntegrityError race recovery (same payload -> 202; mismatch -> 409)
     from sqlalchemy.orm import Session as OrmSession
 
     orig_commit = OrmSession.commit
@@ -710,7 +674,6 @@ def test_render_sse_deleted_job_and_idempotency_integrity_race(
         assert row is not None
         row.idempotency_hash = "different" * 7
         db.commit()
-    # Force select to return None before commit by using fresh key with pre-seeded mismatch
     state["triggered"] = False
 
     def _racing_mismatch_commit(self: OrmSession) -> None:
@@ -748,7 +711,6 @@ def test_render_sse_deleted_job_and_idempotency_integrity_race(
 def test_strava_webhook_subscription_id_fail_closed_and_rate_limit(
     make_harness: HarnessFactory,
 ) -> None:
-    # 1. Fail-closed when neither verify_token nor subscription_id is configured
     unconfigured = make_harness(strava_verify_token="", strava_webhook_subscription_id=None)
     c_unconf = TestClient(unconfigured.app)
     assert (
@@ -763,7 +725,6 @@ def test_strava_webhook_subscription_id_fail_closed_and_rate_limit(
     )
     assert r_unconf.status_code == 403
 
-    # 2. Verify-token-only mode accepts header or query parameter aliases
     tok_only = make_harness(
         strava_verify_token="only-token-secret",
         strava_webhook_subscription_id=None,
@@ -797,7 +758,6 @@ def test_strava_webhook_subscription_id_fail_closed_and_rate_limit(
     _seed_strava_connection(sub_h, other_user.id, athlete_id="999888")
 
     c_sub = TestClient(sub_h.app)
-    # Missing subscription_id even with valid token -> 403 (req 1)
     assert (
         c_sub.post(
             "/api/v1/strava/webhook?verify_token=verify-secret",
@@ -810,7 +770,6 @@ def test_strava_webhook_subscription_id_fail_closed_and_rate_limit(
         ).status_code
         == 403
     )
-    # Boolean/wrong subscription_id -> 403 (req 2)
     assert (
         c_sub.post(
             "/api/v1/strava/webhook?verify_token=verify-secret",
@@ -824,7 +783,6 @@ def test_strava_webhook_subscription_id_fail_closed_and_rate_limit(
         ).status_code
         == 403
     )
-    # Matching subscription_id with MISSING token -> 403 (req 3)
     assert (
         c_sub.post(
             "/api/v1/strava/webhook",
@@ -838,7 +796,6 @@ def test_strava_webhook_subscription_id_fail_closed_and_rate_limit(
         ).status_code
         == 403
     )
-    # Matching subscription_id with wrong token -> 403 (req 4)
     assert (
         c_sub.post(
             "/api/v1/strava/webhook?verify_token=wrong",
@@ -852,7 +809,6 @@ def test_strava_webhook_subscription_id_fail_closed_and_rate_limit(
         ).status_code
         == 403
     )
-    # Non-deauth event with matching subscription_id + valid token preserves connections (req 5)
     assert (
         c_sub.post(
             "/api/v1/strava/webhook?verify_token=verify-secret",
@@ -866,7 +822,6 @@ def test_strava_webhook_subscription_id_fail_closed_and_rate_limit(
         ).status_code
         == 200
     )
-    # Boolean owner_id ignored safely with valid token (req 6)
     assert (
         c_sub.post(
             "/api/v1/strava/webhook?verify_token=verify-secret",
@@ -880,7 +835,6 @@ def test_strava_webhook_subscription_id_fail_closed_and_rate_limit(
         ).status_code
         == 200
     )
-    # Matching subscription_id + valid token deauthorizes athlete 444555 only (req 7)
     ok_resp = c_sub.post(
         "/api/v1/strava/webhook",
         headers={"X-Strava-Verify-Token": "verify-secret"},
@@ -900,7 +854,6 @@ def test_strava_webhook_subscription_id_fail_closed_and_rate_limit(
             select(AuditEvent).where(AuditEvent.event_type == "strava.webhook_deauthorize")
         )
 
-    # Matching subscription_id + valid token succeeds on req 8, then 9th hits rate limit -> 429
     assert (
         c_sub.post(
             "/api/v1/strava/webhook?verify_token=verify-secret",
@@ -915,7 +868,6 @@ def test_strava_webhook_subscription_id_fail_closed_and_rate_limit(
     assert limited.status_code == 429
     assert "retry-after" in limited.headers
 
-    # 4. Subscription-ID-only mode (strava_verify_token=""): matching subscription_id succeeds
     sub_only = make_harness(
         strava_verify_token="",
         strava_webhook_subscription_id=556677,
@@ -961,7 +913,6 @@ def test_strava_batch_25_items_rate_limit_and_partial_404_429_handling(
             if aid == 902:
                 return httpx.Response(429, headers={"Retry-After": "15"})
             if aid == 903:
-                # Non-GPS activity streams -> parse_strava_streams ValueError -> 422
                 return httpx.Response(200, json={"time": {"data": [0, 60]}})
             return httpx.Response(
                 200,
@@ -1002,7 +953,6 @@ def test_strava_batch_25_items_rate_limit_and_partial_404_429_handling(
         "/api/v1/projects", json={"title": "Batch 25"}, headers={"X-CSRF-Token": csrf25}
     ).json()["id"]
 
-    # Validation rejects 0 items and 26 items without deducting rate limit tokens
     assert (
         c25.post(
             f"/api/v1/projects/{p25}/import-strava/batch",
@@ -1020,7 +970,6 @@ def test_strava_batch_25_items_rate_limit_and_partial_404_429_handling(
         == 422
     )
 
-    # Full 25-item batch consumes exactly 25 tokens (next single import -> 429)
     full_batch = c25.post(
         f"/api/v1/projects/{p25}/import-strava/batch",
         json={"items": [{"activity_id": i} for i in range(1, 26)]},
@@ -1037,7 +986,6 @@ def test_strava_batch_25_items_rate_limit_and_partial_404_429_handling(
     )
     assert after_25.status_code == 429
 
-    # Partial 404, 429 (both activity & streams), malformed JSON, and missing latlng handling
     user_partial = h.create_user("partial@example.com")
     _seed_strava_connection(h, user_partial.id, athlete_id="251")
     cp, csrfp = h.login_client("partial@example.com")
@@ -1050,11 +998,11 @@ def test_strava_batch_25_items_rate_limit_and_partial_404_429_handling(
         json={
             "items": [
                 {"activity_id": 100},
-                {"activity_id": 901},  # 404 activity
-                {"activity_id": 902},  # 429 on streams
-                {"activity_id": 903},  # 422 missing latlng
-                {"activity_id": 904},  # 429 on activity
-                {"activity_id": 905},  # 502 non-dict payload
+                {"activity_id": 901},
+                {"activity_id": 902},
+                {"activity_id": 903},
+                {"activity_id": 904},
+                {"activity_id": 905},
                 {"activity_id": 101},
             ]
         },
@@ -1074,7 +1022,6 @@ def test_strava_batch_25_items_rate_limit_and_partial_404_429_handling(
         {"activity_id": 905, "detail": "Malformed Strava upstream payload"},
     ]
 
-    # Batch where all items fail records no stage.strava_batch_imported audit event
     all_fail_proj = cp.post(
         "/api/v1/projects", json={"title": "All Fail"}, headers={"X-CSRF-Token": csrfp}
     ).json()["id"]
@@ -1135,7 +1082,6 @@ def test_strava_batch_import_consumes_proportional_rate_limit_tokens(
         headers={"X-CSRF-Token": csrf},
     ).json()["id"]
 
-    # 3 items consumes 3 of 5 tokens
     r1 = client.post(
         f"/api/v1/projects/{proj_id}/import-strava/batch",
         json={"items": [{"activity_id": 1}, {"activity_id": 2}, {"activity_id": 3}]},
@@ -1144,7 +1090,6 @@ def test_strava_batch_import_consumes_proportional_rate_limit_tokens(
     assert r1.status_code == 200
     assert len(r1.json()["imported"]) == 3
 
-    # Requesting 3 more (3 + 3 = 6 > 5) must fail with 429
     r2 = client.post(
         f"/api/v1/projects/{proj_id}/import-strava/batch",
         json={"items": [{"activity_id": 4}, {"activity_id": 5}, {"activity_id": 6}]},
@@ -1152,7 +1097,6 @@ def test_strava_batch_import_consumes_proportional_rate_limit_tokens(
     )
     assert r2.status_code == 429
 
-    # Requesting remaining 2 (3 + 2 = 5 <= 5) succeeds
     r3 = client.post(
         f"/api/v1/projects/{proj_id}/import-strava/batch",
         json={"items": [{"activity_id": 4}, {"activity_id": 5}]},
@@ -1161,7 +1105,6 @@ def test_strava_batch_import_consumes_proportional_rate_limit_tokens(
     assert r3.status_code == 200
     assert len(r3.json()["imported"]) == 2
 
-    # Next single import (5 + 1 = 6 > 5) hits 429
     r4 = client.post(
         f"/api/v1/projects/{proj_id}/import-strava",
         json={"activity_id": 6},
@@ -1169,7 +1112,6 @@ def test_strava_batch_import_consumes_proportional_rate_limit_tokens(
     )
     assert r4.status_code == 429
 
-    # A single batch larger than the entire bucket limit fails immediately on fresh bucket
     user2 = h.create_user("batchrl2@example.com")
     _seed_strava_connection(h, user2.id, athlete_id="334")
     c2, csrf2 = h.login_client("batchrl2@example.com")
@@ -1279,7 +1221,6 @@ def test_strava_epoch_parsing_rejects_unicode_digits_and_negative_iso_dates(
         "2001-06-15T14:00:00+02:00", end_of_day=False
     )
 
-    # End-to-end HTTP check against GET /api/v1/strava/activities
     monkeypatch.setattr(socket, "getaddrinfo", _fake_public_getaddrinfo)
     user = harness.create_user("epoch@example.com")
     _seed_strava_connection(harness, user.id, athlete_id="777")
@@ -1338,27 +1279,23 @@ def test_render_download_streaming_ranges_and_s3_404(
         )
         db.commit()
 
-    # Full download streams with Content-Length & Accept-Ranges
     full = client.get(f"/api/v1/renders/{job_id}/download")
     assert full.status_code == 200
     assert full.content == mp4_bytes
     assert full.headers["accept-ranges"] == "bytes"
     assert full.headers["content-length"] == str(len(mp4_bytes))
 
-    # Closed range bytes=0-9
     r_0_9 = client.get(f"/api/v1/renders/{job_id}/download", headers={"Range": "bytes=0-9"})
     assert r_0_9.status_code == 206
     assert r_0_9.content == b"0123456789"
     assert r_0_9.headers["content-range"] == f"bytes 0-9/{len(mp4_bytes)}"
     assert r_0_9.headers["content-length"] == "10"
 
-    # Open-ended range bytes=10-
     r_10 = client.get(f"/api/v1/renders/{job_id}/download", headers={"Range": "bytes=10-"})
     assert r_10.status_code == 206
     assert r_10.content == mp4_bytes[10:]
     assert r_10.headers["content-range"] == f"bytes 10-{len(mp4_bytes) - 1}/{len(mp4_bytes)}"
 
-    # Suffix range bytes=-5
     r_suf = client.get(f"/api/v1/renders/{job_id}/download", headers={"Range": "bytes=-5"})
     assert r_suf.status_code == 206
     assert r_suf.content == mp4_bytes[-5:]
@@ -1366,13 +1303,11 @@ def test_render_download_streaming_ranges_and_s3_404(
         f"bytes {len(mp4_bytes) - 5}-{len(mp4_bytes) - 1}/{len(mp4_bytes)}"
     )
 
-    # Unsatisfiable ranges return 416
     for bad_hdr in ("bytes=999999-", "bytes=10-5", "bytes=-0"):
         bad_range = client.get(f"/api/v1/renders/{job_id}/download", headers={"Range": bad_hdr})
         assert bad_range.status_code == 416
         assert bad_range.headers["content-range"] == f"bytes */{len(mp4_bytes)}"
 
-    # S3ObjectStore missing object ClientError(NoSuchKey) maps cleanly to HTTP 404 (not 500)
     class MissingS3Client:
         def get_object(self, **_kwargs: Any) -> dict[str, Any]:
             raise ClientError({"Error": {"Code": "NoSuchKey", "Message": "Missing"}}, "GetObject")
@@ -1561,7 +1496,6 @@ def test_strava_import_status_and_alias(make_harness: HarnessFactory) -> None:
     other = h.create_user("status-other@example.com")
     client, csrf = h.login_client("status-user@example.com")
 
-    # Disconnected state works on both /import-status and /status alias
     for path in ("/api/v1/strava/import-status", "/api/v1/strava/status"):
         resp = client.get(path)
         assert resp.status_code == 200
@@ -1579,7 +1513,6 @@ def test_strava_import_status_and_alias(make_harness: HarnessFactory) -> None:
             "last_error": None,
         }
 
-    # Seed Strava connection, stages (Strava + non-Strava), and IngestJobs across statuses
     _seed_strava_connection(h, user.id, athlete_id="77001")
     _seed_strava_connection(h, other.id, athlete_id="88002")
 
@@ -1684,7 +1617,6 @@ def test_strava_import_status_and_alias(make_harness: HarnessFactory) -> None:
                     updated_at=now - timedelta(minutes=1),
                     payload_json={"source": "strava_bulk_import"},
                 ),
-                # Another athlete's job must not be counted
                 IngestJob(
                     provider="strava",
                     event_type="create",
@@ -1734,7 +1666,6 @@ def test_strava_import_all_pagination_dedup_gps_bola_and_autosync(
         headers={"X-CSRF-Token": other_csrf},
     ).json()["id"]
 
-    # BOLA check: specifying another user's project_id returns 404 before calling Strava
     upstream_calls: list[httpx.Request] = []
     h.app.state.http_client_factory = lambda: httpx.AsyncClient(
         transport=httpx.MockTransport(
@@ -1750,7 +1681,6 @@ def test_strava_import_all_pagination_dedup_gps_bola_and_autosync(
     assert bola_resp.status_code == 404
     assert upstream_calls == []
 
-    # Invalid date range -> 422
     bad_dates = client.post(
         "/api/v1/strava/import-all",
         json={"after": "2024-06-10", "before": "2024-06-01"},
@@ -1777,9 +1707,6 @@ def test_strava_import_all_pagination_dedup_gps_bola_and_autosync(
     with h.session_factory() as db:
         assert db.scalars(select(Project).where(Project.owner_user_id == user.id)).all() == []
 
-    # Seed an explicit project with an already-imported stage (activity 10001)
-    # plus a stage identified via numeric external_source_id (activity 10002)
-    # and an active running IngestJob (activity 10003)
     own_proj_id = client.post(
         "/api/v1/projects",
         json={"title": "Alpine Tour"},
@@ -1841,7 +1768,6 @@ def test_strava_import_all_pagination_dedup_gps_bola_and_autosync(
                 "name": f"Ride {act_id}",
                 "sport_type": "Ride",
                 "start_date": "2024-05-01T08:00:00Z",
-                # Make activity 10004 and 10005 indoor (no GPS)
                 "start_latlng": [] if act_id in (10004, 10005) else [46.0, 7.0],
             }
         )
@@ -1906,7 +1832,6 @@ def test_strava_import_all_pagination_dedup_gps_bola_and_autosync(
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()
-    # 103 scanned: 3 existing (10001, 10002, 10003), 3 no-gps (10004, 10005, 10102) -> 97 queued
     assert data["total_scanned"] == 103
     assert data["skipped_existing_count"] == 3
     assert data["skipped_no_gps_count"] == 3
@@ -1917,7 +1842,6 @@ def test_strava_import_all_pagination_dedup_gps_bola_and_autosync(
     assert data["project_title"] == "Strava Auto-Sync"
     assert data["project_id"] is not None
 
-    # Verify pagination params and after/before epochs
     assert len(page_queries) == 2
     assert page_queries[0]["page"] == "1"
     assert page_queries[0]["per_page"] == "100"
@@ -1925,7 +1849,6 @@ def test_strava_import_all_pagination_dedup_gps_bola_and_autosync(
     assert page_queries[1]["per_page"] == "3"
     assert int(page_queries[0]["after"]) < int(page_queries[0]["before"])
 
-    # Verify audit event was written
     with h.session_factory() as db:
         audit = db.scalar(
             select(AuditEvent)
@@ -1941,7 +1864,6 @@ def test_strava_import_all_pagination_dedup_gps_bola_and_autosync(
         assert audit.metadata_json["skipped_existing_count"] == 3
         assert audit.metadata_json["skipped_no_gps_count"] == 3
 
-    # Re-running with same parameters is idempotent (all 97 newly queued are now skipped)
     second = client.post(
         "/api/v1/strava/import-all",
         json={"max_activities": 103, "gps_only": True},
@@ -1953,7 +1875,6 @@ def test_strava_import_all_pagination_dedup_gps_bola_and_autosync(
     assert second.json()["skipped_no_gps_count"] == 3
     assert second.json()["project_title"] == "Strava Auto-Sync"
 
-    # Running with gps_only=False and explicit project_id queues the 3 indoor activities
     indoor_resp = client.post(
         "/api/v1/strava/import-all",
         json={"project_id": own_proj_id, "max_activities": 103, "gps_only": False},
@@ -1984,7 +1905,6 @@ def test_strava_import_all_rate_limit_and_ingest_processing(
         headers={"X-CSRF-Token": csrf},
     ).json()["id"]
 
-    # Page 1 returning 429 -> 429 response
     h.app.state.http_client_factory = lambda: httpx.AsyncClient(
         transport=httpx.MockTransport(lambda _req: httpx.Response(429)),
         follow_redirects=False,
@@ -1996,7 +1916,6 @@ def test_strava_import_all_rate_limit_and_ingest_processing(
     )
     assert rl_page1.status_code == 429
 
-    # Page 1 succeeds with 100 items, Page 2 returns 429 -> returns 200 with page 1 items queued
     page1_hundred = [
         {
             "id": 60000 + idx,
@@ -2030,13 +1949,11 @@ def test_strava_import_all_rate_limit_and_ingest_processing(
     assert partial_429_resp.json()["total_scanned"] == 100
     assert partial_429_resp.json()["queued_count"] == 100
 
-    # Clear those 100 queued jobs before testing rate-limit header stop + ingest worker
     with h.session_factory() as db:
         for row in db.scalars(select(IngestJob)).all():
             db.delete(row)
         db.commit()
 
-    # Rate-limit usage header >= 90% stops pagination cleanly after page 1
     page1_two_items = [
         {
             "id": 70001,
@@ -2076,8 +1993,6 @@ def test_strava_import_all_rate_limit_and_ingest_processing(
     assert queued_resp.status_code == 200, queued_resp.text
     assert queued_resp.json()["queued_activity_ids"] == [70001, 70002]
 
-    # Pre-seed activity 70002 as already imported into another owned project to verify
-    # bulk import job skips upstream Strava HTTP completely for 70002
     other_own_proj_id = client.post(
         "/api/v1/projects",
         json={"title": "Already Imported Trip"},
@@ -2142,16 +2057,13 @@ def test_strava_import_all_rate_limit_and_ingest_processing(
     assert stats["claimed"] == 2
     assert stats["succeeded"] == 2
     assert stats["failed"] == 0
-    # Activity 70002 must NOT have triggered any Strava HTTP requests
     assert fetched_paths == ["/api/v3/activities/70001", "/api/v3/activities/70001/streams"]
 
-    # Verify activity 70001 landed in explicit_proj_id ("Dolomites Week")
     with h.session_factory() as db:
         stage_70001 = db.scalar(select(Stage).where(Stage.strava_activity_id == 70001))
         assert stage_70001 is not None
         assert str(stage_70001.project_id) == explicit_proj_id
 
-        # Verify _resolve_target_project_for_job rejects foreign project_id and invalid UUIDs
         other_proj = Project(owner_user_id=other.id, title="Foreign Trip", settings_json={})
         db.add(other_proj)
         db.commit()
@@ -2227,7 +2139,6 @@ def test_strava_import_rejects_duplicate_activity_in_single_and_batch(
         headers={"X-CSRF-Token": csrf},
     ).json()["id"]
 
-    # First single import succeeds
     first = client.post(
         f"/api/v1/projects/{proj_a}/import-strava",
         json={"activity_id": 5001, "day_index": 1},
@@ -2236,7 +2147,6 @@ def test_strava_import_rejects_duplicate_activity_in_single_and_batch(
     assert first.status_code == 201, first.text
     calls_after_first = upstream_calls
 
-    # Duplicate single import into the same project returns 409 before any upstream Strava call
     dup = client.post(
         f"/api/v1/projects/{proj_a}/import-strava",
         json={"activity_id": 5001, "day_index": 1},
@@ -2246,7 +2156,6 @@ def test_strava_import_rejects_duplicate_activity_in_single_and_batch(
     assert "already been imported" in dup.json()["detail"].lower()
     assert upstream_calls == calls_after_first
 
-    # Batch import with an already-imported ID (5001) and a duplicate within the batch (5002 x2)
     batch = client.post(
         f"/api/v1/projects/{proj_a}/import-strava/batch",
         json={
@@ -2267,11 +2176,9 @@ def test_strava_import_rejects_duplicate_activity_in_single_and_batch(
     assert batch_json["failed"][1]["activity_id"] == 5002
     assert "duplicate" in batch_json["failed"][1]["detail"].lower()
 
-    # Verify DB only has two Stage rows (5001 and 5002) for Project A
     proj_a_detail = client.get(f"/api/v1/projects/{proj_a}").json()
     assert [s["strava_activity_id"] for s in proj_a_detail["stages"]] == [5001, 5002]
 
-    # Importing the same Strava activity into a different project is still allowed
     other_proj = client.post(
         f"/api/v1/projects/{proj_b}/import-strava",
         json={"activity_id": 5001, "day_index": 1},

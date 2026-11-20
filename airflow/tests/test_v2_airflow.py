@@ -85,7 +85,6 @@ def test_incremental_dbt_gold_delta_cache_and_new_marts(
     assert run1["downloaded_count"] == 1
     assert run1["cached_count"] == 0
 
-    # Second run reuses cached Silver Parquet without re-downloading
     run2 = materialize_gold_marts(airflow_harness.store, gold_dir=airflow_harness.gold_dir)
     assert run2["downloaded_count"] == 0
     assert run2["cached_count"] == 1
@@ -123,7 +122,6 @@ def test_maintenance_audit_recognizes_sidecars_chunks_and_trimmed_points(
     proj = airflow_harness.create_project(user.id, "Audit V2")
     stage = airflow_harness.ingest_sample_stage(proj, name="Stage Sidecars")
 
-    # Write legitimate sidecars (.lod.json.gz, .chart.json.gz, _events.parquet) and active chunk
     airflow_harness.store.put_bytes(stage_lod_cache_key(proj.id, stage.id), b"lod")
     airflow_harness.store.put_bytes(stage_chart_cache_key(proj.id, stage.id), b"chart")
     airflow_harness.store.put_bytes(stage_events_cache_key(proj.id, stage.id), b"events")
@@ -166,7 +164,6 @@ def test_maintenance_audit_recognizes_sidecars_chunks_and_trimmed_points(
         assert object_exists(airflow_harness.store, stage_events_cache_key(proj.id, stage.id))
         assert object_exists(airflow_harness.store, active_chunk_key)
 
-    # Simulate trimmed stage: Parquet still has 3 rows, 1 is_trimmed=True, stage.point_count=2
     import pyarrow as pa  # type: ignore[import-untyped]
     import pyarrow.parquet as pq  # type: ignore[import-untyped]
 
@@ -290,7 +287,6 @@ def test_ingest_worker_webhook_queue_and_silver_replay(
         assert stage.etl_version == CURRENT_ETL_VERSION
         assert stage.bronze_sha256 is not None
 
-        # Ordinary webhook creates a Vault activity without creating a project stage.
         webhook_activity = db.scalar(
             select(VaultActivity).where(VaultActivity.strava_activity_id == 555003)
         )
@@ -298,7 +294,6 @@ def test_ingest_worker_webhook_queue_and_silver_replay(
         assert db.scalar(select(Stage).where(Stage.strava_activity_id == 555003)) is None
         assert db.scalar(select(Project).where(Project.title == "Strava Auto-Sync")) is None
 
-        # Test multi-day clustering helper for day + 2
         next_day_idx = cluster_activity_day_index(
             db,
             stage.project_id,
@@ -306,7 +301,6 @@ def test_ingest_worker_webhook_queue_and_silver_replay(
         )
         assert next_day_idx == 3
 
-        # Simulate legacy etl_version=1 stage & replay Bronze -> Silver
         stage.etl_version = 1
         stage.bronze_sha256 = None
         db.commit()
@@ -321,7 +315,6 @@ def test_ingest_worker_webhook_queue_and_silver_replay(
         assert stage.etl_version == CURRENT_ETL_VERSION
         assert stage.bronze_sha256 is not None
 
-        # Test delete webhook event removes stage and artifacts cleanly
         db.add(
             IngestJob(
                 provider="strava",
@@ -421,7 +414,6 @@ def test_materialize_gold_marts_seeds_existing_duckdb_from_s3_in_ephemeral_conta
     assert res1["silver_count"] == 1
     assert fake_client.gold_get_calls == 1
 
-    # Upload built Gold DB to S3 and run in a second fresh ephemeral dir without local target_db
     fake_client.objects["gold/trip_analytics.duckdb"] = (
         ephemeral_gold_1 / "trip_analytics.duckdb"
     ).read_bytes()

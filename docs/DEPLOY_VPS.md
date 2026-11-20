@@ -1,5 +1,17 @@
 # Manual VPS Deployment (GitHub Actions)
 
+> Purpose: Explain how to deploy to a VPS with the manual GitHub Actions workflow.
+> Audience: operators
+> Last reviewed: 2026-11-20
+
+Sections:
+
+- VPS Prerequisites
+- SSH Deploy Key Setup
+- GitHub Secrets and Variables
+- Workflow Inputs
+- Triggering a Deployment
+
 Trip Animator v2 includes a manual GitHub Actions workflow ([`.github/workflows/deploy-vps.yml`](../.github/workflows/deploy-vps.yml)) triggered via `workflow_dispatch`. It connects to a VPS over SSH, checks out the requested Git ref, builds Docker images sequentially (with optional BuildKit cache pruning for low-disk VPS hosts such as Mikr.us), starts the Compose stack with `infra/compose.yaml`, and verifies the health endpoint.
 
 ## VPS Prerequisites

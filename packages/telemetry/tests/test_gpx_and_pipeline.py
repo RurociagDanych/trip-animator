@@ -304,7 +304,6 @@ def test_parse_gpx_missing_timestamps_synthetic_fallback() -> None:
 def test_parse_gpx_mixed_backwards_duplicate_and_timezone_timestamps() -> None:
     assert _synthesize_uniform_timestamps([]) == []
 
-    # Mixed timestamps across multiple segments with synthetic fallback
     mixed_ts_gpx = b"""<?xml version="1.0"?>
 <gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1">
   <trk>
@@ -329,7 +328,6 @@ def test_parse_gpx_mixed_backwards_duplicate_and_timezone_timestamps() -> None:
     assert warn_codes["INVALID_TIMESTAMP"] == 1
     assert warn_codes["SYNTHETIC_TIMESTAMPS"] == 1
 
-    # Backwards & duplicate timestamps + duplicate coordinates
     backwards_gpx = b"""<?xml version="1.0"?>
 <gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1">
   <trk><trkseg>
@@ -350,7 +348,6 @@ def test_parse_gpx_mixed_backwards_duplicate_and_timezone_timestamps() -> None:
     assert all(s >= 0.0 for s in df_back.get_column("speed_mps").to_list())
     assert summary_back.moving_seconds >= 0.0
 
-    # Timezone offsets (+02:00, -04:00, and naive ISO-8601)
     tz_gpx = b"""<?xml version="1.0"?>
 <gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1">
   <trk><trkseg>
@@ -432,7 +429,6 @@ def test_parse_gpx_with_timeout_succeeds_and_enforces_deadline() -> None:
     with pytest.raises(GpxParseError, match="Malformed GPX XML"):
         parse_gpx_with_timeout(b"<gpx><unclosed>", timeout_seconds=10.0)
 
-    # Direct coverage of _subprocess_parse_worker success & failure paths
     q_ok: multiprocessing.Queue[tuple[bool, object]] = multiprocessing.Queue(maxsize=1)
     _subprocess_parse_worker(SAMPLE_GPX, False, q_ok)
     ok_flag, ok_payload = q_ok.get(timeout=5.0)
@@ -464,7 +460,6 @@ def test_antimeridian_unwrapping_bounds_distance_and_simplification() -> None:
 
     df, summary = build_silver_dataframe(parsed, trip_id="t-pac", stage_id="s-pac")
     assert summary.crosses_antimeridian is True
-    # 0.04 deg at equator ~= 4,447.8 m
     assert 4_400.0 < summary.distance_m < 4_500.0
     assert (summary.max_lon - summary.min_lon) == pytest.approx(0.04, abs=1e-6)
     assert df.get_column("lon_unwrapped").to_list() == pytest.approx([179.99, 180.01, 180.03])
@@ -475,7 +470,6 @@ def test_antimeridian_unwrapping_bounds_distance_and_simplification() -> None:
     assert coords[-1][0] == pytest.approx(180.03)
     assert lods["low"]["properties"]["crosses_antimeridian"] is True
 
-    # Westward crossing (-179.99 -> 179.99) + helper edge cases
     west_unwrapped, west_crosses = unwrap_longitudes([-179.99, 179.99])
     assert west_crosses is True
     assert west_unwrapped == pytest.approx([-179.99, -180.01])
@@ -514,7 +508,7 @@ def test_strava_stream_ingestion_and_non_destructive_trim(tmp_path: Path) -> Non
         name="Constructed Stream Track",
     )
     assert parsed.point_count == 4
-    assert parsed.segment_count == 2  # split across None gap
+    assert parsed.segment_count == 2
     assert parsed.has_timestamps is True
     assert parsed.points[0].watts == 0
     assert parsed.points[3].hr_bpm == 160
@@ -529,7 +523,6 @@ def test_strava_stream_ingestion_and_non_destructive_trim(tmp_path: Path) -> Non
     assert summary.elapsed_seconds == pytest.approx(90.0)
     assert df.get_column("is_moving").to_list() == [False, True, True, True]
 
-    # Non-destructive trim keeps all 4 rows, updates is_trimmed and summary
     trimmed_df, trimmed_summary = apply_non_destructive_trim(df, trim_start_s=30.0, trim_end_s=90.0)
     assert trimmed_df.height == 4
     assert trimmed_df.get_column("is_trimmed").to_list() == [True, False, False, False]
@@ -538,7 +531,6 @@ def test_strava_stream_ingestion_and_non_destructive_trim(tmp_path: Path) -> Non
     assert trimmed_summary.elapsed_seconds == pytest.approx(60.0)
     assert trimmed_summary.distance_m < summary.distance_m
 
-    # Persist as GeoParquet with WKB Point geometry + geo metadata
     pq_path = write_silver_parquet(trimmed_df, tmp_path / "silver" / "strava.parquet")
     meta = pq.read_metadata(pq_path)
     assert b"geo" in meta.metadata
@@ -553,7 +545,6 @@ def test_strava_stream_ingestion_and_non_destructive_trim(tmp_path: Path) -> Non
     assert byte_order == 1 and wkb_type == 1
     assert lon == pytest.approx(0.3400) and lat == pytest.approx(0.1200)
 
-    # Multi-LOD preserves 2 segments without bridging
     lods = generate_lod_geometries(parsed.points)
     assert lods["full"]["properties"]["segment_count"] == 2
     assert lods["low"]["properties"]["segment_count"] == 2
@@ -561,7 +552,6 @@ def test_strava_stream_ingestion_and_non_destructive_trim(tmp_path: Path) -> Non
 
 
 def test_strava_streams_length_mismatches_negative_velocity_and_missing_fields() -> None:
-    # Empty dict / missing latlng / all-invalid latlng
     with pytest.raises(ValueError, match="latlng"):
         parse_strava_streams({})
     with pytest.raises(ValueError, match="latlng"):
@@ -573,20 +563,18 @@ def test_strava_streams_length_mismatches_negative_velocity_and_missing_fields()
             {"latlng": [None, [0.120], ["bad", 0.340], [95.0, 0.340], [0.120, -185.0]]}
         )
 
-    # List-of-dicts format with mismatched array lengths, None values, negative velocity_smooth,
-    # non-monotonic time, and out-of-range telemetry values
     list_streams: list[dict[str, Any]] = [
         {
             "type": "latlng",
             "data": [
                 [0.1200, 0.3400],
-                [95.0, 0.3400],  # out-of-range lat -> gap
+                [95.0, 0.3400],
                 [0.1205, 0.3405],
                 [0.1210, 0.3410],
                 [0.1215, 0.3415],
             ],
         },
-        {"type": "time", "data": [0, 10, 30, 20]},  # shorter than latlng + non-monotonic
+        {"type": "time", "data": [0, 10, 30, 20]},
         {"type": "velocity_smooth", "data": [-4.5, 0.0, None, 6.0]},
         {"type": "grade_smooth", "data": [-140.0, 0.0, 135.0]},
         {"type": "heartrate", "data": [True, 0, -5, 152, "bad"]},
@@ -596,14 +584,14 @@ def test_strava_streams_length_mismatches_negative_velocity_and_missing_fields()
     ]
     parsed = parse_strava_streams(
         list_streams,
-        start_date=datetime(2001, 7, 2, 9, 0, 0),  # naive datetime -> UTC
+        start_date=datetime(2001, 7, 2, 9, 0, 0),
         name="Mismatched Stream Test",
     )
     assert parsed.point_count == 4
     assert parsed.segment_count == 2
-    assert parsed.has_timestamps is False  # last point had no time entry
-    assert parsed.has_elevation is False  # no altitude stream
-    assert parsed.points[0].velocity_smooth is None  # negative -4.5 rejected
+    assert parsed.has_timestamps is False
+    assert parsed.has_elevation is False
+    assert parsed.points[0].velocity_smooth is None
     assert parsed.points[1].velocity_smooth is None
     assert parsed.points[2].velocity_smooth == pytest.approx(6.0)
     assert parsed.points[0].grade_smooth == pytest.approx(-100.0)
@@ -619,7 +607,6 @@ def test_strava_streams_length_mismatches_negative_velocity_and_missing_fields()
     assert warn_codes["MISSING_ELEVATION"] == 1
     assert warn_codes["NON_MONOTONIC_TIME"] == 1
 
-    # _parse_start_date edge cases
     assert _parse_start_date(None) is None
     assert _parse_start_date("   ") is None
     assert _parse_start_date("2001-07-02T10:00:00+02:00") == datetime(
@@ -635,20 +622,17 @@ def test_apply_non_destructive_trim_edge_cases(tmp_path: Path) -> None:
     df, full_summary = build_silver_dataframe(parsed, trip_id="t-trim", stage_id="s-trim")
     assert full_summary.elapsed_seconds == pytest.approx(120.0)
 
-    # 1) start == 0, end == elapsed -> all 3 points remain active
     df_exact, sum_exact = apply_non_destructive_trim(df, trim_start_s=0.0, trim_end_s=120.0)
     assert sum_exact.is_trimmed is True
     assert sum_exact.point_count == 3
     assert sum_exact.distance_m == pytest.approx(full_summary.distance_m)
     assert df_exact.get_column("is_trimmed").to_list() == [False, False, False]
 
-    # 2) trim_start_s=None, trim_end_s=None resets trim flag
     df_reset, sum_reset = apply_non_destructive_trim(df_exact, trim_start_s=None, trim_end_s=None)
     assert sum_reset.is_trimmed is False
     assert sum_reset.point_count == 3
     assert df_reset.get_column("is_trimmed").to_list() == [False, False, False]
 
-    # 3) 1-point remaining in window [55.0, 65.0] (only t=60.0s matches)
     df_one, sum_one = apply_non_destructive_trim(df, trim_start_s=55.0, trim_end_s=65.0)
     assert sum_one.point_count == 1
     assert sum_one.distance_m == pytest.approx(0.0)
@@ -657,7 +641,6 @@ def test_apply_non_destructive_trim_edge_cases(tmp_path: Path) -> None:
     assert sum_one.vam_m_per_h == pytest.approx(0.0)
     assert df_one.get_column("is_trimmed").to_list() == [True, False, True]
 
-    # 4) DataFrame without elapsed_s column recomputes elapsed_s automatically
     df_no_elapsed = df.drop("elapsed_s")
     _, sum_recomputed = apply_non_destructive_trim(
         df_no_elapsed, trim_start_s=60.0, trim_end_s=120.0
@@ -665,15 +648,12 @@ def test_apply_non_destructive_trim_edge_cases(tmp_path: Path) -> None:
     assert sum_recomputed.point_count == 2
     assert sum_recomputed.elapsed_seconds == pytest.approx(60.0)
 
-    # 5) 0-point window raises ValueError
     with pytest.raises(ValueError, match="excludes all telemetry points"):
         apply_non_destructive_trim(df, trim_start_s=200.0, trim_end_s=300.0)
 
-    # 6) Empty DataFrame raises ValueError
     with pytest.raises(ValueError, match="empty Silver DataFrame"):
         apply_non_destructive_trim(df.clear(), trim_start_s=0.0, trim_end_s=10.0)
 
-    # 7) has_timestamps=False raises ValueError
     no_ts_gpx = b"""<?xml version="1.0"?>
 <gpx version="1.1"><trk><trkseg>
   <trkpt lat="0.1200" lon="0.3400"><ele>1000</ele></trkpt>
@@ -685,7 +665,6 @@ def test_apply_non_destructive_trim_edge_cases(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="without complete timestamps"):
         apply_non_destructive_trim(df_no_ts, trim_start_s=0.0, trim_end_s=10.0)
 
-    # 8) Invalid trim bounds raise ValueError
     for bad_start, bad_end in (
         (-1.0, 10.0),
         (float("nan"), 10.0),
@@ -697,7 +676,6 @@ def test_apply_non_destructive_trim_edge_cases(tmp_path: Path) -> None:
         with pytest.raises(ValueError):
             apply_non_destructive_trim(df, trim_start_s=bad_start, trim_end_s=bad_end)
 
-    # 9) build_silver_dataframe with trim args directly + mismatched smoothed list lengths
     parsed_mismatch = parsed.model_copy(
         update={"velocity_smooth": [5.0], "grade_smooth": [2.0], "moving": [True]}
     )
@@ -711,7 +689,6 @@ def test_apply_non_destructive_trim_edge_cases(tmp_path: Path) -> None:
     assert df_direct_trim.height == 3
     assert sum_direct_trim.point_count == 2
 
-    # 10) Empty ParsedTrack raises ValueError in build_silver_dataframe
     empty_track = ParsedTrack(
         points=[],
         point_count=0,
@@ -721,7 +698,6 @@ def test_apply_non_destructive_trim_edge_cases(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="zero trackpoints"):
         build_silver_dataframe(empty_track, trip_id="t-empty", stage_id="s-empty")
 
-    # 11) write_silver_parquet without lon_unwrapped column
     pq_no_unwrap = write_silver_parquet(df.drop("lon_unwrapped"), tmp_path / "no_unwrap.parquet")
     assert pq_no_unwrap.is_file()
 
@@ -732,7 +708,7 @@ def test_lod_geometry_and_cache_edge_cases() -> None:
         (0.1200, 0.3400, 0),
         (0.1250, 0.3450, 0),
         (0.1200, 0.3400, 0),
-        (0.1300, 0.3500, 1),  # 1-point segment 1 -> duplicated to 2-point LineString
+        (0.1300, 0.3500, 1),
     ]
     simplified = simplify_coord_tuples(loop_tuples, tolerance_deg=0.0001)
     assert len(simplified) == 4
@@ -751,7 +727,6 @@ def test_lod_geometry_and_cache_edge_cases() -> None:
     with pytest.raises(ValueError, match="zero trackpoints"):
         build_lod_cache_payload([])
 
-    # Cache validation failure modes
     gz_valid = build_lod_cache_payload(loop_tuples, trim_start_s=10.0, trim_end_s=50.0)
     assert (
         extract_lod_feature_from_cache(gz_valid, "low", trim_start_s=10.0, trim_end_s=50.0)

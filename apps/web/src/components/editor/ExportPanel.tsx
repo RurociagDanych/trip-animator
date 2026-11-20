@@ -41,7 +41,6 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave }: Export
     retry: false,
   });
 
-  // Auto-attach to most recent active job on load
   const firstActiveFromHistory = useMemo(
     () => (rendersQuery.data ?? []).find((j) => !TERMINAL_STATES.has(j.status)) ?? null,
     [rendersQuery.data],
@@ -49,7 +48,6 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave }: Export
 
   const trackedJobId = activeJobId ?? firstActiveFromHistory?.id ?? null;
 
-  // Live SSE subscription for active job
   useEffect(() => {
     if (!trackedJobId) {
       return;
@@ -256,7 +254,6 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave }: Export
         </div>
       ) : null}
 
-      {/* Active SSE progress card */}
       {displayedActiveJob ? (
         <div
           data-testid="active-render-card"
@@ -292,7 +289,6 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave }: Export
         </div>
       ) : null}
 
-      {/* Render History */}
       <div className="space-y-2 border-t border-border pt-3">
         <div className="flex items-center justify-between">
           <span className="font-semibold text-ink">Render history</span>

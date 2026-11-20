@@ -476,7 +476,6 @@ def _detect_peak_efforts(
         if total_dur < float(win):
             continue
         right_idx = 0
-        # Compute window start/end pairs once per window
         pairs: list[tuple[int, int]] = []
         for left_idx in range(n):
             target_t = t_sec[left_idx] + float(win)
@@ -838,11 +837,6 @@ def read_stage_events_parquet(
     )
 
 
-# ---------------------------------------------------------------------------
-# B4: Server-side Photo Alignment (DuckDB ASOF JOIN + spatial), Clock Skew, Pin
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True, slots=True)
 class StageTrackInput:
     """Ordered stage Parquet reference for multi-stage photo alignment / pinning."""
@@ -920,7 +914,6 @@ def _build_combined_track_table(
     con: duckdb.DuckDBPyConnection,
     stages: Sequence[StageTrackInput],
 ) -> float:
-    """Load ordered active stage points into `trip_pts`, returning total active distance_m."""
     ordered = sorted(stages, key=lambda s: s.stage_order)
     con.execute(
         """
@@ -1115,7 +1108,6 @@ def align_photos_to_stages(
                 """
             )
             con.executemany("INSERT INTO _photo_ts VALUES (?, ?, ?, ?)", ts_candidates)
-            # Match closest preceding and following track timestamp via ASOF JOIN
             con.execute(
                 """
                 CREATE OR REPLACE TEMP TABLE _ts_track AS
@@ -1446,10 +1438,6 @@ def snap_photo_pin(
     finally:
         con.close()
 
-
-# ---------------------------------------------------------------------------
-# B8: Quantized `color_by` Telemetry Ribbon Binner
-# ---------------------------------------------------------------------------
 
 _COLOR_SCALES: dict[ColorByMode, list[tuple[float, str, str]]] = {
     "grade": [

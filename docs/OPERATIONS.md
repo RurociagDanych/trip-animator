@@ -1,10 +1,23 @@
 # Operations
 
+> Purpose: Explain how to set up, run, integrate and maintain a self-hosted Trip Animator deployment.
+> Audience: operators
+> Last reviewed: 2026-11-20
+
+Sections:
+
+- Status
+- Local development setup
+- Strava OAuth2 setup
+- Docker Compose deployment
+
 Deployment, integration and maintenance notes for self-hosting Trip Animator.
 
 ## Status
 
-Beta, self-hosted. You operate the application, database, object storage, backups, TLS and any external integrations.
+Active, self-hosted. You operate the application, database, object storage, backups, TLS and any external integrations.
+
+Deployment: a VPS deployment exists; AWS is an option, not a current deployment. The VPS is deployed with the manual GitHub Actions workflow described in [DEPLOY_VPS.md](DEPLOY_VPS.md): it connects over SSH, checks out the requested Git ref, builds the Docker images, starts the Compose stack from `infra/compose.yaml` and verifies the health endpoint. The AWS Terraform in `infra/terraform/` ([AWS_DEPLOYMENT.md](AWS_DEPLOYMENT.md)) is not deployed.
 
 Exercised in local QA: GPX/TCX ingestion, share/playback, the mobile header, and a five-second 1280×720 flat-mode MP4 render.
 
@@ -122,4 +135,4 @@ make test-airflow
 make lint-airflow
 ```
 
-See [SECURITY.md](SECURITY.md) before exposing a deployment to a network.
+See [SECURITY.md](../SECURITY.md) before exposing a deployment to a network.

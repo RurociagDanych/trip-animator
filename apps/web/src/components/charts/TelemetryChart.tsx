@@ -503,7 +503,6 @@ export function TelemetryChart({
               </svg>
             ) : null}
 
-            {/* Trim brush selection highlight */}
             {trimMode && brushOverlay ? (
               <div
                 data-testid="telemetry-trim-brush-selection"
@@ -519,7 +518,6 @@ export function TelemetryChart({
               />
             ) : null}
 
-            {/* Synchronized playhead cursor */}
             <div
               data-testid="telemetry-playhead"
               className="pointer-events-none absolute top-0 bottom-0 w-0.5 bg-amber-accent"

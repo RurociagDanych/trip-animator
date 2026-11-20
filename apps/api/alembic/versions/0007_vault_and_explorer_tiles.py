@@ -1,9 +1,4 @@
-"""Add Activity Vault, Explorer tiles, sync state, gears, and stages.vault_activity_id.
-
-Revision ID: 0007_vault_and_explorer_tiles
-Revises: 0006_password_reset_tokens
-Create Date: 2026-11-19 16:55:00.000000
-"""
+"""Add Activity Vault, Explorer tiles, sync state, gears, and stages.vault_activity_id."""
 
 from __future__ import annotations
 

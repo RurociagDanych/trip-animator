@@ -104,7 +104,6 @@ def test_per_stage_cached_geometry_activity_type_and_chart_floor(
         headers={"X-CSRF-Token": csrf},
     ).json()["id"]
 
-    # 1. GPX filename/name inference + explicit override
     up_hike = alice.post(
         f"/api/v1/projects/{proj_id}/gpx",
         files={"file": ("ridge_hike.gpx", sample_gpx, "application/gpx+xml")},
@@ -115,11 +114,9 @@ def test_per_stage_cached_geometry_activity_type_and_chart_floor(
     stage_hike = up_hike.json()
     assert stage_hike["activity_type"] == "hiking"
 
-    # .lod.json.gz cache should have been eagerly persisted on upload
     lod_key = stage_lod_cache_key(uuid.UUID(proj_id), uuid.UUID(stage_hike["id"]))
     assert harness.store.resolve_existing_path(lod_key).is_file()
 
-    # Single-stage cached geometry endpoint returns Feature with activity_type
     sg = alice.get(f"/api/v1/projects/{proj_id}/stages/{stage_hike['id']}/geometry?lod=medium")
     assert sg.status_code == 200, sg.text
     feat = sg.json()
@@ -127,7 +124,6 @@ def test_per_stage_cached_geometry_activity_type_and_chart_floor(
     assert feat["id"] == stage_hike["id"]
     assert feat["properties"]["activity_type"] == "hiking"
 
-    # BOLA check on per-stage geometry
     assert (
         bob.get(
             f"/api/v1/projects/{proj_id}/stages/{stage_hike['id']}/geometry?lod=medium"
@@ -135,14 +131,12 @@ def test_per_stage_cached_geometry_activity_type_and_chart_floor(
         == 404
     )
 
-    # Delete .lod.json.gz and verify lazy backfill via /telemetry/geometry
     harness.store.delete(lod_key)
     all_geom = alice.get(f"/api/v1/projects/{proj_id}/telemetry/geometry?lod=low")
     assert all_geom.status_code == 200
     assert all_geom.json()["features"][0]["properties"]["activity_type"] == "hiking"
     assert harness.store.resolve_existing_path(lod_key).is_file()
 
-    # PATCH stage activity_type & trim invalidates/rebuilds cache
     bad_act = alice.patch(
         f"/api/v1/projects/{proj_id}/stages/{stage_hike['id']}",
         json={"activity_type": "spaceship"},
@@ -164,7 +158,6 @@ def test_per_stage_cached_geometry_activity_type_and_chart_floor(
     assert sg_trimmed["properties"]["activity_type"] == "trail_run"
     assert sg_trimmed["properties"]["distance_m"] < stage_hike["distance_m"]
 
-    # Multi-stage chart floor check: upload 11 more stages (12 total) and request max_points=120
     for idx in range(2, 13):
         resp = alice.post(
             f"/api/v1/projects/{proj_id}/gpx",
@@ -175,7 +168,7 @@ def test_per_stage_cached_geometry_activity_type_and_chart_floor(
         assert resp.status_code == 201
     chart = alice.get(f"/api/v1/projects/{proj_id}/telemetry/chart?max_points=120").json()
     assert len(chart["points"]) <= 120
-    assert len(chart["points"]) >= 40  # Never collapsed to 2 pts/stage
+    assert len(chart["points"]) >= 40
 
 
 def test_strava_date_forwarding_and_batch_import(
@@ -271,14 +264,12 @@ def test_strava_date_forwarding_and_batch_import(
 
     client, csrf = h.login_client("rider@example.com")
 
-    # Date validation
     assert (
         client.get("/api/v1/strava/activities?after=2001-06-20&before=2001-06-10").status_code
         == 422
     )
     assert client.get("/api/v1/strava/activities?after=not-a-date").status_code == 422
 
-    # Date forwarding converts ISO dates to UTC epoch seconds
     acts = client.get(
         "/api/v1/strava/activities?page=1&per_page=30&after=2001-06-01&before=2001-06-30"
     )
@@ -294,7 +285,6 @@ def test_strava_date_forwarding_and_batch_import(
         headers={"X-CSRF-Token": csrf},
     ).json()["id"]
 
-    # Batch import with partial failure (9999 -> 404) & dedicated rate-limit bucket
     batch = client.post(
         f"/api/v1/projects/{proj_id}/import-strava/batch",
         json={
@@ -337,7 +327,6 @@ def test_public_share_privacy_audit_and_gpx_geojson_export(
         headers={"X-CSRF-Token": owner_csrf},
     ).json()
 
-    # Seed a succeeded render job with MP4 bytes
     render_id = uuid.uuid4()
     mp4_key = f"outputs/{render_id}.mp4"
     harness.store.put_bytes(mp4_key, b"PUBLIC-MP4-DATA", content_type="video/mp4")
@@ -357,7 +346,6 @@ def test_public_share_privacy_audit_and_gpx_geojson_export(
         )
         db.commit()
 
-    # Stranger cannot enable share or read audit/export
     assert (
         stranger.post(
             f"/api/v1/projects/{proj_id}/share",
@@ -368,7 +356,6 @@ def test_public_share_privacy_audit_and_gpx_geojson_export(
     assert stranger.get(f"/api/v1/projects/{proj_id}/audit").status_code == 404
     assert stranger.get(f"/api/v1/projects/{proj_id}/export?format=gpx").status_code == 404
 
-    # Enable sharing
     share_resp = owner.post(
         f"/api/v1/projects/{proj_id}/share",
         headers={"X-CSRF-Token": owner_csrf},
@@ -378,7 +365,6 @@ def test_public_share_privacy_audit_and_gpx_geojson_export(
     assert slug and len(slug) >= 16
     assert share_resp.json()["share_enabled"] is True
 
-    # Unauthenticated client can access redacted public share routes
     anon = TestClient(harness.app)
     pub = anon.get(f"/api/v1/share/{slug}")
     assert pub.status_code == 200, pub.text
@@ -426,7 +412,6 @@ def test_public_share_privacy_audit_and_gpx_geojson_export(
     )
     assert vid_bad_range.status_code == 416
 
-    # Rotate slug invalidates old slug immediately
     rot = owner.post(
         f"/api/v1/projects/{proj_id}/share",
         json={"rotate": True},
@@ -437,7 +422,6 @@ def test_public_share_privacy_audit_and_gpx_geojson_export(
     assert anon.get(f"/api/v1/share/{slug}").status_code == 404
     assert anon.get(f"/api/v1/share/{new_slug}").status_code == 200
 
-    # Disable share revokes public access
     dis = owner.delete(
         f"/api/v1/projects/{proj_id}/share",
         headers={"X-CSRF-Token": owner_csrf},
@@ -447,7 +431,6 @@ def test_public_share_privacy_audit_and_gpx_geojson_export(
     assert anon.get(f"/api/v1/share/{new_slug}").status_code == 404
     assert anon.get(f"/api/v1/share/{new_slug}/render/video").status_code == 404
 
-    # GPX & GeoJSON export
     gpx_resp = owner.get(f"/api/v1/projects/{proj_id}/export?format=gpx")
     assert gpx_resp.status_code == 200
     assert gpx_resp.headers["content-type"].startswith("application/gpx+xml")
@@ -461,7 +444,6 @@ def test_public_share_privacy_audit_and_gpx_geojson_export(
     assert fc["type"] == "FeatureCollection"
     assert fc["features"][0]["properties"]["activity_type"] == "cycling"
 
-    # Audit log contains project lifecycle events
     audit_resp = owner.get(f"/api/v1/projects/{proj_id}/audit?limit=50")
     assert audit_resp.status_code == 200
     events = audit_resp.json()
@@ -495,7 +477,6 @@ def test_share_rate_limit_expire_slug_edge_cases_and_range_matrix(
         headers={"X-CSRF-Token": csrf},
     ).json()["id"]
 
-    # Enable share idempotently (re-posting without rotate=True preserves slug)
     slug1 = owner.post(
         f"/api/v1/projects/{proj_id}/share",
         headers={"X-CSRF-Token": csrf},
@@ -509,7 +490,6 @@ def test_share_rate_limit_expire_slug_edge_cases_and_range_matrix(
 
     anon = TestClient(h.app)
 
-    # Blank/overlong slug -> 404; missing stage_id -> 404; no render yet -> 404
     assert anon.get(f"/api/v1/share/{'x' * 65}").status_code == 404
     assert anon.get("/api/v1/share/%20%20").status_code == 404
     missing_sid = str(uuid.uuid4())
@@ -519,7 +499,6 @@ def test_share_rate_limit_expire_slug_edge_cases_and_range_matrix(
     assert anon.get(f"/api/v1/share/{slug1}/render/video").status_code == 404
     assert anon.get(f"/api/v1/share/{slug1}").json()["has_rendered_video"] is False
 
-    # Seed a succeeded render job with known 26-byte MP4 payload and test full Range matrix
     payload = b"abcdefghijklmnopqrstuvwxyz"
     job_id = uuid.uuid4()
     mp4_key = f"outputs/{job_id}.mp4"
@@ -541,7 +520,6 @@ def test_share_rate_limit_expire_slug_edge_cases_and_range_matrix(
         )
         db.commit()
 
-    # Exact Range header test cases on /share/{slug}/render/video
     r_0_9 = anon.get(f"/api/v1/share/{slug1}/render/video", headers={"Range": "bytes=0-9"})
     assert r_0_9.status_code == 206
     assert r_0_9.content == b"abcdefghij"
@@ -561,12 +539,10 @@ def test_share_rate_limit_expire_slug_edge_cases_and_range_matrix(
     assert r_416.status_code == 416
     assert r_416.headers["content-range"] == "bytes */26"
 
-    # Non-bytes / multi-range falls back to full 200
     r_multi = anon.get(f"/api/v1/share/{slug1}/render/video", headers={"Range": "bytes=0-1,2-3"})
     assert r_multi.status_code == 200
     assert r_multi.content == payload
 
-    # Reaping the expired render job clears public video availability cleanly
     with h.session_factory() as db:
         report = reap_expired(db, h.store)
         assert report.render_jobs_deleted == 1
@@ -575,7 +551,6 @@ def test_share_rate_limit_expire_slug_edge_cases_and_range_matrix(
     assert anon.get(f"/api/v1/share/{slug1}").json()["has_rendered_video"] is False
     assert anon.get(f"/api/v1/share/{slug1}/render/video").status_code == 404
 
-    # Remaining share tokens consumed -> 429 with Retry-After
     for _ in range(15):
         resp = anon.get(f"/api/v1/share/{slug1}/stages/{stage_id}/geometry?lod=low")
         if resp.status_code == 429:
@@ -646,7 +621,6 @@ def test_non_local_store_materialization_and_lod_cache_error_fallbacks(
     harness: AppHarness,
     sample_gpx: bytes,
 ) -> None:
-    """Exercise non-LocalObjectStore parallel Parquet fetching and cache-failure fallbacks."""
     harness.create_user("nonlocal@example.com")
     client, csrf = harness.login_client("nonlocal@example.com")
     proj_id = client.post(
@@ -717,7 +691,6 @@ def test_non_local_store_materialization_and_lod_cache_error_fallbacks(
     mem_store = MemoryStore(harness.store)
     harness.app.state.object_store = mem_store
 
-    # Exercises materialize_silver_parquets ThreadPoolExecutor path (2 stages) + chart/kpis/geom
     chart = client.get(f"/api/v1/projects/{proj_id}/telemetry/chart?max_points=50")
     assert chart.status_code == 200
     assert len(chart.json()["points"]) >= 4
@@ -726,12 +699,10 @@ def test_non_local_store_materialization_and_lod_cache_error_fallbacks(
     assert kpis.status_code == 200
     assert kpis.json()["stage_count"] == 2
 
-    # Empty stage list in chart & geometry services
     empty_chart = build_project_telemetry_chart(mem_store, uuid.UUID(proj_id), [], 100)
     assert empty_chart.total_distance_m == 0.0
     assert empty_chart.points == []
 
-    # Cache write failure fallback deletes stale LOD cache cleanly
     from trip_api.db import Stage as StageModel
 
     with harness.session_factory() as db:
@@ -744,6 +715,5 @@ def test_non_local_store_materialization_and_lod_cache_error_fallbacks(
         invalidate_or_rebuild_stage_lod_cache(mem_store, st)
         assert lod_key not in mem_store._blobs
 
-        # Backfill succeeds even when write fails in build_stage_geometry_feature
         feat = build_stage_geometry_feature(mem_store, st, "medium")
         assert feat["type"] == "Feature"

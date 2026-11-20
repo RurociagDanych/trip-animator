@@ -91,7 +91,6 @@ def get_current_auth(
     db: DbSession,
     settings: AppSettings,
 ) -> AuthContext:
-    """FastAPI dependency returning authenticated session and user."""
     return authenticate_request(request, db, settings)
 
 

@@ -131,7 +131,6 @@ def test_dbt_gold_pipeline_s3_fake_store_parity(tmp_path: Path) -> None:
     validated = validate_gold_marts(gold_dir=gold_dir, expected_stage_count=1)
     assert validated["stage_count"] == 1
 
-    # Negative-value check triggers validation failure
     con = duckdb.connect(str(gold_dir / "trip_analytics.duckdb"))
     try:
         con.execute("UPDATE mart_stage_summary SET total_distance_m = -1.0")
@@ -194,7 +193,6 @@ def test_strava_incremental_sync_discovery_refresh_dedup_and_ssrf(
     assert discovered == [{"connection_id": str(active_conn_id), "user_id": str(active_user.id)}]
     assert set(discovered[0].keys()) == {"connection_id", "user_id"}
 
-    # Pre-seed a Strava stage in ANOTHER project owned by active_user for cross-project dedup
     manual_proj = airflow_harness.create_project(active_user.id, "Manual Tour")
     airflow_harness.ingest_sample_stage(
         manual_proj, name="Already Imported", strava_activity_id=101
@@ -332,7 +330,6 @@ def test_strava_incremental_sync_discovery_refresh_dedup_and_ssrf(
     assert "fresh-access-secret-tok" not in serialized
     assert "fresh-refresh-secret-tok" not in serialized
 
-    # Verify refreshed encrypted tokens persisted with AEAD
     with airflow_harness.session_factory() as db:
         refreshed_conn = db.get(OAuthConnection, active_conn_id)
         assert refreshed_conn is not None
@@ -455,7 +452,6 @@ def test_maintenance_reaper_reconciliation_and_parquet_audit(
         )
         db.commit()
 
-    # 1. Retention reap dry_run vs execute
     with airflow_harness.session_factory() as db:
         dry = run_retention_reap(db, airflow_harness.store, airflow_harness.settings, dry_run=True)
         assert dry["dry_run"] is True
@@ -472,7 +468,6 @@ def test_maintenance_reaper_reconciliation_and_parquet_audit(
         assert not object_exists(airflow_harness.store, expired_render_key)
         assert object_exists(airflow_harness.store, active_render_key)
 
-    # 2. Reconciliation: clean state (valid .lod.json.gz must NOT be flagged as orphan)
     with airflow_harness.session_factory() as db:
         clean = reconcile_postgres_and_object_store(db, airflow_harness.store)
         assert clean["missing_bronze_count"] == 0
@@ -481,7 +476,6 @@ def test_maintenance_reaper_reconciliation_and_parquet_audit(
         assert clean["orphaned_silver_count"] == 0
         assert clean["orphaned_lod_count"] == 0
 
-    # Add an old orphan and a recent orphan; verify grace period deletion
     old_orphan_key = f"silver/{proj.id}/old-orphan.lod.json.gz"
     recent_orphan_key = f"outputs/{uuid.uuid4()}.mp4"
     airflow_harness.store.put_bytes(old_orphan_key, b"stale-lod")
@@ -505,7 +499,6 @@ def test_maintenance_reaper_reconciliation_and_parquet_audit(
         assert not object_exists(airflow_harness.store, old_orphan_key)
         assert object_exists(airflow_harness.store, recent_orphan_key)
 
-    # 3. Parquet metadata audit passes on healthy stage
     with airflow_harness.session_factory() as db:
         ok_audit = validate_silver_parquet_metadata(db, airflow_harness.store)
         assert ok_audit == {
@@ -515,7 +508,6 @@ def test_maintenance_reaper_reconciliation_and_parquet_audit(
             "corrupt_stages": [],
         }
 
-    # Corrupt Parquet row count mismatch detection
     pq_path = airflow_harness.store.resolve_existing_path(stage.silver_object_key)
     table = pq.read_table(pq_path)
     truncated = pa.Table.from_batches(table.slice(0, 1).to_batches(), schema=table.schema)
@@ -530,7 +522,6 @@ def test_maintenance_reaper_reconciliation_and_parquet_audit(
         )
         assert audit_row is not None
 
-    # Missing Silver blob detection
     airflow_harness.store.delete(stage.silver_object_key)
     with airflow_harness.session_factory() as db:
         with pytest.raises(ReconciliationError, match="missing required object"):

@@ -352,7 +352,6 @@ export function AtlasView({
 
   return (
     <div data-testid="atlas-view" className="space-y-5">
-      {/* Strava Sync / Connect Bar */}
       {stravaConfigured || stravaConnected ? (
         <section
           data-testid="atlas-strava-bar"
@@ -467,7 +466,6 @@ export function AtlasView({
         </section>
       ) : null}
 
-      {/* Career KPI Strip */}
       <section
         aria-label="Career totals"
         className="grid grid-cols-2 gap-3 sm:grid-cols-4"
@@ -521,7 +519,6 @@ export function AtlasView({
         </div>
       </section>
 
-      {/* Filters & Countries */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2 text-xs">
           {availableYears.length > 0 ? (
@@ -571,7 +568,6 @@ export function AtlasView({
         ) : null}
       </div>
 
-      {/* Multi-Trip Interactive Map + H3 Heatmap */}
       <div className="relative h-[340px] w-full overflow-hidden rounded-xl border border-border bg-[#0b1117]">
         {webglAvailable ? (
           <div ref={mapContainerRef} className="absolute inset-0 h-full w-full" />
@@ -633,7 +629,6 @@ export function AtlasView({
         ) : null}
       </div>
 
-      {/* Trip Breakdown List */}
       {filteredTrips.length > 0 ? (
         <section aria-label="Atlas trips" className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
           {filteredTrips.map((trip, idx) => {

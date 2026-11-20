@@ -1,9 +1,4 @@
-"""Add project_photos table for geotagged and timestamped route photo stops.
-
-Revision ID: 0003_project_photos
-Revises: 0002_stage_activity_share_audit
-Create Date: 2026-11-17 14:20:00.000000
-"""
+"""Add project_photos table for geotagged and timestamped route photo stops."""
 
 from __future__ import annotations
 

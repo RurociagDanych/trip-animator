@@ -251,7 +251,6 @@ export function EditorPage() {
     }
   }, [markSaving, markSaved, setConflictError, queryClient, projectId]);
 
-  // Debounced autosave
   useEffect(() => {
     if (!hasUnsavedChanges || conflictError || !projectQuery.data) {
       return;
@@ -268,7 +267,6 @@ export function EditorPage() {
     };
   }, [hasUnsavedChanges, conflictError, title, spec, projectQuery.data, flushSave]);
 
-  // Keyboard shortcuts: Space (play/pause), ArrowLeft/Right (±2%, Shift ±10%), Home/End, Ctrl/Cmd+Z / Shift+Z
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (stravaModalOpen || auditDrawerOpen || isEditableElement(event.target)) {
@@ -773,7 +771,6 @@ export function EditorPage() {
       ) : null}
 
       <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-12">
-        {/* Left Pane: Trip & Stages */}
         <StageSidebar
           projectId={projectId}
           stages={stages}
@@ -799,7 +796,6 @@ export function EditorPage() {
           }}
         />
 
-        {/* Center Pane: 1:1 WYSIWYG Stage & Synchronized uPlot Telemetry Dock */}
         <EditorPlaybackDock
           timelineStages={timelineStages}
           spec={spec}
@@ -825,7 +821,6 @@ export function EditorPage() {
           }
         />
 
-        {/* Right Pane: Settings & Export */}
         <InspectorPanel
           projectId={projectId}
           section={inspectorSection}

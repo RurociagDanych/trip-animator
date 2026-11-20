@@ -399,7 +399,6 @@ export function ShareViewPage() {
         </div>
       </header>
 
-      {/* Hero KPI Summary Bar */}
       <section
         aria-label="Trip summary KPIs"
         data-testid="share-hero-kpis"

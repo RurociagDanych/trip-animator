@@ -32,20 +32,32 @@ export type ActivityCategory =
 export const DEFAULT_ACTIVITY_TYPE: ActivityType = "cycling";
 
 export interface ActivityGlyphProps extends Omit<SVGProps<SVGSVGElement>, "type"> {
-  /** Pixel width/height shorthand (defaults to 24 when neither size nor className overrides). */
+  /**
+   * Pixel width/height shorthand (defaults to 24 when neither size nor className overrides).
+   */
   size?: number | string;
-  /** Optional accent color for duotone fills (defaults to `currentColor`). */
+  /**
+   * Optional accent color for duotone fills (defaults to `currentColor`).
+   */
   accentColor?: string;
-  /** Opacity for duotone fill layers (defaults to `0.2`). */
+  /**
+   * Opacity for duotone fill layers (defaults to `0.2`).
+   */
   duotoneOpacity?: number;
-  /** Accessible title rendered inside the SVG when provided. */
+  /**
+   * Accessible title rendered inside the SVG when provided.
+   */
   title?: string;
 }
 
 export interface ActivityIconProps extends ActivityGlyphProps {
-  /** Activity type identifier (falls back to `cycling` when omitted or unrecognized). */
+  /**
+   * Activity type identifier (falls back to `cycling` when omitted or unrecognized).
+   */
   type?: ActivityType | string | null;
-  /** Alias for `type` so callers can pass either `type` or `activity`. */
+  /**
+   * Alias for `type` so callers can pass either `type` or `activity`.
+   */
   activity?: ActivityType | string | null;
 }
 
@@ -470,7 +482,6 @@ export function inferActivityTypeFromStrava(
     return normalized;
   }
 
-  // Gravel / Mountain Bike
   if (
     compact === "gravelride" ||
     compact === "mountainbikeride" ||
@@ -488,7 +499,6 @@ export function inferActivityTypeFromStrava(
     return "gravel_mtb";
   }
 
-  // Road / Virtual / E-Bike Cycling (with name-based upgrade to gravel_mtb)
   if (
     compact === "ride" ||
     compact === "virtualride" ||
@@ -509,7 +519,6 @@ export function inferActivityTypeFromStrava(
     return "cycling";
   }
 
-  // Trail Running
   if (
     compact === "trailrun" ||
     normalized.includes("trail_run") ||
@@ -520,7 +529,6 @@ export function inferActivityTypeFromStrava(
     return "trail_run";
   }
 
-  // Running
   if (
     compact === "run" ||
     compact === "virtualrun" ||
@@ -534,7 +542,6 @@ export function inferActivityTypeFromStrava(
     return "running";
   }
 
-  // Hiking / Snowshoeing / Trekking
   if (
     compact === "hike" ||
     compact === "snowshoe" ||
@@ -548,7 +555,6 @@ export function inferActivityTypeFromStrava(
     return "hiking";
   }
 
-  // Walking / Urban / Skating
   if (
     compact === "walk" ||
     compact === "wheelchair" ||
@@ -561,7 +567,6 @@ export function inferActivityTypeFromStrava(
     return "walking";
   }
 
-  // Skiing / Snowboarding / Ski Touring
   if (
     compact === "alpineski" ||
     compact === "backcountryski" ||
@@ -576,7 +581,6 @@ export function inferActivityTypeFromStrava(
     return "skiing";
   }
 
-  // Kayaking / Paddling / Rowing / Water craft
   if (
     compact === "kayaking" ||
     compact === "canoeing" ||
@@ -602,7 +606,6 @@ export function inferActivityTypeFromStrava(
     return "kayak";
   }
 
-  // Swimming
   if (
     compact === "swim" ||
     compact === "openwaterswim" ||
@@ -611,7 +614,6 @@ export function inferActivityTypeFromStrava(
     return "swimming";
   }
 
-  // Climbing / Mountaineering / Summit
   if (
     compact === "rockclimbing" ||
     compact === "mountaineering" ||
@@ -625,7 +627,6 @@ export function inferActivityTypeFromStrava(
     return "climbing";
   }
 
-  // Motorcycle
   if (
     compact === "motorcycle" ||
     compact === "moto" ||
@@ -638,7 +639,6 @@ export function inferActivityTypeFromStrava(
     return "motorcycle";
   }
 
-  // Car / Overland / Bus Transfer
   if (
     compact === "car" ||
     compact === "drive" ||
@@ -658,7 +658,6 @@ export function inferActivityTypeFromStrava(
     return "car";
   }
 
-  // Train / Rail Transfer
   if (
     compact === "train" ||
     compact === "rail" ||
@@ -675,7 +674,6 @@ export function inferActivityTypeFromStrava(
     return "train";
   }
 
-  // Camp / Bivouac / Overnight
   if (
     compact === "camp" ||
     compact === "camping" ||

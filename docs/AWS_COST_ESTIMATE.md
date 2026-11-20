@@ -1,5 +1,16 @@
 # Trip Animator — Monthly AWS Cost Estimate (`eu-central-1` Frankfurt)
 
+> Purpose: Give approximate monthly AWS cost estimates for the optional AWS deployment.
+> Audience: operators, reviewers
+> Last reviewed: 2026-11-20
+
+Sections:
+
+- 1. Reference Unit Rates (`eu-central-1` Frankfurt)
+- 2. Executive Comparison Across 4 Scenarios
+- 3. Itemized Scenario Breakdowns
+- 4. Cost-Optimization Checklist
+
 > [!NOTE]
 > **Approximate Cost Estimate Disclaimer**
 > All figures below are **approximate monthly estimates in USD** based on public AWS **`eu-central-1` (Frankfurt)** On-Demand and Spot reference pricing (assuming a **730-hour month**). Actual bills vary with real-time Fargate Spot rates, GPX/video file sizes, user egress patterns, AWS Free Tier eligibility, and Savings Plans / Reserved Instance commitments.

@@ -179,7 +179,6 @@ def test_full_backfill_resumable_cursor_live_progress_and_incremental_sync(
     client, csrf = h.login_client("vault-rider@example.com")
 
     base_dt = datetime(2026, 7, 15, 10, 0, 0, tzinfo=UTC)
-    # Build 200 items for page 1 (newest) and 3 for page 2 (older, indoor, timezone shift).
     page1_items = [
         _make_strava_summary(
             200000 + idx,
@@ -191,7 +190,6 @@ def test_full_backfill_resumable_cursor_live_progress_and_incremental_sync(
         for idx in range(200)
     ]
     page2_items = [
-        # Older GPS ride with fake-Z local date crossing midnight into next day (CEST +7200s)
         _make_strava_summary(
             100003,
             started_at_utc=datetime(2026, 5, 10, 23, 30, 0, tzinfo=UTC),
@@ -201,7 +199,6 @@ def test_full_backfill_resumable_cursor_live_progress_and_incremental_sync(
             points=[(45.00, 10.00), (45.02, 10.02)],
             gear_id="b100",
         ),
-        # Non-GPS indoor virtual ride: upserts into VaultActivity and counts in skipped_no_gps
         _make_strava_summary(
             100002,
             started_at_utc=datetime(2026, 5, 9, 18, 0, 0, tzinfo=UTC),
@@ -211,7 +208,6 @@ def test_full_backfill_resumable_cursor_live_progress_and_incremental_sync(
             trainer=True,
             gear_id=None,
         ),
-        # Manual no-GPS walk (empty start_latlng & polyline)
         _make_strava_summary(
             100001,
             started_at_utc=datetime(2026, 5, 8, 9, 0, 0, tzinfo=UTC),
@@ -304,12 +300,10 @@ def test_full_backfill_resumable_cursor_live_progress_and_incremental_sync(
     assert body1["webhook_active"] is True
     v_after_enqueue = body1["vault_version"]
 
-    # Verify no provider response has been imported before worker execution.
     status_mid = client.get("/api/v1/vault/sync/status")
     assert status_mid.status_code == 200
     assert status_mid.json()["processed_activities"] == 0
 
-    # 2. Background worker drains page 2 using persisted before cursor
     with h.session_factory() as db:
         worker_stats = process_pending_vault_syncs(
             db,
@@ -362,7 +356,6 @@ def test_full_backfill_resumable_cursor_live_progress_and_incremental_sync(
     assert catalog_body["summary"]["distance_known_count"] == 203
     assert catalog_body["summary"]["distance_m"] == 203 * 42500.0
 
-    # Verify local_date parsing, indoor/no-GPS flags, gear resolution, and new-tile counts
     with h.session_factory() as db:
         midnight_act = db.scalar(
             select(VaultActivity).where(
@@ -390,7 +383,6 @@ def test_full_backfill_resumable_cursor_live_progress_and_incremental_sync(
         assert indoor_act.tile_precision == "none"
         assert indoor_act.tile_count_z14 == 0
 
-        # Upgrade midnight_act to full_stream and verify incremental sync does NOT downgrade it
         midnight_act.tile_precision = "full_stream"
         db.commit()
 
@@ -526,7 +518,6 @@ def test_vault_sync_rate_limit_90pct_proactive_and_429_pause_resume(
     _seed_strava_oauth(h, user.id, athlete_id="555111")
 
     t0 = datetime(2026, 8, 1, 12, 10, 0, tzinfo=UTC)
-    # Unit-check daily 95% threshold -> next day 00:01 UTC
     daily_pause, daily_retry, _ = compute_rate_limit_pause(
         {"X-ReadRateLimit-Usage": "20,950", "X-ReadRateLimit-Limit": "100,1000"},
         200,
@@ -535,7 +526,6 @@ def test_vault_sync_rate_limit_90pct_proactive_and_429_pause_resume(
     assert daily_pause is True
     assert daily_retry == datetime(2026, 8, 2, 0, 1, 0, tzinfo=UTC)
 
-    # Full 200-item page 1 hits 90% short usage -> commits page 1 and pauses to 12:15:05 UTC
     page1 = [
         _make_strava_summary(
             500000 + i,
@@ -631,7 +621,6 @@ def test_vault_sync_rate_limit_90pct_proactive_and_429_pause_resume(
         assert status_paused.rate_limit_retry_in_seconds == 240
         assert "resumes in 04:00" in status_paused.phase_label
 
-        # Before next_retry_at: worker must NOT claim
         early = process_pending_vault_syncs(
             db,
             h.settings,
@@ -640,7 +629,6 @@ def test_vault_sync_rate_limit_90pct_proactive_and_429_pause_resume(
         )
         assert early["claimed"] == 0
 
-        # At 12:15:10 UTC: worker resumes, hits 429 on page 2, and re-pauses until 12:30:05 UTC
         hit_429 = process_pending_vault_syncs(
             db,
             h.settings,
@@ -661,7 +649,6 @@ def test_vault_sync_rate_limit_90pct_proactive_and_429_pause_resume(
             2026, 8, 1, 12, 30, 5, tzinfo=UTC
         )
 
-        # At 12:30:10 UTC: worker resumes and finishes page 2
         done = process_pending_vault_syncs(
             db,
             h.settings,
@@ -732,7 +719,6 @@ def test_webhook_decision_1a_vault_upsert_hydrated_stage_update_and_delete(
     def factory() -> httpx.Client:
         return httpx.Client(transport=httpx.MockTransport(wh_handler), follow_redirects=False)
 
-    # 1. Webhook create for unhydrated 8001 -> VaultActivity only (no Stage, no /streams call)
     with h.session_factory() as db:
         db.add(
             IngestJob(
@@ -756,7 +742,6 @@ def test_webhook_decision_1a_vault_upsert_hydrated_stage_update_and_delete(
         assert va_8001.tile_count_z14 > 0
         assert va_8001.new_tiles_z14_count == va_8001.tile_count_z14
 
-    # 2. Webhook update for hydrated Stage 8002 -> fetches /streams, rewrites Stage, full_stream
     with h.session_factory() as db:
         canonical_before_refresh = upsert_strava_activity_to_vault(
             db,
@@ -825,7 +810,6 @@ def test_webhook_decision_1a_vault_upsert_hydrated_stage_update_and_delete(
         # Because 8001 (earlier) already visited those exact tiles, 8002 should have 0 new tiles
         assert va_8002.new_tiles_z14_count == 0
 
-    # 3. Webhook delete for 8001 -> deletes VaultActivity/tiles and recomputes 8002 new tiles
     with h.session_factory() as db:
         db.add(
             IngestJob(
@@ -867,7 +851,6 @@ def test_stage_upload_split_mirroring_and_backfill_stages(
         headers={"X-CSRF-Token": alice_csrf},
     ).json()["id"]
 
-    # 1. Upload GPX -> automatically mirrors into VaultActivity with full_stream tiles
     up = alice_client.post(
         f"/api/v1/projects/{proj_id}/gpx",
         files={"file": ("stage1.gpx", sample_gpx, "application/gpx+xml")},
@@ -900,7 +883,6 @@ def test_stage_upload_split_mirroring_and_backfill_stages(
         )
         assert len(tiles_for_va1) == va1.tile_count_z14
 
-    # 2. Split Stage -> both project segments reference one unchanged library activity
     with h.session_factory() as db:
         original_va_id = db.get(Stage, stage1_id).vault_activity_id
         original_va = db.get(VaultActivity, original_va_id)
@@ -942,7 +924,6 @@ def test_stage_upload_split_mirroring_and_backfill_stages(
         ) == original_snapshot
         db.commit()
 
-    # 3. Bob cannot backfill Alice's stages (strict cross-user isolation)
     bob_bf = bob_client.post(
         "/api/v1/vault/backfill-stages",
         headers={"X-CSRF-Token": bob_csrf},
@@ -951,7 +932,6 @@ def test_stage_upload_split_mirroring_and_backfill_stages(
     assert bob_bf.json()["scanned_stages"] == 0
     assert bob_bf.json()["mirrored_stages"] == 0
 
-    # 4. Alice's linked split references are not duplicated by backfill.
     bf1 = alice_client.post(
         "/api/v1/vault/backfill-stages",
         headers={"X-CSRF-Token": alice_csrf},
@@ -984,7 +964,6 @@ def test_stage_upload_split_mirroring_and_backfill_stages(
                 for warning in (split_stage.warnings_json or [])
             )
 
-    # Repeated call remains idempotent.
     bf2 = alice_client.post(
         "/api/v1/vault/backfill-stages",
         headers={"X-CSRF-Token": alice_csrf},
@@ -1004,7 +983,6 @@ def test_stage_upload_split_mirroring_and_backfill_stages(
             va_after_backfill.tile_count_z14,
         ) == original_snapshot
 
-    # Bob's status must show 0 activities despite Alice having 2
     assert bob_client.get("/api/v1/vault/sync/status").json()["total_activities"] == 0
     assert alice_client.get("/api/v1/vault/sync/status").json()["total_activities"] == 1
 
@@ -1156,13 +1134,11 @@ def test_vault_sync_cli_worker_and_security_ssrf_csrf(
     make_harness: HarnessFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # 1. SSRF protection blocks non-allowlisted Strava base URL
     h_ssrf = make_harness(strava_api_base_url="http://169.254.169.254")
     u_ssrf = h_ssrf.create_user("ssrf-vault@example.com")
     _seed_strava_oauth(h_ssrf, u_ssrf.id, athlete_id="303030")
     c_ssrf, csrf_ssrf = h_ssrf.login_client("ssrf-vault@example.com")
 
-    # Missing CSRF rejected
     assert c_ssrf.post("/api/v1/vault/sync/strava", json={"mode": "incremental"}).status_code == 403
     # Enqueue performs no provider request, so outbound URL validation is deferred
     # to the worker and this request remains a durable queue operation.
@@ -1173,14 +1149,12 @@ def test_vault_sync_cli_worker_and_security_ssrf_csrf(
     )
     assert ssrf_resp.status_code == 202
 
-    # 2. Generic ingest CLI does not consume Vault sync work.
     monkeypatch.setattr(socket, "getaddrinfo", _fake_public_getaddrinfo)
     h = make_harness()
     u = h.create_user("cli-vault@example.com")
     _seed_strava_oauth(h, u.id, athlete_id="909090")
     c, csrf = h.login_client("cli-vault@example.com")
 
-    # Queue without inline first page -> HTTP 202
     q_resp = c.post(
         "/api/v1/vault/sync/strava",
         json={"mode": "full_backfill", "inline_first_page": False},

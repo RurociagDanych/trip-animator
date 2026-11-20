@@ -1,9 +1,4 @@
-"""Add stage activity_type, project public sharing, and audit_events project_id.
-
-Revision ID: 0002_stage_activity_share_audit
-Revises: 0001_initial
-Create Date: 2026-11-15 22:50:00.000000
-"""
+"""Add stage activity_type, project public sharing, and audit_events project_id."""
 
 from __future__ import annotations
 

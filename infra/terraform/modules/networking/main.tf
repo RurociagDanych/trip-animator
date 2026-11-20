@@ -180,10 +180,6 @@ resource "aws_vpc_endpoint" "s3" {
   })
 }
 
-# -----------------------------------------------------------------------------
-# Security Groups
-# -----------------------------------------------------------------------------
-
 resource "aws_security_group" "alb" {
   name_prefix = "${var.name_prefix}-alb-"
   description = "Application Load Balancer security group"
@@ -355,10 +351,6 @@ resource "aws_vpc_security_group_ingress_rule" "rds_from_worker" {
   to_port                      = 5432
   referenced_security_group_id = aws_security_group.worker.id
 }
-
-# -----------------------------------------------------------------------------
-# Optional VPC Flow Logs (KMS-encrypted CloudWatch Log Group)
-# -----------------------------------------------------------------------------
 
 data "aws_caller_identity" "current" {}
 

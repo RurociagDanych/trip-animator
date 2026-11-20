@@ -141,14 +141,12 @@ def test_gold_sync_s3_etag_atomic_swap_and_404_fallback(tmp_path: Path) -> None:
     fake_client = _FakeS3Client()
     store.client = fake_client
 
-    # Pre-first-dbt-run: 404 falls back gracefully without creating or raising
     path0 = ensure_local_gold_duckdb(store, cfg)
     assert path0 == gold_dir / "trip_analytics.duckdb"
     assert not path0.exists()
     assert fake_client.head_calls == 1
     assert fake_client.get_calls == 0
 
-    # Upload v1 DuckDB to S3
     v1_bytes = _build_duckdb_bytes(
         tmp_path, "CREATE TABLE t_ver (v INTEGER); INSERT INTO t_ver VALUES (1);"
     )
@@ -163,19 +161,16 @@ def test_gold_sync_s3_etag_atomic_swap_and_404_fallback(tmp_path: Path) -> None:
     finally:
         con.close()
 
-    # Subsequent call within TTL skips both HEAD and GET
     path_cached = ensure_local_gold_duckdb(store, cfg)
     assert path_cached == path1
     assert fake_client.head_calls == 2
     assert fake_client.get_calls == 1
 
-    # Expired TTL (0s) with unchanged ETag executes HEAD only
     cfg_no_ttl = cfg.model_copy(update={"gold_sync_interval_s": 0.0})
     ensure_local_gold_duckdb(store, cfg_no_ttl)
     assert fake_client.head_calls == 3
     assert fake_client.get_calls == 1
 
-    # Changed ETag triggers atomic swap to v2
     v2_bytes = _build_duckdb_bytes(
         tmp_path, "CREATE TABLE t_ver (v INTEGER); INSERT INTO t_ver VALUES (2);"
     )
@@ -258,7 +253,6 @@ def test_heatmap_and_career_year_activity_filters_and_mutated_activity_type(
         headers={"X-CSRF-Token": csrf},
     ).json()["id"]
 
-    # Seed Gold DuckDB using the stage-grain mart_spatial_coverage_h3 schema
     con = duckdb.connect(str(gold_dir / "trip_analytics.duckdb"))
     try:
         con.execute(
@@ -290,7 +284,6 @@ def test_heatmap_and_career_year_activity_filters_and_mutated_activity_type(
     finally:
         con.close()
 
-    # Unfiltered heatmap aggregates multi-stage cell with weighted centroid and distinct stage_count
     hm_all = alice.get("/api/v1/analytics/heatmap?lod=low")
     assert hm_all.status_code == 200
     cells_all = {c["h3_index"]: c for c in hm_all.json()["hex_cells"]}
@@ -300,7 +293,6 @@ def test_heatmap_and_career_year_activity_filters_and_mutated_activity_type(
     assert cells_all["hex_1_2"]["lon"] == pytest.approx(21.0)
     assert cells_all["hex_3_4"]["point_count"] == 50
 
-    # Year filter scopes both hex_cells and countries_visited
     hm_2001 = alice.get("/api/v1/analytics/heatmap?year=2001")
     assert hm_2001.status_code == 200
     cells_2001 = {c["h3_index"]: c for c in hm_2001.json()["hex_cells"]}
@@ -313,7 +305,6 @@ def test_heatmap_and_career_year_activity_filters_and_mutated_activity_type(
     assert career_2002.status_code == 200
     assert career_2002.json()["countries_visited"] == ["Country Two"]
 
-    # Mutate stage 1 activity_type via PATCH without rebuilding DuckDB
     patch_resp = alice.patch(
         f"/api/v1/projects/{proj1}/stages/{s1}",
         json={"activity_type": "trail_run"},
@@ -413,7 +404,6 @@ def test_lazy_silver_materialization_on_cache_hit_chart_and_highlights(
     assert len(highlights.geo_context) == 2
     assert not (set(spy.read_keys) & silver_keys)
 
-    # Delete caches for stage 0 only: only stage 0 materializes Silver Parquet and backfills
     s0_chart_key = stage_chart_cache_key(proj_uuid, stages[0].id)
     s0_events_key = stage_events_cache_key(proj_uuid, stages[0].id)
     h.store.delete(s0_chart_key)
@@ -432,7 +422,6 @@ def test_lazy_silver_materialization_on_cache_hit_chart_and_highlights(
     assert stages[1].silver_object_key not in spy.read_keys
     assert h.store.resolve_existing_path(s0_events_key).is_file()
 
-    # Next calls are cache hits again with 0 Silver reads
     spy.read_keys.clear()
     build_project_telemetry_chart(spy, proj_uuid, stages, max_points=100)
     build_project_highlights(spy, proj_uuid, stages)
@@ -555,7 +544,6 @@ def test_ingest_cli_loop_max_attempts_and_throttled_backoff(
         assert deferred_row.attempt_count == 0
         assert deferred_row.lease_expires_at is not None
 
-        # Within backoff window (+10s): not re-claimed
         res_early = process_pending_ingest_jobs(
             db,
             h.store,
@@ -566,7 +554,6 @@ def test_ingest_cli_loop_max_attempts_and_throttled_backoff(
         )
         assert res_early["claimed"] == 0
 
-        # After backoff expires (+61s): claimed and succeeded
         res_late = process_pending_ingest_jobs(
             db,
             h.store,
@@ -577,7 +564,6 @@ def test_ingest_cli_loop_max_attempts_and_throttled_backoff(
         )
         assert res_late["succeeded"] == 1
 
-    # Dry run + loop shutdown via stop_event
     with h.session_factory() as db:
         db.add(
             IngestJob(

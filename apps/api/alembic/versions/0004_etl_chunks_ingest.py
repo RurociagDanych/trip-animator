@@ -1,9 +1,4 @@
-"""Add ETL versioning, photo camera metadata, chunked renders, and webhook ingest queue.
-
-Revision ID: 0004_etl_chunks_ingest
-Revises: 0003_project_photos
-Create Date: 2026-11-17 16:45:00.000000
-"""
+"""Add ETL versioning, photo camera metadata, chunked renders, and webhook ingest queue."""
 
 from __future__ import annotations
 

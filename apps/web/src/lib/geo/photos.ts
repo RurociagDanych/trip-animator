@@ -282,8 +282,8 @@ export function matchPhotosToTimeline(
     if (bounds) {
       const { useTimeMetric, minMetric, maxMetric } = bounds;
 
-      // 1. Respect manual match if backend provided manual coordinates/progress
       if (
+        // Respect manual match if backend provided manual coordinates/progress
         photo.match_method === "manual" &&
         photo.matched_progress !== null &&
         photo.matched_progress !== undefined &&
@@ -298,7 +298,7 @@ export function matchPhotosToTimeline(
         pinPosition = hasValidGps ? [photo.lon!, photo.lat!] : matchedPosition;
         matchMethod = "manual";
       } else {
-        // 2. Timestamp match with timezone-mismatch fallback (>50km from GPS)
+        // Timestamp match with timezone-mismatch fallback (>50km from GPS)
         let tsCandidate: { position: [number, number]; progress: number } | null = null;
         if (takenAtMs !== null) {
           tsCandidate = matchByTimestamp(takenAtMs, stages, useTimeMetric, minMetric, maxMetric);
@@ -321,7 +321,6 @@ export function matchPhotosToTimeline(
           matchedProgress = tsCandidate.progress;
           matchMethod = "timestamp";
         } else if (hasValidGps) {
-          // 3. GPS nearest-segment projection
           const gpsCandidate = matchByGps(
             photo.lon!,
             photo.lat!,
@@ -584,7 +583,6 @@ export function evaluateTimelineSchedule(
   const desiredDisplayS = Math.max(0.2, (spec.photo_display_seconds ?? 3.0) * holdScale);
   const speedLut = getSpeedCurveLut(stages, spec);
 
-  // Non-paused schedule when pause_on_photo is off or no matched photos exist
   if (!spec.pause_on_photo || stops.length === 0) {
     let progressRatio = 0;
     if (clampedTimeS <= introHold) {

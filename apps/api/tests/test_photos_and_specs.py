@@ -43,8 +43,8 @@ def _make_jpeg_with_exif(
     exif[ExifTags.Base.Software] = "SecretCameraFirmware"
 
     exif_ifd = exif.get_ifd(ExifTags.IFD.Exif)
-    exif_ifd[36867] = date_str  # DateTimeOriginal
-    exif_ifd[36881] = offset_str  # OffsetTimeOriginal
+    exif_ifd[36867] = date_str
+    exif_ifd[36881] = offset_str
 
     gps_ifd = exif.get_ifd(ExifTags.IFD.GPSInfo)
     gps_ifd[1] = lat_ref
@@ -164,7 +164,6 @@ def test_photo_polyglot_rejection_and_size_bounds(
             f"{fname} should be rejected with 422, got {resp.status_code}"
         )
 
-    # Half-pair lat without lon -> 422
     half_pair = alice.post(
         f"/api/v1/projects/{proj_id}/photos",
         files={"file": ("ok.jpg", valid_jpeg, "image/jpeg")},
@@ -173,7 +172,6 @@ def test_photo_polyglot_rejection_and_size_bounds(
     )
     assert half_pair.status_code == 422
 
-    # Decompression bomb protection -> 422
     monkeypatch.setattr("trip_api.routers.photos.MAX_PHOTO_PIXELS", 50)
     bomb_resp = alice.post(
         f"/api/v1/projects/{proj_id}/photos",
@@ -182,7 +180,6 @@ def test_photo_polyglot_rejection_and_size_bounds(
     )
     assert bomb_resp.status_code == 422
 
-    # Oversized upload (> MAX_PHOTO_BYTES) -> 413
     monkeypatch.setattr("trip_api.routers.photos.MAX_PHOTO_BYTES", 100)
     oversized = alice.post(
         f"/api/v1/projects/{proj_id}/photos",
@@ -208,7 +205,6 @@ def test_photo_exif_extraction_metadata_stripping_crud_and_project_cleanup(
         headers={"X-CSRF-Token": csrf},
     ).json()["id"]
 
-    # Update RenderSpecV2 with 180s duration + adaptive zoom + photo settings
     patch_spec = alice.patch(
         f"/api/v1/projects/{proj_id}",
         json={
@@ -241,7 +237,6 @@ def test_photo_exif_extraction_metadata_stripping_crud_and_project_cleanup(
         lon_ref="E",
         orientation=6,
     )
-    # Missing CSRF -> 403
     assert (
         alice.post(
             f"/api/v1/projects/{proj_id}/photos",
@@ -261,16 +256,13 @@ def test_photo_exif_extraction_metadata_stripping_crud_and_project_cleanup(
     assert p1["caption"] == "Top of the col"
     assert p1["lat"] == pytest.approx(0.1, abs=1e-5)
     assert p1["lon"] == pytest.approx(0.2, abs=1e-5)
-    # 10:30:00 +02:00 -> 08:30:00Z
     assert datetime.fromisoformat(p1["taken_at_utc"].replace("Z", "+00:00")) == datetime(
         2001, 1, 1, 8, 30, 0, tzinfo=UTC
     )
-    # Orientation 6 transposed 2000x1000 -> 1000x2000, downscaled to max 1400 -> 700x1400
     assert p1["width"] == 700
     assert p1["height"] == 1400
     assert p1["enabled"] is True
 
-    # Verify stored full & thumb WebP blobs exist and have ZERO EXIF/metadata
     full_key = f"photos/{proj_id}/{p1['id']}.webp"
     thumb_key = f"photos/{proj_id}/{p1['id']}_thumb.webp"
     full_path = h.store.resolve_existing_path(full_key)
@@ -289,7 +281,6 @@ def test_photo_exif_extraction_metadata_stripping_crud_and_project_cleanup(
         assert max(thumb_img.size) == 640
         assert len(thumb_img.getexif()) == 0
 
-    # South/West hemisphere EXIF + RGBA PNG test
     sw_jpeg = _make_jpeg_with_exif(
         size=(200, 100),
         date_str="2001:01:02 15:00:00",
@@ -322,14 +313,12 @@ def test_photo_exif_extraction_metadata_stripping_crud_and_project_cleanup(
     p3 = up3.json()
     assert p3["match_method"] == "manual"
 
-    # Authenticated image stream (full & thumb)
     img_resp = alice.get(f"/api/v1/projects/{proj_id}/photos/{p1['id']}/image?variant=thumb")
     assert img_resp.status_code == 200
     assert img_resp.headers["content-type"] == "image/webp"
     assert img_resp.headers["x-content-type-options"] == "nosniff"
     assert img_resp.content[:4] == b"RIFF"
 
-    # BOLA checks for Bob
     assert bob.get(f"/api/v1/projects/{proj_id}/photos").status_code == 404
     assert bob.get(f"/api/v1/projects/{proj_id}/photos/{p1['id']}/image").status_code == 404
     assert (
@@ -348,7 +337,6 @@ def test_photo_exif_extraction_metadata_stripping_crud_and_project_cleanup(
         == 404
     )
 
-    # PATCH update & toggle
     patched = alice.patch(
         f"/api/v1/projects/{proj_id}/photos/{p2['id']}",
         json={"caption": "Updated SW", "enabled": False},
@@ -358,7 +346,6 @@ def test_photo_exif_extraction_metadata_stripping_crud_and_project_cleanup(
     assert patched.json()["caption"] == "Updated SW"
     assert patched.json()["enabled"] is False
 
-    # Enable sharing & verify public share redaction + image endpoint
     share_resp = alice.post(
         f"/api/v1/projects/{proj_id}/share",
         headers={"X-CSRF-Token": csrf},
@@ -372,7 +359,6 @@ def test_photo_exif_extraction_metadata_stripping_crud_and_project_cleanup(
     pub = anon.get(f"/api/v1/share/{slug}")
     assert pub.status_code == 200
     pub_photos = pub.json()["photos"]
-    # p2 was toggled enabled=False so only p1 and p3 are exposed
     pub_ids = {ph["id"] for ph in pub_photos}
     assert pub_ids == {p1["id"], p3["id"]}
     for ph in pub_photos:
@@ -391,7 +377,6 @@ def test_photo_exif_extraction_metadata_stripping_crud_and_project_cleanup(
     )
     assert anon.get(f"/api/v1/share/{slug}/photos/{p2['id']}/image").status_code == 404
 
-    # Delete single photo deletes DB row + both blobs
     del_p3 = alice.delete(
         f"/api/v1/projects/{proj_id}/photos/{p3['id']}",
         headers={"X-CSRF-Token": csrf},
@@ -402,7 +387,6 @@ def test_photo_exif_extraction_metadata_stripping_crud_and_project_cleanup(
     with pytest.raises(FileNotFoundError):
         h.store.resolve_existing_path(f"photos/{proj_id}/{p3['id']}_thumb.webp")
 
-    # Delete project cleans up remaining photo blobs (p1 and p2)
     del_proj = alice.delete(
         f"/api/v1/projects/{proj_id}",
         headers={"X-CSRF-Token": csrf},
@@ -439,7 +423,6 @@ def test_photo_project_limit_and_rate_limit(
         )
         assert r.status_code == 201
 
-    # 3rd exceeds project cap -> 422
     cap_resp = alice.post(
         f"/api/v1/projects/{proj_id}/photos",
         files={"file": ("p3.jpg", small_jpg, "image/jpeg")},
@@ -447,7 +430,6 @@ def test_photo_project_limit_and_rate_limit(
     )
     assert cap_resp.status_code == 422
 
-    # Raise project cap and hit rate limit (limit=5; 3 requests already counted above)
     monkeypatch.setattr("trip_api.routers.photos.MAX_PHOTOS_PER_PROJECT", 50)
     for i in range(2):
         r = alice.post(

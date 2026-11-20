@@ -1,5 +1,17 @@
 # Trip Animator — System Architecture
 
+> Purpose: Describe the system containers, the Bronze/Silver/Gold telemetry pipeline, the render pipeline and the configuration contract.
+> Audience: contributors, reviewers
+> Last reviewed: 2026-11-20
+
+Sections:
+
+- 1. System Context & Container Architecture
+- 2. Medallion Telemetry Pipeline (`Bronze -> Silver -> Gold`)
+- 3. Deterministic 1:1 WYSIWYG Render Pipeline
+- 4. Service & Container Topology (`infra/compose.yaml`)
+- 5. Configuration Contract (`.env.example`)
+
 Trip Animator is a security-hardened, multi-day GPS & Strava trip animation platform pairing a **React 19 + MapLibre/Deck.gl** editor with a **Python 3.12 Medallion Data Platform** (`Polars` + `GeoParquet` + `DuckDB` + `dbt-duckdb`) and a **deterministic Playwright + FFmpeg** server-side video render pipeline.
 
 ---

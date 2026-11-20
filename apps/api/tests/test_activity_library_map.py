@@ -202,7 +202,6 @@ def test_total_geometry_budget_is_disclosed_not_silently_incomplete(
     assert final_page["unevaluated_count"] == 0
     assert final_page["next_offset"] is None
     assert final_page["truncated"] is False
-    # Geographic requests fail rather than filtering a partially evaluated selection.
     for path in ("activities", "activities/map"):
         response = client.get(f"/api/v1/vault/{path}?area=-1,-1,2,2")
         assert response.status_code == 422

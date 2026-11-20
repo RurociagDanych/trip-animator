@@ -411,7 +411,6 @@ export function StravaPickerModal({
           </button>
         </div>
 
-        {/* Search + spacious non-overlapping Date Toolbar */}
         <div className="space-y-2.5 border-b border-border bg-canvas/50 px-5 py-3">
           <div className="flex flex-wrap items-center gap-2.5">
             <label className="relative min-w-[200px] flex-1">
@@ -464,7 +463,6 @@ export function StravaPickerModal({
             </label>
           </div>
 
-          {/* Quick Date Presets + Sport Filter Chips */}
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Date range presets">
               {(
@@ -550,7 +548,6 @@ export function StravaPickerModal({
           ) : null}
         </div>
 
-        {/* Sub-toolbar: GPS filter, Select All Visible, Batch Import, Pagination */}
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-5 py-2 text-xs text-ink-muted">
           <div className="flex flex-wrap items-center gap-3">
             <label className="inline-flex cursor-pointer items-center gap-1.5">
@@ -655,7 +652,6 @@ export function StravaPickerModal({
           </div>
         </div>
 
-        {/* Batch progress bar */}
         {batchProgress ? (
           <div className="border-b border-border bg-canvas/70 px-5 py-2">
             <div className="mb-1 flex items-center justify-between text-[11px] text-ink">

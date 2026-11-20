@@ -133,7 +133,6 @@ export function RenderHarnessPage() {
     ],
   );
 
-  // Zero-chrome viewport setup
   useEffect(() => {
     const prevMargin = document.body.style.margin;
     const prevOverflow = document.body.style.overflow;

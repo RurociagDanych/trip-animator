@@ -560,7 +560,6 @@ def query_stage_kpis_and_manifest_points(
         arrays["watts"], dtype=np.float64, fill_value=np.nan
     )
 
-    # Vectorized KPI computation matching `query_stage_kpis`
     total_distance_m = (
         float(np.max(cum_dist[dist_valid]) - np.min(cum_dist[dist_valid]))
         if np.any(dist_valid)
@@ -605,7 +604,6 @@ def query_stage_kpis_and_manifest_points(
         "elapsed_time_s": round(elapsed_time_s, 2),
     }
 
-    # Vectorized LTTB downsampling before Pydantic construction
     if n > max_points:
         lttb_xs = cum_dist if np.all(dist_valid) else np.arange(n, dtype=np.float64)
         if np.any(elev_valid):
@@ -1073,7 +1071,6 @@ def _detect_stage_climbs_safe(
     trim_start_s: float | None,
     trim_end_s: float | None,
 ) -> list[dict[str, Any]]:
-    """Invoke `trip_telemetry.extract_stage_highlights` and serialize climb dicts."""
     try:
         highlights = extract_stage_highlights(
             parquet_path,

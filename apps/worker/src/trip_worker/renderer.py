@@ -193,7 +193,6 @@ def make_ssrf_route_handler(
         parsed = urlparse(url)
         method = str(getattr(route.request, "method", "GET")).upper()
 
-        # Virtual in-memory photo asset route (`https://render-assets.local/{id}`)
         if (
             photo_assets is not None
             and method == "GET"

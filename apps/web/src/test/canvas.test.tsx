@@ -1,4 +1,3 @@
-// Activity coordinates below use a constructed numeric grid, not a recorded GPS route.
 import { act, render, screen } from "@testing-library/react";
 import { createRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -330,7 +329,6 @@ describe("TripStageCanvas WebGL wiring (canvas.test.tsx)", () => {
     const lastFollowJump = mockState.jumpToCalls[mockState.jumpToCalls.length - 1];
     expect(lastFollowJump?.zoom).toBeCloseTo(expectedFollowZoom, 3);
 
-    // Fit-track mode applies zoom_offset on top of fitted.zoom
     mockState.jumpToCalls = [];
     const fitSpec = {
       ...spec,
@@ -432,7 +430,6 @@ describe("TripStageCanvas WebGL wiring (canvas.test.tsx)", () => {
     const followPill2 = parsePxRect(screen.getByTestId("climb-callout-climb-2"));
     expect(rectsIntersect(followPill1, followPill2)).toBe(false);
 
-    // Switch to fit-track mode
     const fitSpec = { ...spec, camera_mode: "fit-track" as const };
     rerender(
       <TripStageCanvas
@@ -454,7 +451,6 @@ describe("TripStageCanvas WebGL wiring (canvas.test.tsx)", () => {
     const fitPill2 = parsePxRect(screen.getByTestId("climb-callout-climb-2"));
     expect(rectsIntersect(fitPill1, fitPill2)).toBe(false);
 
-    // Disable climb callouts -> neither pills nor SVG leaders render
     const disabledSpec = { ...fitSpec, show_climb_callouts: false };
     rerender(
       <TripStageCanvas
@@ -623,7 +619,6 @@ describe("TripStageCanvas WebGL wiring (canvas.test.tsx)", () => {
     };
     const multiStages = [stage1, stage2, stage3];
 
-    // 1. follow-marker mode
     const followSpec = createDefaultRenderSpecV2();
     followSpec.camera_mode = "follow-marker";
     followSpec.camera_preset = "flat";
@@ -652,7 +647,6 @@ describe("TripStageCanvas WebGL wiring (canvas.test.tsx)", () => {
     const zoomInStage1 = Number(frame.getAttribute("data-follow-zoom"));
     expect(zoomInStage1).toBeLessThan(14.5);
 
-    // Mid-boundary ramp (focusWeight = 0.5)
     rerender(
       <TripStageCanvas
         stages={multiStages}
@@ -668,7 +662,6 @@ describe("TripStageCanvas WebGL wiring (canvas.test.tsx)", () => {
     expect(zoomAtBoundary).toBeGreaterThan(zoomInStage1);
     expect(zoomAtBoundary).toBeLessThan(15.8);
 
-    // Full street focus inside stage-focus-2 (focusWeight = 1)
     rerender(
       <TripStageCanvas
         stages={multiStages}
@@ -683,7 +676,6 @@ describe("TripStageCanvas WebGL wiring (canvas.test.tsx)", () => {
     const zoomInStage2 = Number(frame.getAttribute("data-follow-zoom"));
     expect(zoomInStage2).toBeCloseTo(15.8, 3);
 
-    // Back to stage-focus-3 (focusWeight = 0)
     rerender(
       <TripStageCanvas
         stages={multiStages}
@@ -698,14 +690,12 @@ describe("TripStageCanvas WebGL wiring (canvas.test.tsx)", () => {
     const zoomInStage3 = Number(frame.getAttribute("data-follow-zoom"));
     expect(zoomInStage3).toBeLessThan(14.5);
 
-    // Zero bearing jumps across all follow-marker frames
     for (const call of mockState.jumpToCalls) {
       if (call.bearing !== undefined) {
         expect(call.bearing).toBe(0);
       }
     }
 
-    // 2. fit-track mode: smoothly zooms in to 15.8 during stage-focus-2 and restores fitCamera (10.5) afterward
     mockState.jumpToCalls = [];
     const fitSpec = { ...followSpec, camera_mode: "fit-track" as const };
 
@@ -752,7 +742,6 @@ describe("TripStageCanvas WebGL wiring (canvas.test.tsx)", () => {
     expect(Number(frame.getAttribute("data-follow-zoom"))).toBeCloseTo(15.8, 3);
     expect(mockState.zoom).toBeCloseTo(15.8, 3);
 
-    // Returning to stage-focus-3 restores fitCamera zoom and clears data-follow-zoom
     rerender(
       <TripStageCanvas
         stages={multiStages}
@@ -795,7 +784,6 @@ describe("TripStageCanvas WebGL wiring (canvas.test.tsx)", () => {
       fiets_score: 4.5,
     };
 
-    // Active duration = 20s (intro=0, outro=0), so progress 0.3 => summitTimeS = 6.0s
     const spec = createDefaultRenderSpecV2();
     spec.camera_mode = "fit-track";
     spec.duration_seconds = 20;
@@ -804,7 +792,6 @@ describe("TripStageCanvas WebGL wiring (canvas.test.tsx)", () => {
     spec.show_climb_callouts = true;
     spec.climb_callout_duration_s = 4.0;
 
-    // 1. Just after summit (elapsed = 0.05s -> fade-in opacity between 0.25 and 1)
     const { rerender } = render(
       <TripStageCanvas
         stages={[stage]}
@@ -824,7 +811,6 @@ describe("TripStageCanvas WebGL wiring (canvas.test.tsx)", () => {
     expect(fadeInOpacity).toBeLessThan(1.0);
     expect(parseFloat(fadeInLeader.style.opacity)).toBeCloseTo(fadeInOpacity, 2);
 
-    // 2. Mid-hold window (elapsed = 2.0s at p = 0.4 -> full opacity 1.0)
     rerender(
       <TripStageCanvas
         stages={[stage]}
@@ -839,7 +825,6 @@ describe("TripStageCanvas WebGL wiring (canvas.test.tsx)", () => {
     );
     expect(parseFloat(screen.getByTestId("climb-callout-climb-early").style.opacity)).toBeCloseTo(1, 2);
 
-    // 3. Fade-out window (elapsed = 3.8s at p = 0.49 -> fading out < 1)
     rerender(
       <TripStageCanvas
         stages={[stage]}
@@ -856,7 +841,6 @@ describe("TripStageCanvas WebGL wiring (canvas.test.tsx)", () => {
     expect(fadeOutOpacity).toBeGreaterThan(0.01);
     expect(fadeOutOpacity).toBeLessThan(0.8);
 
-    // 4. Expired after 4.0s (elapsed = 5.0s at p = 0.55 -> removed from DOM and layout solver)
     rerender(
       <TripStageCanvas
         stages={[stage]}
@@ -873,7 +857,6 @@ describe("TripStageCanvas WebGL wiring (canvas.test.tsx)", () => {
     expect(screen.queryByTestId("climb-leader-climb-early")).not.toBeInTheDocument();
     expect(screen.queryByTestId("climb-callout-leaders")).not.toBeInTheDocument();
 
-    // 5. climb_callout_duration_s = 0 -> permanent visibility at p = 0.55 with opacity 1
     const alwaysSpec = { ...spec, climb_callout_duration_s: 0 };
     rerender(
       <TripStageCanvas

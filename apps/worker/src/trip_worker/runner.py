@@ -1406,7 +1406,6 @@ def _split_job_into_chunks(
     chunk_size_frames: int,
     preroll_frames: int,
 ) -> bool:
-    """Create `render_job_chunks` rows and mark `render_jobs.is_chunked = TRUE`."""
     marked = conn.execute(
         MARK_JOB_CHUNKED_SQL,
         {
@@ -1947,7 +1946,6 @@ def process_claimed_job(
                         browser_host=browser_host,
                     )
                     if last_result in {"succeeded", "failed", "cancelled"}:
-                        # Check if parent job reached terminal status
                         with conn_factory() as check_conn:
                             row = check_conn.execute(
                                 CHECK_STATUS_SQL, {"job_id": job.id}

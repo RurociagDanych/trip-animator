@@ -396,13 +396,11 @@ def test_postgres_skip_locked_multi_worker_claim(pg: _PgHarness, tmp_path: Path)
             created_at=t0 + timedelta(seconds=1),
         )
 
-    # Worker A starts a claim transaction and holds the row lock on job1 without committing.
     with pg.connect() as conn_a, pg.connect() as conn_b:
         row_a = conn_a.execute(CLAIM_JOB_SQL, {"max_attempts": 3, "lease_seconds": 60}).fetchone()
         assert row_a is not None
         assert uuid.UUID(str(row_a[0])) == job1_id
 
-        # Worker B uses FOR UPDATE SKIP LOCKED and immediately claims job2 without blocking.
         claim_b = claim_next_job(conn_b, max_attempts=3, lease_seconds=60)
         assert claim_b is not None
         assert claim_b.id == job2_id
@@ -410,10 +408,8 @@ def test_postgres_skip_locked_multi_worker_claim(pg: _PgHarness, tmp_path: Path)
 
         conn_a.commit()
 
-        # No queued/expired jobs remain.
         assert claim_next_job(conn_b, max_attempts=3, lease_seconds=60) is None
 
-    # Also test 4 concurrent worker threads racing for 5 queued jobs via Barrier.
     with pg.connect() as conn:
         race_jobs = {
             _insert_render_job(
@@ -465,7 +461,6 @@ def test_postgres_fencing_token_rejects_stale_worker_and_reaps_exhausted(
         assert claim_a.id == job_id
         assert claim_a.attempt_count == 1
 
-        # Expire Worker A's lease and let Worker B reclaim (attempt_count -> 2).
         conn_b.execute(
             "UPDATE render_jobs SET lease_expires_at = NOW() - INTERVAL '10 seconds' WHERE id = %s",
             (job_id,),
@@ -518,9 +513,8 @@ def test_postgres_fencing_token_rejects_stale_worker_and_reaps_exhausted(
         ).fetchone()
         assert row == ("running", 0, 2, None, None)
 
-    # Full process_claimed_job fencing: Worker A (attempt_count=1) renders and reaches upload,
-    # while Worker B reclaims the expired lease (attempt_count=2) and completes the job.
-    # Fenced-out Worker A must return "lost_lease" without touching DB or Worker B's output.
+    # A fenced-out worker must return "lost_lease" without touching the DB or the
+    # output of the worker that reclaimed the expired lease.
     with pg.connect() as conn:
         job2_id = _insert_render_job(conn, owner_user_id=user_id, project_id=project_id)
         claim2_a = claim_next_job(conn, max_attempts=3, lease_seconds=60)
@@ -593,7 +587,6 @@ def test_postgres_fencing_token_rejects_stale_worker_and_reaps_exhausted(
         ).fetchone()
         assert final_row == ("succeeded", 2)
 
-        # Verify reap_exhausted_jobs transitions expired running jobs at max_attempts to failed.
         exhausted_id = _insert_render_job(
             conn,
             owner_user_id=user_id,
@@ -651,8 +644,6 @@ def test_postgres_lease_renewal_during_long_post_render(
         return output_mp4_path
 
     def _slow_verify(*_a: Any, **_kw: Any) -> Any:
-        # Shorten the lease in PostgreSQL, then sleep while the background renewer pushes
-        # `lease_expires_at` forward via HEARTBEAT_SQL.
         with pg.connect() as probe_conn:
             row = probe_conn.execute(
                 """
@@ -712,8 +703,6 @@ def test_postgres_deleted_project_fk_fallback_in_record_audit_event(
     with pg.connect() as conn:
         user_id, project_id, _ = _seed_user_project_stage(conn, store)
 
-    # 1. Direct record_audit_event with non-existent project_id triggers real
-    #    ForeignKeyViolation, rolls back, and retries with project_id=None.
     missing_project_id = uuid.uuid4()
     with pg.connect() as conn:
         record_audit_event(
@@ -732,8 +721,6 @@ def test_postgres_deleted_project_fk_fallback_in_record_audit_event(
         assert rows[0][2] == "render_failed"
         assert rows[0][3] == {"job_id": "missing-proj-job"}
 
-    # 2. End-to-end run_once where project is deleted mid-render: CASCADE removes render_jobs,
-    #    is_job_cancelled returns True, and _handle_cancel records audit event with project_id=None.
     with pg.connect() as conn:
         _insert_render_job(conn, owner_user_id=user_id, project_id=project_id)
 

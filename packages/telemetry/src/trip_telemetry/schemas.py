@@ -408,7 +408,6 @@ _CAMP_TOKENS: frozenset[str] = frozenset(
 def _tokenize_activity_text(
     raw: str | None,
 ) -> tuple[str, str, tuple[str, ...], frozenset[str]]:
-    """Split raw activity text into normalized snake_case, compact form, and word tokens."""
     if not raw:
         return "", "", (), frozenset()
     text = raw.strip()
@@ -452,7 +451,6 @@ def _classify_activity_tokens(
 
     combined_tokens = token_set | name_token_set
 
-    # Gravel / Mountain Bike
     if (
         (is_sport_type and compact in _GRAVEL_MTB_COMPACT)
         or bool(token_set & _GRAVEL_MTB_TOKENS)
@@ -460,7 +458,6 @@ def _classify_activity_tokens(
     ):
         return "gravel_mtb"
 
-    # Road / Virtual / E-Bike Cycling (with name-based upgrade to gravel_mtb)
     if (is_sport_type and compact in _CYCLING_COMPACT) or bool(token_set & _CYCLING_TOKENS):
         if (
             bool(combined_tokens & _GRAVEL_MTB_UPGRADE_TOKENS)
@@ -470,7 +467,6 @@ def _classify_activity_tokens(
             return "gravel_mtb"
         return "cycling"
 
-    # Trail Running
     if (
         (is_sport_type and compact in _TRAIL_RUN_COMPACT)
         or bool(token_set & _TRAIL_RUN_TOKENS)
@@ -478,41 +474,32 @@ def _classify_activity_tokens(
     ):
         return "trail_run"
 
-    # Running (with name-based upgrade to trail_run)
     if (is_sport_type and compact in _RUNNING_COMPACT) or bool(token_set & _RUNNING_TOKENS):
         if bool(combined_tokens & _TRAIL_RUN_UPGRADE_TOKENS):
             return "trail_run"
         return "running"
 
-    # Hiking / Snowshoeing / Trekking
     if (is_sport_type and compact in _HIKING_COMPACT) or bool(token_set & _HIKING_TOKENS):
         return "hiking"
 
-    # Walking / Urban / Skating
     if (is_sport_type and compact in _WALKING_COMPACT) or bool(token_set & _WALKING_TOKENS):
         return "walking"
 
-    # Skiing / Snowboarding / Ski Touring
     if (is_sport_type and compact in _SKIING_COMPACT) or bool(token_set & _SKIING_TOKENS):
         return "skiing"
 
-    # Kayaking / Paddling / Rowing / Water craft
     if (is_sport_type and compact in _KAYAK_COMPACT) or bool(token_set & _KAYAK_TOKENS):
         return "kayak"
 
-    # Swimming
     if (is_sport_type and compact in _SWIMMING_COMPACT) or bool(token_set & _SWIMMING_TOKENS):
         return "swimming"
 
-    # Climbing / Mountaineering / Summit
     if (is_sport_type and compact in _CLIMBING_COMPACT) or bool(token_set & _CLIMBING_TOKENS):
         return "climbing"
 
-    # Motorcycle
     if (is_sport_type and compact in _MOTORCYCLE_COMPACT) or bool(token_set & _MOTORCYCLE_TOKENS):
         return "motorcycle"
 
-    # Car / Overland / Bus Transfer
     if (
         (is_sport_type and compact in _CAR_COMPACT)
         or bool(token_set & _CAR_TOKENS)
@@ -520,11 +507,9 @@ def _classify_activity_tokens(
     ):
         return "car"
 
-    # Train / Rail Transfer
     if (is_sport_type and compact in _TRAIN_COMPACT) or bool(token_set & _TRAIN_TOKENS):
         return "train"
 
-    # Camp / Bivouac / Overnight
     if (is_sport_type and compact in _CAMP_COMPACT) or bool(token_set & _CAMP_TOKENS):
         return "camp"
 
@@ -778,7 +763,6 @@ class RenderSpecV2(BaseModel):
     statistics_panel: StatisticsPanelConfig = Field(default_factory=StatisticsPanelConfig)
     is_preview: bool = False
 
-    # v2.1 / B1-B8 + A1-A6 extensions (backward-compatible defaults)
     color_by: ColorByMode = "stage"
     terrain_exaggeration: float = Field(default=1.4, ge=0.5, le=3.0)
     elevation_curtain: bool = False

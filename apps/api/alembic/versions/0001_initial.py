@@ -1,9 +1,4 @@
-"""Initial OLTP database schema.
-
-Revision ID: 0001_initial
-Revises:
-Create Date: 2026-11-15 19:30:00.000000
-"""
+"""Initial OLTP database schema."""
 
 from __future__ import annotations
 

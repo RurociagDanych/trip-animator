@@ -251,7 +251,6 @@ export function buildTelemetryPlotOptions(
           ctx.rect(left, top, bboxW, bboxH);
           ctx.clip();
 
-          // Shaded climb bands
           for (const band of climbBands) {
             const x0 = u.valToPos(band.startDistM * distFactor, "x", true);
             const x1 = u.valToPos(band.endDistM * distFactor, "x", true);
@@ -262,7 +261,6 @@ export function buildTelemetryPlotOptions(
             ctx.fillRect(bx, top, bw, bboxH);
           }
 
-          // Vertical day boundary dividers
           ctx.strokeStyle = "rgba(148, 163, 184, 0.45)";
           ctx.lineWidth = 1;
           ctx.setLineDash([4, 3]);

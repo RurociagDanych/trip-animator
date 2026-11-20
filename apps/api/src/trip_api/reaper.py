@@ -60,11 +60,6 @@ def build_object_store(cfg: Settings) -> ObjectStore:
 
 
 def _delete_blob_safe(store: ObjectStore, key: str) -> tuple[bool, bool]:
-    """Delete an object key from storage.
-
-    Returns ``(ok, deleted)`` where ``ok`` indicates the blob is absent after the call
-    and ``deleted`` indicates a stored object was removed.
-    """
     if isinstance(store, LocalObjectStore):
         try:
             store.resolve_existing_path(key)

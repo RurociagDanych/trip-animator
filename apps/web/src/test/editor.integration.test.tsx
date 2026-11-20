@@ -1,4 +1,3 @@
-// Activity coordinates below use a constructed numeric grid, not a recorded GPS route.
 import { QueryClient } from "@tanstack/react-query";
 import { createMemoryHistory } from "@tanstack/react-router";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -268,11 +267,9 @@ describe("Login, Editor state, Stage reorder & Revision Conflict handling", () =
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<App router={router} queryClient={queryClient} />);
 
-    // Renders stages and parser warnings
     expect(await screen.findByText("Day 1 Climb")).toBeInTheDocument();
     expect(screen.getByText("No heart rate stream found")).toBeInTheDocument();
 
-    // Move Day 1 down -> triggers POST /stages/reorder with swapped stage_ids
     fireEvent.click(screen.getByRole("button", { name: "Move Day 1 Climb down" }));
     await waitFor(() => {
       const reorderCall = fetchSpy.mock.calls.find(([u]) =>
@@ -283,7 +280,6 @@ describe("Login, Editor state, Stage reorder & Revision Conflict handling", () =
       expect(body.stage_ids).toEqual(["stage-2", "stage-1"]);
     });
 
-    // Trigger dirty state and flush save -> 409 conflict banner appears
     fireEvent.change(screen.getByLabelText("Project title"), {
       target: { value: "Fictional Meridian Edited" },
     });
@@ -406,7 +402,6 @@ describe("Login, Editor state, Stage reorder & Revision Conflict handling", () =
 
     expect(await screen.findByText("Day 1 Climb")).toBeInTheDocument();
 
-    // Error banner appears when stage-2 geometry fails retries, and Retry recovers it
     const errorBanner = await screen.findByTestId("geometry-error-banner", {}, { timeout: 3000 });
     expect(errorBanner).toHaveTextContent("1 stage geometry failed to load.");
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
@@ -414,7 +409,6 @@ describe("Login, Editor state, Stage reorder & Revision Conflict handling", () =
       expect(screen.queryByTestId("geometry-error-banner")).not.toBeInTheDocument();
     });
 
-    // Select activity type icon in the inline stage editor and apply stage changes
     fireEvent.click(screen.getByRole("button", { name: "Hiking / Trekking" }));
     fireEvent.click(screen.getByRole("button", { name: "Apply stage changes" }));
     await waitFor(() => {
@@ -426,7 +420,6 @@ describe("Login, Editor state, Stage reorder & Revision Conflict handling", () =
       expect(body.activity_type).toBe("hiking");
     });
 
-    // Keyboard shortcuts: ArrowRight steps forward, ignored inside inputs
     fireEvent.keyDown(window, { key: "ArrowRight" });
     expect(useEditorStore.getState().currentTimeRatio).toBeCloseTo(0.02, 4);
     const titleInput = screen.getByLabelText("Project title");
@@ -437,7 +430,6 @@ describe("Login, Editor state, Stage reorder & Revision Conflict handling", () =
     fireEvent.keyDown(window, { key: "Home" });
     expect(useEditorStore.getState().currentTimeRatio).toBe(0);
 
-    // Undo / Redo on title change
     fireEvent.change(titleInput, { target: { value: "Fictional Meridian Revised" } });
     expect(screen.getByLabelText("Project title")).toHaveValue("Fictional Meridian Revised");
     fireEvent.click(screen.getByRole("button", { name: "Undo" }));
@@ -445,7 +437,6 @@ describe("Login, Editor state, Stage reorder & Revision Conflict handling", () =
     fireEvent.click(screen.getByRole("button", { name: "Redo" }));
     expect(screen.getByLabelText("Project title")).toHaveValue("Fictional Meridian Revised");
 
-    // Activity Log drawer
     fireEvent.click(screen.getByRole("button", { name: "Activity log" }));
     expect(await screen.findByText("Stage Gpx Uploaded")).toBeInTheDocument();
   });
@@ -558,7 +549,6 @@ describe("Login, Editor state, Stage reorder & Revision Conflict handling", () =
     expect(screen.getByTestId("strava-sparkline-1001")).toBeInTheDocument();
     expect(screen.queryByText("Zwift Recovery Spin")).not.toBeInTheDocument();
 
-    // Change date inputs -> forwards after & before query params
     fireEvent.change(screen.getByLabelText("From date"), { target: { value: "2001-06-01" } });
     fireEvent.change(screen.getByLabelText("To date"), { target: { value: "2001-06-30" } });
 
@@ -569,7 +559,6 @@ describe("Login, Editor state, Stage reorder & Revision Conflict handling", () =
       expect(stravaCall).toBeDefined();
     });
 
-    // Multi-select batch import (wait for re-fetched filtered query to resolve)
     fireEvent.click(await screen.findByLabelText("Select Equator Pass Pordoi Morning Ride"));
     fireEvent.click(screen.getByRole("button", { name: /Import 1 selected/i }));
 

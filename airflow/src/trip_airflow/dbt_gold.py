@@ -113,7 +113,6 @@ def _sync_silver_cache_deltas(
     active_keys = {ref.key for ref in refs}
     cache_root = cache_dir.resolve()
 
-    # Prune removed Silver keys from local delta cache
     for old_key in set(prev_manifest) - active_keys:
         match = SILVER_PARQUET_KEY_RE.match(old_key)
         if match is not None:

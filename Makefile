@@ -1,4 +1,27 @@
-.PHONY: setup bootstrap lint format format-check typecheck test test-pg dbt-parse dbt-build reap-dry-run check dev-api dev-web compose-config airflow-up airflow-down test-airflow lint-airflow
+.PHONY: help setup bootstrap lint format format-check typecheck test test-pg dbt-parse dbt-build reap-dry-run check dev-api dev-web compose-config airflow-up airflow-down test-airflow lint-airflow
+
+help:
+	@printf '%-16s %s\n' \
+		help 'List the available targets' \
+		setup 'Install Python and JavaScript dependencies' \
+		bootstrap 'Create .env, install dependencies, start PostgreSQL, run migrations' \
+		lint 'Run Ruff and ESLint' \
+		format 'Format Python code with Ruff' \
+		format-check 'Check Python formatting with Ruff' \
+		typecheck 'Run mypy and tsc' \
+		test 'Run pytest and Vitest' \
+		test-pg 'Run the PostgreSQL-backed API and worker tests' \
+		dbt-parse 'Parse the dbt project' \
+		dbt-build 'Build dbt models and tests on synthetic Silver data' \
+		reap-dry-run 'Show what the retention reaper would delete' \
+		check 'Run the full local gate' \
+		dev-api 'Start the FastAPI backend on :8000' \
+		dev-web 'Start the Vite dev server' \
+		compose-config 'Validate the Docker Compose configuration' \
+		airflow-up 'Build and start Airflow' \
+		airflow-down 'Stop Airflow' \
+		test-airflow 'Run the Airflow and infra script tests' \
+		lint-airflow 'Run Ruff and mypy on the Airflow project'
 
 setup:
 	uv sync --all-packages

@@ -1,4 +1,3 @@
-// Activity coordinates below use a constructed numeric grid, not a recorded GPS route.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type ApiError, apiClient, clearCsrfToken, setCsrfToken } from "../lib/api/client";
 import {

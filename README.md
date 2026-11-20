@@ -1,6 +1,10 @@
-# Trip Animator
+# trip-animator
 
-Trip Animator turns GPX/TCX tracks (or Strava activities, via an optional OAuth app you configure) into an animated multi-day trip film. A browser editor lets you arrange stages, preview the synchronized map and elevation/speed telemetry, and queue an MP4 render. Sharing and playback views are included.
+[![CI](https://github.com/RurociagDanych/trip-animator/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/RurociagDanych/trip-animator/actions/workflows/ci.yml)
+
+Trip Animator turns GPX/TCX tracks (or Strava activities, via an optional OAuth app you configure) into an animated multi-day trip film.
+
+A browser editor lets you arrange stages, preview the synchronized map and elevation/speed telemetry, and queue an MP4 render. Sharing and playback views are included.
 
 ![Local Trip Animator editor showing five consecutive cycling days on a loaded basemap, with elevation and speed telemetry](docs/demo/real-route-editor.png)
 
@@ -8,9 +12,9 @@ The screenshot is from the running local editor: five consecutive cycling days (
 
 Basemap: [OpenFreeMap](https://openfreemap.org), © [OpenMapTiles](https://openmaptiles.org) and © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright).
 
-**Status:** beta, self-hosted. See [docs/OPERATIONS.md](docs/OPERATIONS.md) for what has and has not been validated.
+## Status
 
-[![CI](https://github.com/RurociagDanych/trip-animator/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/RurociagDanych/trip-animator/actions/workflows/ci.yml)
+Active, self-hosted. Last substantive change: 2026-11-20. See [docs/OPERATIONS.md](docs/OPERATIONS.md) for what has and has not been validated.
 
 ## Architecture
 
@@ -34,18 +38,18 @@ flowchart TB
     Worker -->|"Load /render/:jobId"| Caddy
 ```
 
-Data flows Bronze (raw GPX/Strava payloads) → Silver (Parquet via Polars) → Gold (dbt-duckdb marts). Details in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Data flows Bronze (raw GPX/Strava payloads) → Silver (Parquet via Polars) → Gold (dbt-duckdb marts). Details in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Details in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Key design decisions
+### Key design decisions
 
 - **Editor and render harness share one React/map presentation.** The worker drives the `/render/$jobId` route of the same SPA, so exported frames match the preview. Trade-off: rendering needs a headless Chromium and map-tile access, and render cost depends on the host.
 - **Columnar ingestion pipeline (Polars/PyArrow → Parquet, DuckDB/dbt for analytics).** Telemetry is normalized once into a canonical point schema with multi-LOD simplification and queried with DuckDB, so charts and map geometry stay responsive on large tracks. Trade-off: more moving parts than storing points in PostgreSQL.
 - **Separate async render worker on a PostgreSQL queue.** Jobs are leased with `FOR UPDATE SKIP LOCKED`, so long renders never block editing and no extra broker is needed. Trade-off: throughput is bounded by PostgreSQL polling and worker count.
 - **Untrusted GPX is parsed in an isolated subprocess.** `defusedxml` with hard size, depth and time limits contains malformed or hostile files. Trade-off: per-upload process overhead.
 - **Airflow is required for Strava Vault synchronization.** It runs alongside the default Compose stack; library browsing and GPX import remain available without it, while sync requests wait for recovery. Other scheduled DAGs are opt-in. Trade-off: an additional service to operate.
-- **Fail-closed production config.** With `APP_ENV=production` the API refuses to start on dev auth, weak secrets or missing S3 credentials. Trade-off: more required configuration. See [docs/SECURITY.md](docs/SECURITY.md).
+- **Fail-closed production config.** With `APP_ENV=production` the API refuses to start on dev auth, weak secrets or missing S3 credentials. Trade-off: more required configuration. See [SECURITY.md](SECURITY.md).
 
-## Scale & limits
+### Scale and limits
 
 | Limit | Value | Source |
 | :--- | :--- | :--- |
@@ -54,6 +58,19 @@ Data flows Bronze (raw GPX/Strava payloads) → Silver (Parquet via Polars) → 
 | GPX parse timeout | 15 s | `PARSE_TIMEOUT_SECONDS` in `gpx_parser.py` |
 | Photo upload size | 15 MiB | `MAX_PHOTO_BYTES` in `apps/api/src/trip_api/routers/photos.py` |
 | Render artifact retention | 7 days (default) | `RENDER_RETENTION_DAYS` in `infra/compose.yaml` |
+
+### Repository layout
+
+| Path | Contents |
+| :--- | :--- |
+| `apps/web` | React 19 + TypeScript editor and `/render/$jobId` frame harness |
+| `apps/api` | FastAPI backend: auth, authoring, GPX/Strava ingestion, DuckDB queries |
+| `apps/worker` | Playwright + FFmpeg render worker |
+| `packages/telemetry` | GPX parser, Silver ETL, simplification, downsampling |
+| `dbt/` | Silver → Gold SQL models and tests |
+| `airflow/` | Strava Vault sync orchestration and optional scheduled jobs |
+| `infra/` | Docker Compose, Caddy, nginx |
+| `docs/` | Architecture, operations, threat model, deployment and specification documents (see [Docs index](#docs-index)) |
 
 ## Quick start
 
@@ -72,7 +89,7 @@ make dev-api                        # FastAPI on :8000
 make dev-web                        # Vite on :5173
 ```
 
-### Required Apache Airflow 3 Orchestration
+### Apache Airflow 3 orchestration (required for Strava sync)
 
 Airflow is included in the default Compose stack and is required to execute Strava Vault synchronization. Catalog browsing and GPX import remain available when it is stopped; sync requests stay queued until it recovers. The isolated project (`airflow/pyproject.toml`) uses a dedicated PostgreSQL database (`${AIRFLOW_DB:-airflow}`), avoiding application migration collisions. The supervised single-host runtime exposes its UI only on loopback `127.0.0.1:${AIRFLOW_PORT:-8081}` (`read_only: true`, UID `10001`). API and execution JWT keys are persisted in the Airflow logs volume unless explicitly configured. The sync DAG starts unpaused; other schedules are opt-in:
 
@@ -92,12 +109,29 @@ make test-airflow
 make lint-airflow
 ```
 
----
+## Configuration
 
-## Testing, Linting & Verification
+Copy [`.env.example`](.env.example) to `.env` (`make bootstrap` does this when `.env` is absent) and set the values locally. Never commit `.env`. The full contract is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#5-configuration-contract-envexample).
+
+| Area | Variables |
+| :--- | :--- |
+| Application runtime | `APP_ENV`, `LOG_LEVEL`, `DEV_AUTH_ENABLED`, `REGISTRATION_INVITE_CODE` |
+| Email verification and SMTP | `PUBLIC_BASE_URL`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_USE_TLS`, `EMAIL_VERIFICATION_TTL_HOURS` |
+| Database (PostgreSQL 17) | `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `DATABASE_URL` |
+| Security and encryption | `SESSION_SECRET`, `TOKEN_ENCRYPTION_KEY`, `ALLOWED_ORIGINS` |
+| Object storage (`local` or `s3`) | `OBJECT_STORE_BACKEND`, `LOCAL_OBJECT_STORE_DIR`, `S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET`, `S3_REGION` |
+| Strava OAuth2 | `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`, `STRAVA_REDIRECT_URI` |
+| Map tiles and render worker | `MAP_TILE_ALLOWLIST`, `RENDER_BASE_URL`, `WORKER_CONCURRENCY` |
+| Apache Airflow 3 | `AIRFLOW_PORT`, `AIRFLOW_DB`, `AIRFLOW_FERNET_KEY`, `AIRFLOW_API_SECRET_KEY`, `AIRFLOW_JWT_SECRET`, `AIRFLOW_SIMPLE_AUTH_USERS`, `GOLD_OUTPUT_DIR` |
+| Docker Compose and reverse proxy | `DOMAIN`, `COMPOSE_ALLOWED_ORIGINS`, `CADDY_HTTP_PUBLISH`, `CADDY_HTTPS_PUBLISH` |
+
+Production settings (`APP_ENV=production`, `METRICS_TOKEN`, secret overrides) are described in [docs/OPERATIONS.md](docs/OPERATIONS.md#docker-compose-deployment).
+
+## Testing
 
 ```bash
 # Workspace targets
+make help           # list all Makefile targets
 make lint           # ruff check apps packages + eslint
 make typecheck      # mypy --strict + tsc --noEmit
 make test           # pytest (telemetry, api, worker) + vitest
@@ -113,17 +147,36 @@ uv run mypy apps/api
 pnpm --filter @trip-animator/web build
 ```
 
-## Repo layout
+Run `make check` for the full local gate (lint, format check, typecheck, tests, Airflow tests, dbt build, Compose config).
 
-| Path | Contents |
-| :--- | :--- |
-| `apps/web` | React 19 + TypeScript editor and `/render/$jobId` frame harness |
-| `apps/api` | FastAPI backend: auth, authoring, GPX/Strava ingestion, DuckDB queries |
-| `apps/worker` | Playwright + FFmpeg render worker |
-| `packages/telemetry` | GPX parser, Silver ETL, simplification, downsampling |
-| `dbt/` | Silver → Gold SQL models and tests |
-| `airflow/` | Strava Vault sync orchestration and optional scheduled jobs |
-| `infra/` | Docker Compose, Caddy, nginx |
-| `docs/` | [Architecture](docs/ARCHITECTURE.md), [operations](docs/OPERATIONS.md), [security](docs/SECURITY.md), [threat model](docs/THREAT_MODEL.md), [tasks](docs/TASKS.md), AWS/VPS deployment |
+## Deployment
 
-License: see [LICENSE](LICENSE). Security reports: [SECURITY.md](SECURITY.md).
+A VPS deployment exists; AWS is an option, not a current deployment.
+
+- VPS (current deployment): the manual GitHub Actions workflow [`.github/workflows/deploy-vps.yml`](.github/workflows/deploy-vps.yml) (`workflow_dispatch`) connects to the VPS over SSH, checks out the requested Git ref, builds the Docker images, starts the Compose stack from `infra/compose.yaml` and verifies the health endpoint. See [docs/DEPLOY_VPS.md](docs/DEPLOY_VPS.md).
+- Docker Compose stack: `infra/compose.yaml`, see [docs/OPERATIONS.md](docs/OPERATIONS.md#docker-compose-deployment).
+- AWS (option, not deployed): Terraform in [infra/terraform/README.md](infra/terraform/README.md), see [docs/AWS_DEPLOYMENT.md](docs/AWS_DEPLOYMENT.md) and [docs/AWS_COST_ESTIMATE.md](docs/AWS_COST_ESTIMATE.md).
+
+## Docs index
+
+- [SECURITY.md](SECURITY.md): vulnerability reporting, publication safety and implemented security controls.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): containers, telemetry pipeline, render pipeline and configuration contract.
+- [docs/OPERATIONS.md](docs/OPERATIONS.md): local setup, Strava OAuth setup, Compose deployment, observability and Airflow.
+- [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md): trust boundaries, threats and control matrix.
+- [docs/DEPLOY_VPS.md](docs/DEPLOY_VPS.md): manual VPS deployment through GitHub Actions.
+- [docs/AWS_DEPLOYMENT.md](docs/AWS_DEPLOYMENT.md): optional AWS deployment architecture.
+- [docs/AWS_COST_ESTIMATE.md](docs/AWS_COST_ESTIMATE.md): approximate monthly AWS cost scenarios.
+- [docs/specs/ACTIVITY_LIBRARY_SPEC.md](docs/specs/ACTIVITY_LIBRARY_SPEC.md): Activity Library specification.
+- [GLOSSARY.md](GLOSSARY.md): Activity Library domain language.
+- [docs/demo/](docs/demo/): README screenshot and synthetic GPX generator.
+
+## Known gaps
+
+- Not yet established (see [docs/OPERATIONS.md](docs/OPERATIONS.md#status)): real Strava OAuth behavior, manual FIT import, full-length 1080p export and terrain/3D rendering.
+- PostgreSQL-backed tests skip when the test database (`TEST_POSTGRES_URL`) is unreachable, so a plain local `make test` does not exercise them.
+- VPS deployment is manual (`workflow_dispatch`); there is no automatic deployment on merge.
+- The AWS Terraform is only format-checked and validated in CI; it has never been applied.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

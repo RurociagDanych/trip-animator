@@ -199,14 +199,12 @@ describe("StageSidebar stage date ranges & auto-organize timezone", () => {
     const deleteBtn = await screen.findByTestId(`quick-delete-stage-${stage1.id}`);
     expect(deleteBtn).toHaveAttribute("aria-label", `Delete ${stage1.name}`);
 
-    // First click arms inline confirm without firing DELETE or selecting the stage
     fireEvent.click(deleteBtn);
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(onSelectStage).not.toHaveBeenCalled();
     const confirmBtn = screen.getByTestId(`quick-delete-stage-${stage1.id}`);
     expect(confirmBtn).toHaveAttribute("aria-label", `Confirm delete ${stage1.name}`);
 
-    // Second click executes DELETE and refreshes stages
     fireEvent.click(confirmBtn);
     await waitFor(() => {
       expect(fetchSpy).toHaveBeenCalledTimes(1);
@@ -448,7 +446,6 @@ describe("Per-stage camera focus UI, InspectorPanel climb tag duration, and edit
     const section = await screen.findByTestId("stage-camera-focus-section");
     expect(section).toBeInTheDocument();
 
-    // Click Street Focus preset
     fireEvent.click(screen.getByRole("button", { name: /Street Focus/i }));
     expect(calls[calls.length - 1]).toEqual({
       stageId: stage1.id,
@@ -460,7 +457,6 @@ describe("Per-stage camera focus UI, InspectorPanel climb tag duration, and edit
       },
     });
 
-    // Click Close preset
     fireEvent.click(screen.getByRole("button", { name: /Close/i }));
     expect(calls[calls.length - 1]).toEqual({
       stageId: stage1.id,
@@ -472,11 +468,9 @@ describe("Per-stage camera focus UI, InspectorPanel climb tag duration, and edit
       },
     });
 
-    // Click Custom preset
     fireEvent.click(screen.getByRole("button", { name: /Custom/i }));
     expect(calls[calls.length - 1]?.override?.focus_mode).toBe("custom");
 
-    // Adjust target zoom slider -> custom with updated zoom
     const zoomSlider = screen.getByLabelText("Stage target zoom");
     fireEvent.change(zoomSlider, { target: { value: "16.2" } });
     expect(calls[calls.length - 1]?.override).toMatchObject({
@@ -484,7 +478,6 @@ describe("Per-stage camera focus UI, InspectorPanel climb tag duration, and edit
       target_zoom: 16.2,
     });
 
-    // Adjust playback pace slider -> custom with updated speed
     const speedSlider = screen.getByLabelText("Stage playback speed");
     fireEvent.change(speedSlider, { target: { value: "0.5" } });
     expect(calls[calls.length - 1]?.override).toMatchObject({
@@ -492,13 +485,11 @@ describe("Per-stage camera focus UI, InspectorPanel climb tag duration, and edit
       speed_multiplier: 0.5,
     });
 
-    // Click Auto preset -> clears override (null)
     fireEvent.click(screen.getByRole("button", { name: /^Auto\s+1×$/i }));
     expect(calls[calls.length - 1]).toEqual({ stageId: stage1.id, override: null });
 
     firstRender.unmount();
 
-    // Render Stages tab with Street Focus override -> badge displayed on card
     const streetSpec = createDefaultRenderSpecV2();
     streetSpec.stage_camera_overrides = {
       [stage1.id]: {
@@ -548,7 +539,6 @@ describe("Per-stage camera focus UI, InspectorPanel climb tag duration, and edit
     fireEvent.click(alwaysBtn);
     expect(onUpdateSpec).toHaveBeenCalledWith({ climb_callout_duration_s: 0 });
 
-    // When duration is 0 (Always), clicking Always restores 4.0s
     rerender(
       <QueryClientProvider client={qc}>
         <InspectorPanel
@@ -567,7 +557,6 @@ describe("Per-stage camera focus UI, InspectorPanel climb tag duration, and edit
     fireEvent.click(screen.getByRole("button", { name: "Always" }));
     expect(onUpdateSpec).toHaveBeenCalledWith({ climb_callout_duration_s: 4.0 });
 
-    // Hidden when show_climb_callouts is false
     rerender(
       <QueryClientProvider client={qc}>
         <InspectorPanel
@@ -608,17 +597,14 @@ describe("Per-stage camera focus UI, InspectorPanel climb tag duration, and edit
     expect(useEditorStore.getState().spec.stage_camera_overrides["s-remove"]?.focus_mode).toBe("close");
     expect(useEditorStore.getState().hasUnsavedChanges).toBe(true);
 
-    // Prune deleted stage on setStages
     useEditorStore.getState().setStages([s1]);
     expect(useEditorStore.getState().spec.stage_camera_overrides["s-remove"]).toBeUndefined();
     expect(useEditorStore.getState().spec.stage_camera_overrides["s-keep"]?.focus_mode).toBe("street");
 
-    // Undo restores prior snapshot before s-remove override
     useEditorStore.getState().undo();
     expect(useEditorStore.getState().spec.stage_camera_overrides["s-remove"]).toBeUndefined();
     expect(useEditorStore.getState().spec.stage_camera_overrides["s-keep"]?.focus_mode).toBe("street");
 
-    // Setting auto removes entry
     useEditorStore.getState().setStageCameraOverride("s-keep", {
       focus_mode: "auto",
       target_zoom: null,

@@ -359,7 +359,6 @@ def _solve_clock_offset_seconds(
     *,
     camera_make_model: str | None = None,
 ) -> int:
-    """Solve integer-hour clock skew in [-12h, +14h] via trip_telemetry.solve_camera_clock_skew."""
     if not photos or not stage_parquets:
         return 0
     photo_inputs = [

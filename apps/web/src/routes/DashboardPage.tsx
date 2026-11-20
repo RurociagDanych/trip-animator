@@ -300,7 +300,6 @@ export function DashboardPage() {
           </Suspense>
         ) : (
           <>
-            {/* Strava Integration Card */}
             <section
               aria-label="Strava connection"
               className="flex flex-col justify-between gap-4 rounded-lg border border-border bg-surface p-4 sm:flex-row sm:items-center"
@@ -357,7 +356,6 @@ export function DashboardPage() {
               </div>
             </section>
 
-            {/* Project Grid */}
             {sessionQuery.isLoading || projectsQuery.isLoading ? (
               <div className="flex items-center justify-center gap-2 py-16 text-sm text-ink-muted">
                 <Loader2 className="h-4 w-4 animate-spin text-sky-accent" aria-hidden="true" />
@@ -451,7 +449,6 @@ export function DashboardPage() {
                           </div>
                         </div>
 
-                        {/* Route Silhouette Thumbnail */}
                         <Link
                           to="/projects/$projectId"
                           params={{ projectId: project.id }}

@@ -42,7 +42,7 @@ export function normalizeBearingDeg(deg: number): number {
 
 /**
  * Computes a weighted circular mean of bearings in degrees [0, 360),
- * avoiding 0/360 wrap-around discontinuities (e.g. averaging 355° and 5° -> 0°).
+ * avoiding 0/360 wrap-around discontinuities (e.g. averaging 355 and 5 degrees -> 0 degrees).
  */
 export function circularMeanBearingDeg(
   samples: readonly { deg: number | null; weight?: number }[],
@@ -572,7 +572,7 @@ export function computeCameraFrame(
   const label = cue ? cue.activeLabel : "";
 
   if (effectiveMode === "fit-track") {
-    // In fit-track mode, keep north-up (manualBearing only, never dynamic-3d 180° course-bearing flip)
+    // In fit-track mode, keep north-up (manualBearing only, never dynamic-3d 180-degree course-bearing flip)
     // and cap pitch so MapLibre fitBounds frames the full route cleanly without over-zooming out.
     const pitch = Math.min(25, Math.max(0, effectivePitch));
     const bearing =

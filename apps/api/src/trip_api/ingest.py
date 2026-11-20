@@ -591,7 +591,7 @@ def process_pending_ingest_jobs(
                 )
             )
 
-            # Decision 1A: Webhook create/update upserts into Activity Vault only,
+            # Webhook create/update upserts into the Activity Vault only,
             # hydrating streams ONLY when a Stage for this activity already exists.
             if not is_bulk_import and existing_stage is None:
                 upsert_res = upsert_strava_activity_to_vault(

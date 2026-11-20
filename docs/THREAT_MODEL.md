@@ -1,5 +1,15 @@
 # Trip Animator — OWASP Threat Model & Security Control Matrix
 
+> Purpose: Map Trip Animator trust boundaries and threats to the implemented security controls.
+> Audience: reviewers, contributors
+> Last reviewed: 2026-11-20
+
+Sections:
+
+- 1. Trust Boundaries & Crown-Jewel Assets
+- 2. Threat Model & Control Matrix
+- 3. Security Verification Checklist (CI & Pre-Release)
+
 This document establishes the security architecture for **Trip Animator**, aligned with the **OWASP Top 10 (2021)** and **OWASP ASVS Level 2** baselines.
 
 ---

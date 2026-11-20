@@ -1,13 +1,4 @@
-"""Comprehensive unit and integration tests for Strava incremental sync in Airflow.
-
-Tests cover:
-- 429 Too Many Requests with Retry-After header (listing, token refresh, detail, streams)
-- Expired OAuth token refresh lifecycle, AEAD persistence, and error modes
-- Multi-page pagination, termination conditions, max_pages limits, and 'after' calculation
-- Idempotency, cross-project and same-batch duplicate detection, and non-GPS skipping
-- Malformed, empty, length-mismatched streams, and resilient batch ingest
-- Project resolution, audit logging, and metric summarization
-"""
+"""Comprehensive unit and integration tests for Strava incremental sync in Airflow."""
 
 from __future__ import annotations
 
@@ -43,7 +34,6 @@ def _create_strava_connection(
     expires_at: datetime | None = None,
     athlete_id: str = "athlete-100",
 ) -> uuid.UUID:
-    """Helper to seed an encrypted Strava OAuth connection for testing."""
     key = harness.settings.decoded_encryption_key
     aad = f"oauth:{user_id}:strava".encode()
     if expires_at is None:
@@ -65,7 +55,6 @@ def _create_strava_connection(
 
 
 def _sample_valid_streams() -> dict[str, Any]:
-    """Helper returning a minimal valid Strava streams payload."""
     return {
         "latlng": {"data": [[0.12, 0.4], [0.125, 0.405], [0.13, 0.41]]},
         "time": {"data": [0, 60, 120]},
@@ -78,7 +67,6 @@ def test_strava_sync_429_too_many_requests_on_listing_raises(
     airflow_harness: AirflowTaskHarness,
     monkeypatch: Any,
 ) -> None:
-    """Verify HTTP 429 with Retry-After on activities listing raises StravaUpstreamError."""
     monkeypatch.setattr(socket, "getaddrinfo", fake_public_getaddrinfo)
     user = airflow_harness.create_user("rate_limit_list@example.com")
     conn_id = _create_strava_connection(airflow_harness, user.id)
@@ -114,7 +102,6 @@ def test_strava_sync_429_too_many_requests_on_token_refresh_raises(
     airflow_harness: AirflowTaskHarness,
     monkeypatch: Any,
 ) -> None:
-    """Verify that HTTP 429 with Retry-After on token refresh raises StravaUpstreamError."""
     monkeypatch.setattr(socket, "getaddrinfo", fake_public_getaddrinfo)
     user = airflow_harness.create_user("rate_limit_token@example.com")
     conn_id = _create_strava_connection(
@@ -151,7 +138,6 @@ def test_strava_sync_429_on_activity_detail_and_streams_resilient(
     airflow_harness: AirflowTaskHarness,
     monkeypatch: Any,
 ) -> None:
-    """Verify 429 on activity detail or streams increments failed_count without aborting."""
     monkeypatch.setattr(socket, "getaddrinfo", fake_public_getaddrinfo)
     user = airflow_harness.create_user("rate_limit_items@example.com")
     conn_id = _create_strava_connection(airflow_harness, user.id)
@@ -217,13 +203,11 @@ def test_strava_sync_expired_token_refresh_lifecycle_and_errors(
     airflow_harness: AirflowTaskHarness,
     monkeypatch: Any,
 ) -> None:
-    """Test expired OAuth token refresh flow: success, non-200 upstream, and malformed responses."""
     monkeypatch.setattr(socket, "getaddrinfo", fake_public_getaddrinfo)
     user = airflow_harness.create_user("token_refresh_flow@example.com")
     now = datetime.now(UTC)
     key = airflow_harness.settings.decoded_encryption_key
 
-    # 1. Successful refresh updates DB with newly encrypted tokens
     conn_id = _create_strava_connection(
         airflow_harness,
         user.id,
@@ -278,7 +262,6 @@ def test_strava_sync_expired_token_refresh_lifecycle_and_errors(
         assert conn.expires_at is not None
         assert int(conn.expires_at.replace(tzinfo=UTC).timestamp()) == new_expiry_epoch
 
-    # 2. Token not expired: does NOT call /oauth/token
     called_refresh = False
 
     def no_refresh_handler(request: httpx.Request) -> httpx.Response:
@@ -305,7 +288,6 @@ def test_strava_sync_expired_token_refresh_lifecycle_and_errors(
         )
     assert not called_refresh
 
-    # 3. Token expired and upstream returns 401 Unauthorized
     with airflow_harness.session_factory() as db:
         conn = db.get(OAuthConnection, conn_id)
         assert conn is not None
@@ -331,11 +313,10 @@ def test_strava_sync_expired_token_refresh_lifecycle_and_errors(
                 now=now,
             )
 
-    # 4. Token expired and upstream returns malformed payloads
     for malformed in [
-        {"access_token": "ok-acc"},  # missing expires_at
-        {"expires_at": 1234567890},  # missing access_token
-        "string-not-dict",  # not a dict
+        {"access_token": "ok-acc"},
+        {"expires_at": 1234567890},
+        "string-not-dict",
     ]:
         payload = malformed
 
@@ -356,7 +337,6 @@ def test_strava_sync_expired_token_refresh_lifecycle_and_errors(
                     now=now,
                 )
 
-    # 5. Token expired but strava_client_id is unset
     unset_settings = airflow_harness.settings.model_copy(update={"strava_client_id": None})
     with airflow_harness.session_factory() as db:
         empty_res = sync_strava_connection(
@@ -375,7 +355,6 @@ def test_strava_sync_multi_page_pagination(
     airflow_harness: AirflowTaskHarness,
     monkeypatch: Any,
 ) -> None:
-    """Test multi-page pagination: full pages, partial page, max_pages, and after timestamp."""
     monkeypatch.setattr(socket, "getaddrinfo", fake_public_getaddrinfo)
     user = airflow_harness.create_user("pagination@example.com")
     conn_id = _create_strava_connection(airflow_harness, user.id)
@@ -392,7 +371,6 @@ def test_strava_sync_multi_page_pagination(
             requested_pages.append(page)
             requested_after.append(after_val)
 
-            # Page 1: 2 items
             if page == 1:
                 return httpx.Response(
                     200,
@@ -401,7 +379,6 @@ def test_strava_sync_multi_page_pagination(
                         {"id": 1002, "name": "Stage 1002", "start_latlng": [0.11, 0.21]},
                     ],
                 )
-            # Page 2: 2 items
             if page == 2:
                 return httpx.Response(
                     200,
@@ -410,7 +387,6 @@ def test_strava_sync_multi_page_pagination(
                         {"id": 1004, "name": "Stage 1004", "start_latlng": [0.13, 0.23]},
                     ],
                 )
-            # Page 3: 1 item (< per_page, signals last page)
             if page == 3:
                 return httpx.Response(
                     200,
@@ -418,7 +394,6 @@ def test_strava_sync_multi_page_pagination(
                         {"id": 1005, "name": "Stage 1005", "start_latlng": [0.14, 0.24]},
                     ],
                 )
-            # Page 4+: empty
             return httpx.Response(200, json=[])
 
         if path.startswith("/api/v3/activities/") and not path.endswith("/streams"):
@@ -442,7 +417,6 @@ def test_strava_sync_multi_page_pagination(
             transport=httpx.MockTransport(pagination_handler), follow_redirects=False
         )
 
-    # 1. Run with max_pages=5, per_page=2: fetches pages 1, 2, and 3, stops before page 4
     with airflow_harness.session_factory() as db:
         res = sync_strava_connection(
             db=db,
@@ -460,11 +434,9 @@ def test_strava_sync_multi_page_pagination(
     assert res["fetched"] == 5
     assert res["ingested_count"] == 5
 
-    # Verify after timestamp was calculated based on lookback_days
     expected_after = int((datetime.now(UTC) - timedelta(days=10)).timestamp())
     assert abs(requested_after[0] - expected_after) <= 10
 
-    # 2. Verify that when stages already exist, after is based on latest stage started_at - 24 hours
     requested_pages.clear()
     requested_after.clear()
 
@@ -492,10 +464,8 @@ def test_strava_sync_multi_page_pagination(
 
     assert abs(requested_after[0] - expected_recent_after) <= 5
 
-    # 3. Verify max_pages ceiling truncation
     requested_pages.clear()
     with airflow_harness.session_factory() as db:
-        # Create a new user with no stages
         user2 = airflow_harness.create_user("max_pages_ceiling@example.com")
         conn_id2 = _create_strava_connection(airflow_harness, user2.id)
         res_ceiling = sync_strava_connection(
@@ -505,7 +475,7 @@ def test_strava_sync_multi_page_pagination(
             connection_id=conn_id2,
             user_id=user2.id,
             http_client_factory=client_factory,
-            max_pages=2,  # Exactly 2 pages requested
+            max_pages=2,
             per_page=2,
         )
     assert requested_pages == [1, 2]
@@ -516,12 +486,10 @@ def test_strava_sync_idempotent_resync_and_duplicate_dedup(
     airflow_harness: AirflowTaskHarness,
     monkeypatch: Any,
 ) -> None:
-    """Test idempotent re-sync: existing activities, duplicates in payload, and non-GPS skipping."""
     monkeypatch.setattr(socket, "getaddrinfo", fake_public_getaddrinfo)
     user = airflow_harness.create_user("idempotency@example.com")
     conn_id = _create_strava_connection(airflow_harness, user.id)
 
-    # Pre-seed an activity in another project
     prior_proj = airflow_harness.create_project(user.id, "Prior Bike Tour")
     airflow_harness.ingest_sample_stage(prior_proj, name="Existing 7001", strava_activity_id=7001)
 
@@ -565,7 +533,6 @@ def test_strava_sync_idempotent_resync_and_duplicate_dedup(
             transport=httpx.MockTransport(idempotency_handler), follow_redirects=False
         )
 
-    # First run: 7001 duplicate, 7002/7003 no GPS, 7004 ingested, duplicate skipped
     with airflow_harness.session_factory() as db:
         res1 = sync_strava_connection(
             db=db,
@@ -579,14 +546,13 @@ def test_strava_sync_idempotent_resync_and_duplicate_dedup(
     assert res1 == {
         "connection_id": str(conn_id),
         "fetched": 5,
-        "skipped_duplicate": 2,  # 7001 (already in DB) + second 7004
-        "skipped_no_gps": 2,  # 7002 (None) + 7003 ([])
-        "ingested_count": 1,  # first 7004
+        "skipped_duplicate": 2,
+        "skipped_no_gps": 2,
+        "ingested_count": 1,
         "failed_count": 0,
     }
-    assert detail_calls == [7004]  # No detail requested for duplicates or non-GPS
+    assert detail_calls == [7004]
 
-    # Second immediate run with exact same response: 7004 is now also in DB
     detail_calls.clear()
     with airflow_harness.session_factory() as db:
         res2 = sync_strava_connection(
@@ -601,19 +567,18 @@ def test_strava_sync_idempotent_resync_and_duplicate_dedup(
     assert res2 == {
         "connection_id": str(conn_id),
         "fetched": 5,
-        "skipped_duplicate": 3,  # 7001, first 7004, second 7004
+        "skipped_duplicate": 3,
         "skipped_no_gps": 2,
         "ingested_count": 0,
         "failed_count": 0,
     }
-    assert detail_calls == []  # Zero detail calls made
+    assert detail_calls == []
 
 
 def test_strava_sync_malformed_empty_and_corrupt_streams(
     airflow_harness: AirflowTaskHarness,
     monkeypatch: Any,
 ) -> None:
-    """Verify corrupt, empty, and failing streams are handled cleanly without aborting the batch."""
     monkeypatch.setattr(socket, "getaddrinfo", fake_public_getaddrinfo)
     user = airflow_harness.create_user("malformed_streams@example.com")
     conn_id = _create_strava_connection(airflow_harness, user.id)
@@ -633,7 +598,6 @@ def test_strava_sync_malformed_empty_and_corrupt_streams(
                     {"id": 807, "name": "Valid Last", "start_latlng": [0.16, 0.26]},
                 ],
             )
-        # Detail endpoints
         if path == "/api/v3/activities/805":
             return httpx.Response(404, json={"message": "Activity not found"})
         if path.startswith("/api/v3/activities/") and not path.endswith("/streams"):
@@ -647,16 +611,13 @@ def test_strava_sync_malformed_empty_and_corrupt_streams(
                     "start_date": "2001-07-02T09:00:00Z",
                 },
             )
-        # Streams endpoints
         if path == "/api/v3/activities/801/streams" or path == "/api/v3/activities/807/streams":
             return httpx.Response(200, json=_sample_valid_streams())
         if path == "/api/v3/activities/802/streams":
-            return httpx.Response(200, json={})  # empty dict
+            return httpx.Response(200, json={})
         if path == "/api/v3/activities/803/streams":
-            # Missing latlng
             return httpx.Response(200, json={"time": {"data": [0, 10, 20]}})
         if path == "/api/v3/activities/804/streams":
-            # Out-of-range coords causes zero valid points -> raises ValueError
             return httpx.Response(
                 200,
                 json={
@@ -687,11 +648,10 @@ def test_strava_sync_malformed_empty_and_corrupt_streams(
         "fetched": 7,
         "skipped_duplicate": 0,
         "skipped_no_gps": 0,
-        "ingested_count": 2,  # 801 and 807
-        "failed_count": 5,  # 802 (empty), 803 (no latlng), 804 (bad coords), 805 (404), 806 (500)
+        "ingested_count": 2,
+        "failed_count": 5,
     }
 
-    # Verify that valid stages were committed and their Bronze/Silver/LOD artifacts exist
     with airflow_harness.session_factory() as db:
         valid_stages = list(
             db.scalars(
@@ -712,12 +672,10 @@ def test_strava_sync_project_reuse_and_summary_aggregation(
     airflow_harness: AirflowTaskHarness,
     monkeypatch: Any,
 ) -> None:
-    """Verify autosync project is reused and summarize_strava_sync aggregates accurately."""
     monkeypatch.setattr(socket, "getaddrinfo", fake_public_getaddrinfo)
     user = airflow_harness.create_user("project_reuse@example.com")
     conn_id = _create_strava_connection(airflow_harness, user.id)
 
-    # Pre-create a project with strava_auto_sync flag in settings_json
     with airflow_harness.session_factory() as db:
         custom_proj = Project(
             owner_user_id=user.id,
@@ -767,7 +725,6 @@ def test_strava_sync_project_reuse_and_summary_aggregation(
         assert stage is not None
         assert stage.project_id == custom_proj_id
 
-        # Verify audit event
         audit = db.scalar(
             select(AuditEvent).where(
                 AuditEvent.project_id == custom_proj_id,
@@ -781,7 +738,6 @@ def test_strava_sync_project_reuse_and_summary_aggregation(
             "activity_type": stage.activity_type,
         }
 
-    # Verify summarize_strava_sync with multiple connection dicts
     multi_results = [
         {
             "fetched": 10,

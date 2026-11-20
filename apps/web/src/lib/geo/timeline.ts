@@ -360,7 +360,6 @@ export function buildTimelineFromProject(
       stage.activity_type ?? feature?.properties?.activity_type,
     );
 
-    // Compute raw local distances along coordinates, skipping malformed tuples
     const rawCoords: { lon: number; lat: number; segmentIdx: number; rawDistM: number }[] = [];
     let runningRawDist = 0;
     lines.forEach((line, segIdx) => {
@@ -456,7 +455,6 @@ function computeTimelineBoundsUncached(stages: readonly TimelineStage[]): [numbe
     return DEFAULT_BOUNDS;
   }
 
-  // Ensure non-degenerate bbox
   if (Math.abs(maxLon - minLon) < 0.002) {
     minLon -= 0.005;
     maxLon += 0.005;
@@ -1144,13 +1142,11 @@ function sliceStagePath(
         const prevM = metricOf(prev);
         const span = m - prevM;
         if (span > 0) {
-          // Entry interpolation at minMetric
           if (prevM < minMetric && m >= minMetric) {
             const tEntry = clamp01((minMetric - prevM) / span);
             const entryPt = interpolatePoint(prev, p, tEntry);
             currentSeg.push([entryPt.lonUnwrapped, entryPt.lat]);
           }
-          // Exit interpolation at maxMetric
           if (prevM <= maxMetric && m > maxMetric) {
             const tExit = clamp01((maxMetric - prevM) / span);
             const exitPt = interpolatePoint(prev, p, tExit);
@@ -1334,7 +1330,6 @@ export function evaluateTimeline(
   }
   const prevPt = allSamples[prevIdx]?.point ?? activePoint;
 
-  // Visible path calculation based on visibility_mode and color_by
   const durationS = options?.durationS ?? spec.duration_seconds;
   const isPreview = options?.isPreview ?? spec.is_preview;
   const trailDenominator = isPreview
@@ -1378,7 +1373,6 @@ export function evaluateTimeline(
     }
   });
 
-  // Overnight / stage transition stops
   const overnightStops: StopMarker[] = [];
   if (spec.show_overnight_stops) {
     nonEmptyStages.forEach((stage, idx) => {
@@ -1400,7 +1394,6 @@ export function evaluateTimeline(
     });
   }
 
-  // >2km inter-stage transfer arcs
   const transferArcs: TransferArcSegment[] = [];
   if (spec.show_transfer_arcs !== false) {
     const rawArcs = cache.transferArcs;
@@ -1619,7 +1612,6 @@ export function computeAdaptiveFollowCamera(
 
   const { vEff: currentVelocity } = estimateVelocityAt(progress);
 
-  // Compute velocity-scaled circular course bearing across nearby chord windows.
   const chordMeters = Math.max(25, currentVelocity * 0.4);
   const bearingSamples: { deg: number | null; weight: number }[] = [];
   const totalDist = Math.max(
@@ -1643,7 +1635,6 @@ export function computeAdaptiveFollowCamera(
     ? Math.min(3, Math.max(-3, spec.follow_zoom_offset))
     : 0;
 
-  // Fixed legacy zoom mode fallback when explicitly requested
   if (spec.follow_zoom_mode === "fixed") {
     const fixedZoom = Math.min(16.5, Math.max(4.5, computeFollowZoom(bounds) + zoomOffset));
     return {
@@ -1701,7 +1692,7 @@ export function computeAdaptiveFollowCamera(
   let latSum = 0;
   let posWeightSum = 0;
   for (let k = 0; k <= 10; k++) {
-    const u = k / 10; // 0..1 spanning [-dtBeforeP, +dtAfterP]
+    const u = k / 10;
     const offsetP = -dtBeforeP + (dtBeforeP + dtAfterP) * u;
     const w = Math.pow(Math.sin(Math.PI * ((u + 0.06) / 1.12)), 2);
     const samplePt = sampleIndexedAtProgress(indexed, clamp01(progress + offsetP));

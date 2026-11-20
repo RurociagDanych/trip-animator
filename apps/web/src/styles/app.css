@@ -54,7 +54,6 @@
   background-size: 28px 28px;
 }
 
-/* Subtle dark scrollbars for studio panels */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -73,7 +72,6 @@
   background: rgba(143, 160, 178, 0.4);
 }
 
-/* uPlot theme tweaks */
 .uplot {
   font-family: var(--font-mono);
   color: var(--color-ink-muted);

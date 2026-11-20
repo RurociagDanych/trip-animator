@@ -416,7 +416,6 @@ def _replace_activity_z14_tiles(
     user_id: uuid.UUID,
     tiles: Sequence[tuple[int, int]] | set[tuple[int, int]] | frozenset[tuple[int, int]],
 ) -> int:
-    """Replace Z14 tile edges for a VaultActivity row."""
     db.execute(
         delete(VaultActivityTile).where(
             VaultActivityTile.vault_activity_id == vault_activity_id,
@@ -812,7 +811,6 @@ def upsert_strava_activity_to_vault(
         act.tile_precision = "none"
         act.tile_count_z14 = 0
 
-    # Link any existing unlinked Stage rows for this user + Strava activity.
     unlinked_stage_ids = list(
         db.scalars(
             select(Stage.id)
@@ -893,7 +891,6 @@ def _run_strava_discovery(
     client_factory: Callable[[], httpx.Client],
     now: datetime,
 ) -> bool:
-    """Fetch `/api/v3/athlete` (gears) and athlete stats; return False if paused."""
     auth_headers = {"Authorization": f"Bearer {access_token}"}
     now_utc = ensure_utc(now)
 
@@ -902,7 +899,6 @@ def _run_strava_discovery(
     state.lease_expires_at = now_utc + timedelta(seconds=VAULT_SYNC_LEASE_SECONDS)
     db.commit()
 
-    # 1. Athlete profile for gear catalog (tolerate 404/non-200 gracefully).
     athlete_resp = _strava_vault_request(
         client_factory,
         settings,
@@ -931,7 +927,6 @@ def _run_strava_discovery(
         return False
     db.commit()
 
-    # 2. Athlete stats for estimated total denominator (tolerate 404/non-200 gracefully).
     if conn.external_athlete_id and state.mode == "full_backfill":
         stats_resp = _strava_vault_request(
             client_factory,
@@ -1615,7 +1610,6 @@ def _downsample_to_summary_polyline(
     *,
     max_points: int = VAULT_SYNC_STAGE_POLYLINE_MAX_POINTS,
 ) -> str | None:
-    """Simplify `(lat, lon, segment_idx)` points to <= `max_points` and encode Google polyline."""
     if not points_with_seg:
         return None
     simplified = list(points_with_seg)
@@ -2045,7 +2039,6 @@ def backfill_user_stages_to_vault(
             logger.warning("Failed preparing Vault geometry for stage %s: %s", st.id, exc)
             failed_stages += 1
 
-    # Phase 2: Short DB write transaction linking/mirroring prepared stages.
     mirrored_stages = 0
     linked_stages = 0
     now_utc = datetime.now(UTC)

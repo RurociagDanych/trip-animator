@@ -1,4 +1,3 @@
-// Activity coordinates below use a constructed numeric grid, not a recorded GPS route.
 import { QueryClient } from "@tanstack/react-query";
 import { createMemoryHistory } from "@tanstack/react-router";
 import { act, fireEvent, render, screen } from "@testing-library/react";
@@ -216,15 +215,12 @@ describe("EditorPage 60Hz playback isolation", () => {
     const router = createAppRouter(history);
     render(<App router={router} queryClient={queryClient} />);
 
-    // Wait for EditorPage and all initial telemetry queries to settle
     expect(await screen.findByText("Fictional Stage 1")).toBeInTheDocument();
     await screen.findByLabelText("Timeline scrubber");
 
-    // Switch to Camera tab so "Add cue" is rendered before measuring playback ticks
     fireEvent.click(screen.getByRole("tab", { name: "Camera" }));
     const addCueBtn = await screen.findByRole("button", { name: /Add cue/i });
 
-    // Allow any pending React Query microtasks to flush
     await act(async () => {
       await Promise.resolve();
     });

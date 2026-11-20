@@ -2,39 +2,28 @@ aws_region   = "eu-central-1"
 project_name = "trip-animator"
 environment  = "dev"
 
-# Cost-optimized single NAT Gateway + S3 Gateway Endpoint
 enable_nat_gateway = true
 single_nat_gateway = true
 
-# CloudFront origin cloaking (ALB restricted to CloudFront prefix list + X-Origin-Verify)
 restrict_alb_to_cloudfront = true
 enable_origin_verify       = true
 enable_waf                 = false
 
-# Low-cost single-AZ PostgreSQL 17 (Graviton)
 db_instance_class          = "db.t4g.micro"
 db_multi_az                = false
 db_backup_retention_period = 7
 db_deletion_protection     = false
 db_skip_final_snapshot     = true
 
-# Container image tag & Graviton ARM64 runtime
 image_tag        = "latest"
 cpu_architecture = "ARM64"
 
-# Scale-to-zero Fargate Spot render worker
 api_min_capacity    = 1
 api_max_capacity    = 2
 worker_min_capacity = 0
 worker_max_capacity = 2
 
-# Optional scheduled dbt Gold run (false by default in dev)
 enable_dbt_schedule = false
-
-# Optional custom domain + ACM certificates
-# domain_name                    = "dev.trip-animator.example.com"
-# cloudfront_acm_certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/..."
-# alb_acm_certificate_arn        = "arn:aws:acm:eu-central-1:123456789012:certificate/..."
 
 tags = {
   Owner      = "platform-team"

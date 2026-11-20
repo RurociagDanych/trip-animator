@@ -317,7 +317,6 @@ def build_reference_parquets(ref_dir: Path) -> Path:
     """Materialize compact static GeoParquet reference tables into `ref_dir`."""
     ref_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. countries.parquet
     c_iso2, c_iso3, c_names, c_min_lon, c_min_lat, c_max_lon, c_max_lat, c_geom = (
         [],
         [],
@@ -359,7 +358,6 @@ def build_reference_parquets(ref_dir: Path) -> Path:
         [min(c_min_lon), min(c_min_lat), max(c_max_lon), max(c_max_lat)],
     )
 
-    # 2. admin_regions.parquet
     r_code, r_name, r_ciso, r_cname, r_min_lon, r_min_lat, r_max_lon, r_max_lat, r_geom = (
         [],
         [],
@@ -402,7 +400,6 @@ def build_reference_parquets(ref_dir: Path) -> Path:
         [min(r_min_lon), min(r_min_lat), max(r_max_lon), max(r_max_lat)],
     )
 
-    # 3. mountain_passes.parquet
     p_id, p_name, p_elev, p_ciso, p_reg, p_lat, p_lon, p_geom = (
         [],
         [],

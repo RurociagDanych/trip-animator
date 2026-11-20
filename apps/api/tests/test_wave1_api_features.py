@@ -169,7 +169,6 @@ def test_multiformat_tcx_upload_trim_parity_and_auto_organize(
     ).json()
     proj_id = proj["id"]
 
-    # Reject bad magic bytes
     bad = alice.post(
         f"/api/v1/projects/{proj_id}/tracks",
         files={"file": ("not_a_track.fit", b"NOT-A-FIT-FILE", "application/octet-stream")},
@@ -177,7 +176,6 @@ def test_multiformat_tcx_upload_trim_parity_and_auto_organize(
     )
     assert bad.status_code == 422
 
-    # Upload TCX via /tracks alias
     tcx_up = alice.post(
         f"/api/v1/projects/{proj_id}/tracks",
         files={"file": ("stage_day2.tcx", SAMPLE_TCX, "application/vnd.garmin.tcx+xml")},
@@ -191,7 +189,6 @@ def test_multiformat_tcx_upload_trim_parity_and_auto_organize(
     assert tcx_stage["etl_version"] >= 2
     assert tcx_stage["point_count"] == 3
 
-    # Upload an earlier GPX stage so chronological sorting flips order.
     gpx_early = _make_gpx_with_start("Day 1 Morning", "2000-12-31T08:00:00Z")
     s1 = alice.post(
         f"/api/v1/projects/{proj_id}/gpx",
@@ -200,7 +197,6 @@ def test_multiformat_tcx_upload_trim_parity_and_auto_organize(
     ).json()
     assert s1["source_format"] == "gpx"
 
-    # Trim parity on s1: trim [60, 180] -> Silver Parquet is_trimmed & Postgres KPIs updated
     trimmed = alice.patch(
         f"/api/v1/projects/{proj_id}/stages/{s1['id']}",
         json={"trim_start_s": 60.0, "trim_end_s": 180.0},
@@ -226,7 +222,6 @@ def test_multiformat_tcx_upload_trim_parity_and_auto_organize(
         stage_chart_cache_key(uuid.UUID(proj_id), uuid.UUID(s1["id"]))
     ).is_file()
 
-    # Re-trimming back to untrimmed [0, 240] must succeed (checks full Silver duration)
     untrimmed = alice.patch(
         f"/api/v1/projects/{proj_id}/stages/{s1['id']}",
         json={"trim_start_s": None, "trim_end_s": None},
@@ -235,7 +230,6 @@ def test_multiformat_tcx_upload_trim_parity_and_auto_organize(
     assert untrimmed.status_code == 200
     assert untrimmed.json()["point_count"] == 5
 
-    # Auto-organize sorts chronologically, clusters day_index across >6h gap, sets palette + bed
     org = alice.post(
         f"/api/v1/projects/{proj_id}/stages/auto-organize",
         json={"overnight_gap_hours": 6.0, "palette_preset": "topo-emerald"},
@@ -279,7 +273,7 @@ def test_photos_exif_camera_align_clock_shift_and_pin(
         model="ILCE-7M4",
         date_str="2001:01:01 10:02:00",
         offset_str="+00:00",
-        lat_dms=((0, 1), (6, 1), (14, 1)),  # ~0.1039 (near track pt 2: 0.104)
+        lat_dms=((0, 1), (6, 1), (14, 1)),
         lon_dms=((0, 1), (12, 1), (14, 1)),
     )
     up = alice.post(
@@ -290,10 +284,8 @@ def test_photos_exif_camera_align_clock_shift_and_pin(
     assert up.status_code == 201, up.text
     p1 = up.json()
     assert p1["camera_make_model"] == "SONY ILCE-7M4"
-    # Auto-aligned via GPS since timestamp was 2h off (>300s)
     assert p1["match_method"] in {"gps", "timestamp"}
 
-    # Upload photo without GPS whose timestamp is also 2h ahead (10:01:00Z) -> unmatched initially
     jpg_nogps = _make_jpeg_with_camera_exif(
         make="SONY",
         model="ILCE-7M4",
@@ -309,7 +301,6 @@ def test_photos_exif_camera_align_clock_shift_and_pin(
     ).json()
     assert p2["match_method"] == "unmatched"
 
-    # Dry-run shift-clock (-7200s) previews match without persisting
     dry = alice.post(
         f"/api/v1/projects/{proj_id}/photos/shift-clock",
         json={"offset_seconds": -7200, "dry_run": True},
@@ -321,14 +312,12 @@ def test_photos_exif_camera_align_clock_shift_and_pin(
     assert dry_json["applied_offset_seconds"] == -7200
     assert dry_json["newly_matched_count"] >= 1
 
-    # Verify DB was NOT mutated by dry_run
     still_unmatched = [
         p for p in alice.get(f"/api/v1/projects/{proj_id}/photos").json() if p["id"] == p2["id"]
     ][0]
     assert still_unmatched["match_method"] == "unmatched"
     assert still_unmatched["exif_offset_s"] == 0
 
-    # Auto-detect clock offset & apply (dry_run=False)
     auto_shift = alice.post(
         f"/api/v1/projects/{proj_id}/photos/shift-clock",
         json={"dry_run": False, "camera_make_model": "SONY ILCE-7M4"},
@@ -340,7 +329,6 @@ def test_photos_exif_camera_align_clock_shift_and_pin(
     assert p2_after["match_method"] == "timestamp"
     assert p2_after["exif_offset_s"] == -7200
 
-    # Pin photo manually by progress
     pinned = alice.post(
         f"/api/v1/projects/{proj_id}/photos/{p2['id']}/pin",
         json={"progress": 0.5},
@@ -351,7 +339,6 @@ def test_photos_exif_camera_align_clock_shift_and_pin(
     assert pinned.json()["stage_id"] == stage["id"]
     assert pinned.json()["matched_progress"] == pytest.approx(0.5, abs=1e-4)
 
-    # BOLA check on pin
     assert (
         bob.post(
             f"/api/v1/projects/{proj_id}/photos/{p2['id']}/pin",
@@ -361,7 +348,6 @@ def test_photos_exif_camera_align_clock_shift_and_pin(
         == 404
     )
 
-    # Share redaction check: camera_make_model must NOT appear on PublicPhotoOut
     slug = alice.post(
         f"/api/v1/projects/{proj_id}/share",
         headers={"X-CSRF-Token": csrf},
@@ -409,7 +395,6 @@ def test_analytics_career_heatmap_highlights_and_bola(
         headers={"X-CSRF-Token": bob_csrf},
     )
 
-    # Seed Gold DuckDB with data for both Alice and Bob to verify strict BOLA scoping
     con = duckdb.connect(str(gold_dir / "trip_analytics.duckdb"))
     con.execute(
         "CREATE TABLE mart_stage_geo_context "
@@ -438,7 +423,7 @@ def test_analytics_career_heatmap_highlights_and_bola(
     c_json = career.json()
     assert c_json["total_projects"] == 1
     assert c_json["total_stages"] == 1
-    assert c_json["countries_visited"] == ["Fictional Region A"]  # Bob's region is excluded.
+    assert c_json["countries_visited"] == ["Fictional Region A"]
 
     heatmap = alice.get("/api/v1/analytics/heatmap?lod=low")
     assert heatmap.status_code == 200, heatmap.text
@@ -447,7 +432,6 @@ def test_analytics_career_heatmap_highlights_and_bola(
     assert len(hm_json["trips"][0]["polylines"]) >= 1
     assert [cell["h3_index"] for cell in hm_json["hex_cells"]] == ["hex_10_20"]
 
-    # Highlights on owned project & public share link
     hl = alice.get(f"/api/v1/projects/{proj_a}/analytics/highlights")
     assert hl.status_code == 200, hl.text
     assert hl.json()["project_id"] == proj_a
@@ -479,7 +463,6 @@ def test_strava_polyline_webhook_queue_render_cache_reaper_and_cli(
     user = h.create_user("alice@example.com")
     alice, csrf = h.login_client("alice@example.com")
 
-    # Strava activity summary_polyline + extra stream keys
     from trip_api.db import OAuthConnection
     from trip_api.security import encrypt_secret
 
@@ -558,7 +541,6 @@ def test_strava_polyline_webhook_queue_render_cache_reaper_and_cli(
     assert "temp" in seen_stream_keys[0]
     assert "moving" in seen_stream_keys[0]
 
-    # Webhook enqueues IngestJob for activity create/update/delete
     wh = TestClient(h.app).post(
         "/api/v1/strava/webhook",
         headers={"X-Strava-Verify-Token": "webhook-verify-token-secret"},
@@ -576,7 +558,6 @@ def test_strava_polyline_webhook_queue_render_cache_reaper_and_cli(
         assert ing_rows[0].event_type == "delete"
         assert ing_rows[0].status == "queued"
 
-    # Content-addressed render cache hit copies artifacts to isolated job keys
     r1 = alice.post(
         f"/api/v1/projects/{proj_id}/renders",
         json={"resolution": "1280x720", "fps": 30},
@@ -609,7 +590,6 @@ def test_strava_polyline_webhook_queue_render_cache_reaper_and_cli(
     assert h.store.get_bytes(f"outputs/{j2['id']}.mp4") == b"CACHED-VIDEO"
     assert h.store.get_bytes(f"outputs/{j2['id']}.webp") == b"CACHED-THUMB"
 
-    # Reaper cleans up render_job_chunks blobs as well
     h.store.put_bytes("outputs/chunks/exp/0000.mp4", b"CHUNK-0")
     h.store.put_bytes(f"outputs/{j1_id}.mp4", b"CACHED-VIDEO")
     with h.session_factory() as db:
@@ -629,12 +609,11 @@ def test_strava_polyline_webhook_queue_render_cache_reaper_and_cli(
         db.commit()
         rep = reap_expired(db, h.store, now=datetime.now(UTC))
         assert rep.render_jobs_deleted == 1
-        assert rep.blobs_deleted == 3  # mp4 + webp + chunk
+        assert rep.blobs_deleted == 3
         assert db.scalars(select(RenderJobChunk)).all() == []
     with pytest.raises(FileNotFoundError):
         h.store.resolve_existing_path("outputs/chunks/exp/0000.mp4")
 
-    # CLI process-ingest-jobs processes delete job
     monkeypatch.setenv("LOCAL_OBJECT_STORE_DIR", str(h.store.root_dir))
     monkeypatch.setenv("OBJECT_STORE_BACKEND", "local")
     db_url = f"sqlite:///{h.db_path}"
@@ -645,7 +624,6 @@ def test_strava_polyline_webhook_queue_render_cache_reaper_and_cli(
         assert ing is not None
         assert ing.status == "succeeded"
 
-    # CLI replay-silver replays stage with etl_version=1 to target=2
     alice.post(
         f"/api/v1/projects/{proj_id}/gpx",
         files={"file": ("rep.gpx", sample_gpx, "application/gpx+xml")},
@@ -678,8 +656,6 @@ def test_auto_organize_groups_same_calendar_day_timezone_and_stage_ended_at(
         headers={"X-CSRF-Token": csrf},
     ).json()["id"]
 
-    # 10 distinct calendar days with 12 activities (days 2 & 7 have 08:00 + 15:30 rides).
-    # Upload out of chronological order to verify strict chronological sorting + same-day grouping.
     schedule: list[tuple[str, str]] = [
         ("Day 10 Ride", "2026-07-10T09:00:00Z"),
         ("Day 2 Afternoon", "2026-07-02T15:30:00Z"),
@@ -705,7 +681,6 @@ def test_auto_organize_groups_same_calendar_day_timezone_and_stage_ended_at(
         assert resp.status_code == 201, resp.text
         uploaded_by_name[stage_name] = resp.json()
 
-    # Verify StageOut.ended_at equals started_at + elapsed_seconds (4 minutes = 240s)
     day1_stage = uploaded_by_name["Day 1 Ride"]
     assert day1_stage["started_at"] == "2026-07-01T08:00:00Z"
     assert day1_stage["ended_at"] == "2026-07-01T08:04:00Z"
@@ -731,10 +706,8 @@ def test_auto_organize_groups_same_calendar_day_timezone_and_stage_ended_at(
         "Day 9 Ride",
         "Day 10 Ride",
     ]
-    # 10 distinct calendar days -> max day_index is 10, NOT 12
     assert [s["day_index"] for s in stages] == [1, 2, 2, 3, 4, 5, 6, 7, 7, 8, 9, 10]
     transitions = org.json()["settings"]["stage_transitions"]
-    # Same-day morning -> afternoon stages must NOT get an overnight transition icon
     day2_morning_id = str(uploaded_by_name["Day 2 Morning"]["id"])
     day2_afternoon_id = str(uploaded_by_name["Day 2 Afternoon"]["id"])
     assert day2_morning_id not in transitions
@@ -779,7 +752,6 @@ def test_auto_organize_groups_same_calendar_day_timezone_and_stage_ended_at(
     assert [s["name"] for s in warsaw_stages] == ["Morning", "Late Night", "Next Afternoon"]
     assert [s["day_index"] for s in warsaw_stages] == [1, 2, 2]
 
-    # Invalid timezone cleanly falls back to UTC where Morning + Late Night are both Jul 14
     org_fallback = alice.post(
         f"/api/v1/projects/{tz_proj_id}/stages/auto-organize",
         json={"timezone": "Not/A_Real_Zone"},

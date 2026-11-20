@@ -48,7 +48,6 @@ def test_alembic_initial_migration_and_schema_parity(tmp_path: Path) -> None:
     cfg.set_main_option("script_location", str(api_dir / "alembic"))
     cfg.set_main_option("sqlalchemy.url", db_url)
 
-    # Upgrade to 0004 first to verify 0005 backfills existing users' email_verified_at.
     command.upgrade(cfg, "0004_etl_chunks_ingest")
     pre_engine = create_db_engine(db_url)
     try:
@@ -163,7 +162,6 @@ def test_cli_create_user_login_parity_and_input_modes(
     cfg.set_main_option("sqlalchemy.url", db_url)
     command.upgrade(cfg, "head")
 
-    # Invalid email and short password fail cleanly with exit code 1
     assert (
         cli_main(
             [
@@ -196,7 +194,6 @@ def test_cli_create_user_login_parity_and_input_modes(
     )
     assert "at least 12 characters" in capsys.readouterr().err
 
-    # 1) Standard --password CLI flag with mixed-case email and padded display name
     assert (
         cli_main(
             [
@@ -214,7 +211,6 @@ def test_cli_create_user_login_parity_and_input_modes(
         == 0
     )
 
-    # 2) --password-stdin mode
     monkeypatch.setattr(sys, "stdin", io.StringIO("stdin-secret-pass-999\n"))
     assert (
         cli_main(
@@ -230,7 +226,6 @@ def test_cli_create_user_login_parity_and_input_modes(
         == 0
     )
 
-    # 3) Interactive getpass fallback
     monkeypatch.setattr(getpass, "getpass", lambda _prompt="": "getpass-secret-pass-777")
     assert (
         cli_main(
@@ -245,7 +240,6 @@ def test_cli_create_user_login_parity_and_input_modes(
         == 0
     )
 
-    # Verify HTTP POST /api/v1/auth/login parity against the exact same database
     engine = create_db_engine(db_url)
     try:
         sf = create_session_factory(engine)
@@ -293,7 +287,6 @@ def test_login_session_cookie_csrf_and_logout(harness: AppHarness) -> None:
     harness.create_user("alice@example.com", "alice-secret-password-123")
     client = TestClient(harness.app)
 
-    # Unknown email exercises constant-time dummy Argon2 check
     unknown_resp = client.post(
         "/api/v1/auth/login",
         json={"email": "nobody@example.com", "password": "wrong-password"},
@@ -333,7 +326,6 @@ def test_login_session_cookie_csrf_and_logout(harness: AppHarness) -> None:
     assert me_resp.status_code == 200
     assert me_resp.json()["user"]["email"] == "alice@example.com"
 
-    # Mutating route without CSRF header must fail with 403
     no_csrf_logout = client.post("/api/v1/auth/logout")
     assert no_csrf_logout.status_code == 403
 
@@ -354,13 +346,11 @@ def test_expired_tampered_cookies_inactive_user_and_prod_cookie_flags(
     raw_cookie = client.cookies.get("trip_session")
     assert raw_cookie is not None
 
-    # Tampered cookies are rejected with 401
     tampered = raw_cookie[:-1] + ("A" if raw_cookie[-1] != "A" else "B")
     for bad_val in (tampered, "completely-forged-token", ""):
         bad_c = TestClient(h.app, cookies={"trip_session": bad_val})
         assert bad_c.get("/api/v1/auth/me").status_code == 401
 
-    # Expired session returns 401 and deletes the expired SessionRecord from DB
     with h.session_factory() as db:
         sess = db.scalar(select(SessionRecord).where(SessionRecord.user_id == user.id))
         assert sess is not None
@@ -372,7 +362,6 @@ def test_expired_tampered_cookies_inactive_user_and_prod_cookie_flags(
     with h.session_factory() as db:
         assert db.get(SessionRecord, sess_id) is None
 
-    # Inactive user cannot use existing session or log in again
     client2, _ = h.login_client("expiry@example.com", "expiry-secret-password-123")
     with h.session_factory() as db:
         db_user = db.get(User, user.id)
@@ -391,7 +380,6 @@ def test_expired_tampered_cookies_inactive_user_and_prod_cookie_flags(
         == 401
     )
 
-    # Production environment sets Secure flag on session cookie
     prod_h = make_harness(
         app_env="production",
         dev_auth_enabled=False,
@@ -465,7 +453,6 @@ def test_dev_login_handles_concurrent_first_login_integrity_race(
 ) -> None:
     import trip_api.routers.auth as auth_router
 
-    # 1. Deterministic IntegrityError race simulation on fresh DB
     h1 = make_harness(app_env="development", dev_auth_enabled=True)
 
     def racing_hash_password(password: str) -> str:
@@ -496,7 +483,6 @@ def test_dev_login_handles_concurrent_first_login_integrity_race(
         )
         assert count == 1
 
-    # 2. Real multi-threaded concurrent first dev-login requests on a fresh DB
     monkeypatch.undo()
     h2 = make_harness(app_env="development", dev_auth_enabled=True)
     barrier = Barrier(2)
@@ -591,7 +577,6 @@ def test_full_idor_cross_user_and_unauthenticated_matrix(
     assert len(alice_sessions) == 1
     alice_session_id = str(alice_sessions[0]["id"])
 
-    # 1. Unauthenticated requests must receive 401 across all protected routes
     unauth_requests: list[tuple[str, str, dict[str, Any] | None]] = [
         ("GET", "/api/v1/auth/me", None),
         ("GET", "/api/v1/auth/sessions", None),
@@ -649,7 +634,6 @@ def test_full_idor_cross_user_and_unauthenticated_matrix(
         resp = anon.request(method, path, **(kwargs or {}))
         assert resp.status_code == 401, f"{method} {path} returned {resp.status_code}: {resp.text}"
 
-    # 2. Bob (authenticated with his own CSRF) cannot list, view, or mutate Alice's resources
     assert bob.get("/api/v1/projects").json() == []
     bob_headers = {"X-CSRF-Token": bob_csrf}
     bob_idor_matrix: list[tuple[str, str, dict[str, Any] | None]] = [
@@ -718,7 +702,6 @@ def test_full_idor_cross_user_and_unauthenticated_matrix(
         resp = bob.request(method, path, **(kwargs or {}))
         assert resp.status_code == 404, f"Bob {method} {path} returned {resp.status_code}"
 
-    # Account-wide analytics are authenticated and scoped to Bob's empty account.
     career = bob.get("/api/v1/analytics/career")
     assert career.status_code == 200, career.text
     assert career.json()["total_projects"] == 0
@@ -726,7 +709,6 @@ def test_full_idor_cross_user_and_unauthenticated_matrix(
     assert heatmap.status_code == 200, heatmap.text
     assert heatmap.json()["trips"] == []
 
-    # Bob cannot hijack Alice's OAuth state or revoke Alice's session
     assert bob.get(f"/api/v1/strava/callback?code=c&state={alice_state}").status_code == 400
     assert (
         bob.delete(
@@ -736,7 +718,6 @@ def test_full_idor_cross_user_and_unauthenticated_matrix(
         == 404
     )
 
-    # 3. Cross-project stage IDOR (even within Alice's own account)
     assert (
         alice.patch(
             f"/api/v1/projects/{proj_a2}/stages/{stage_a1}",
@@ -762,7 +743,6 @@ def test_full_idor_cross_user_and_unauthenticated_matrix(
         == 404
     )
 
-    # Alice's project and stage remain intact
     alice_detail = alice.get(f"/api/v1/projects/{proj_a1}").json()
     assert alice_detail["title"] == "Alice Private Trip"
     assert len(alice_detail["stages"]) == 1
@@ -838,7 +818,6 @@ def test_csrf_and_cors_origin_enforcement(
         )
         assert cross_user.status_code == 403, f"Bob CSRF {method} {path}: {cross_user.status_code}"
 
-    # CORS preflight and simple origin checks
     anon = TestClient(h.app)
     allowed_preflight = anon.options(
         "/api/v1/projects",
@@ -882,7 +861,6 @@ async def test_x_forwarded_for_spoofing_vs_trusted_forwarded_allow_ips(
         rate_limit_strava_webhook_window_s=60,
     )
     h.create_user("xff@example.com", "xff-secret-password-123")
-    # Uses 1 of 3 login tokens for client IP "testclient"
     owner, csrf = h.login_client("xff@example.com", "xff-secret-password-123")
     proj_id = owner.post(
         "/api/v1/projects",
@@ -894,11 +872,9 @@ async def test_x_forwarded_for_spoofing_vs_trusted_forwarded_allow_ips(
         headers={"X-CSRF-Token": csrf},
     ).json()["share_slug"]
 
-    # Direct bare request with missing client resolves to "unknown"
     bare_req = Request({"type": "http", "headers": [], "client": None})
     assert get_client_ip(bare_req) == "unknown"
 
-    # 1. Direct app ignores spoofed X-Forwarded-For on login and share
     direct_client = TestClient(h.app)
     for idx in range(2):
         r = direct_client.post(
@@ -932,9 +908,9 @@ async def test_x_forwarded_for_spoofing_vs_trusted_forwarded_allow_ips(
         == 429
     )
 
-    # 2. ProxyHeadersMiddleware with FORWARDED_ALLOW_IPS="127.0.0.1,::1":
+    # 2. ProxyHeadersMiddleware with FORWARDED_ALLOW_IPS set to loopback addresses:
     #    - Untrusted peer cannot spoof X-Forwarded-For
-    #    - Trusted proxy (127.0.0.1) uses rightmost untrusted hop, blocking leftmost spoofing
+    #    - Trusted proxy uses rightmost untrusted hop, blocking leftmost spoofing
     proxied_app: Any = ProxyHeadersMiddleware(cast(Any, h.app), trusted_hosts=["127.0.0.1", "::1"])
 
     untrusted_transport = httpx.ASGITransport(app=proxied_app, client=("203.0.113.77", 54321))
@@ -957,7 +933,7 @@ async def test_x_forwarded_for_spoofing_vs_trusted_forwarded_allow_ips(
 
     trusted_transport = httpx.ASGITransport(app=proxied_app, client=("127.0.0.1", 54321))
     async with httpx.AsyncClient(transport=trusted_transport, base_url="http://test") as trusted:
-        # Leftmost spoofed IPs still map to the rightmost untrusted client IP (198.51.100.50)
+        # Leftmost spoofed IPs still map to the rightmost untrusted client IP
         for spoofed_left in ("1.1.1.1", "8.8.8.8", "4.2.2.1"):
             res = await trusted.post(
                 "/api/v1/auth/login",
@@ -972,7 +948,6 @@ async def test_x_forwarded_for_spoofing_vs_trusted_forwarded_allow_ips(
         )
         assert blocked_spoof.status_code == 429
 
-        # Distinct real client IP behind trusted proxy gets an independent rate-limit bucket
         other_client_res = await trusted.post(
             "/api/v1/auth/login",
             json={"email": "xff@example.com", "password": "wrong-password"},
@@ -1062,7 +1037,6 @@ async def test_login_dual_ip_and_normalized_account_rate_limit(
             )
             assert res.status_code == 401
 
-        # Rotating to a fresh IP still hits the normalized account rate limit -> 429
         acct_blocked = await client.post(
             "/api/v1/auth/login",
             json={"email": "target.user@example.com", "password": "target-secret-password-123"},
@@ -1071,7 +1045,6 @@ async def test_login_dual_ip_and_normalized_account_rate_limit(
         assert acct_blocked.status_code == 429
         assert "retry-after" in acct_blocked.headers
 
-        # Another account from the same IP is unaffected
         other_ok = await client.post(
             "/api/v1/auth/login",
             json={"email": "other.user@example.com", "password": "other-secret-password-123"},
@@ -1120,7 +1093,6 @@ def test_register_invite_code_lifecycle_validation_and_conflicts(
 
     monkeypatch.setattr(auth_router, "send_verification_email", _capture_email)
 
-    # 1. Registration disabled by default -> 403
     disabled_h = make_harness()
     disabled_client = TestClient(disabled_h.app)
     disabled_resp = disabled_client.post(
@@ -1135,7 +1107,6 @@ def test_register_invite_code_lifecycle_validation_and_conflicts(
     assert disabled_resp.status_code == 403
     assert disabled_resp.json()["detail"] == "Account registration is disabled"
 
-    # 2. Single invite code: wrong code -> 403, short password -> 422, bad email -> 422
     single_h = make_harness(
         registration_invite_code="alpine-2026",
         public_base_url="https://trips.example.com/",
@@ -1177,7 +1148,6 @@ def test_register_invite_code_lifecycle_validation_and_conflicts(
         )
         assert invalid_email_resp.status_code == 422
 
-    # Valid registration -> 201 RegisterResponse, NO session cookie, verification token + email sent
     ok_resp = single_client.post(
         "/api/v1/auth/register",
         json={
@@ -1219,7 +1189,6 @@ def test_register_invite_code_lifecycle_validation_and_conflicts(
         assert audit_events[0].user_id == user_row.id
         assert audit_events[0].metadata_json == {"verification_required": True}
 
-    # Login before verification is blocked with 403
     unverified_login = single_client.post(
         "/api/v1/auth/login",
         json={"email": "rider.one@example.com", "password": "alpine-secret-password-123"},
@@ -1232,7 +1201,6 @@ def test_register_invite_code_lifecycle_validation_and_conflicts(
         ).all()
         assert len(unverified_audits) == 1
 
-    # Verify email with valid token -> 200 + session cookie + CSRF + /me + login works
     verify_resp = single_client.post("/api/v1/auth/verify-email", json={"token": raw_token})
     assert verify_resp.status_code == 200, verify_resp.text
     verify_body = verify_resp.json()
@@ -1257,20 +1225,17 @@ def test_register_invite_code_lifecycle_validation_and_conflicts(
         assert used_tok is not None
         assert used_tok.used_at is not None
 
-    # Reusing the already-consumed token fails with 400
     reuse_resp = TestClient(single_h.app).post(
         "/api/v1/auth/verify-email", json={"token": raw_token}
     )
     assert reuse_resp.status_code == 400
 
-    # Password login now succeeds
     post_verify_login = TestClient(single_h.app).post(
         "/api/v1/auth/login",
         json={"email": "rider.one@example.com", "password": "alpine-secret-password-123"},
     )
     assert post_verify_login.status_code == 200
 
-    # Duplicate email (normalized) -> 409
     dup_resp = TestClient(single_h.app).post(
         "/api/v1/auth/register",
         json={
@@ -1283,7 +1248,6 @@ def test_register_invite_code_lifecycle_validation_and_conflicts(
     assert dup_resp.status_code == 409
     assert dup_resp.json()["detail"] == "An account with this email already exists"
 
-    # 3. Comma-separated invite codes accept any listed code
     multi_h = make_harness(registration_invite_code="first-code, second-code , third-code")
     for idx, code in enumerate(("first-code", "second-code", "third-code"), start=1):
         c = TestClient(multi_h.app)
@@ -1308,7 +1272,6 @@ async def test_register_ip_and_account_rate_limiting(
 ) -> None:
     import hashlib
 
-    # 1. Per-IP rate limit
     ip_h = make_harness(
         registration_invite_code="alpine-2026",
         rate_limit_register_max=2,
@@ -1340,7 +1303,6 @@ async def test_register_ip_and_account_rate_limiting(
     assert ip_blocked.status_code == 429
     assert "retry-after" in ip_blocked.headers
 
-    # 2. Per-account normalized rate limit across distinct IPs
     acct_h = make_harness(
         registration_invite_code="alpine-2026",
         rate_limit_register_max=20,
@@ -1424,7 +1386,6 @@ def test_email_verification_token_expiry_invalid_and_inactive_user(
     h = make_harness(registration_invite_code="alpine-2026", rate_limit_verify_email_max=3)
     client = TestClient(h.app)
 
-    # Unknown or short malformed token -> uniform 400 (not 422)
     assert client.post("/api/v1/auth/verify-email", json={"token": "bad"}).status_code == 400
     unknown_resp = client.post(
         "/api/v1/auth/verify-email",
@@ -1432,7 +1393,6 @@ def test_email_verification_token_expiry_invalid_and_inactive_user(
     )
     assert unknown_resp.status_code == 400
 
-    # Register an account, expire its token, verify -> 400
     reg_resp = client.post(
         "/api/v1/auth/register",
         json={
@@ -1450,15 +1410,12 @@ def test_email_verification_token_expiry_invalid_and_inactive_user(
         tok_row.expires_at = datetime.now(UTC) - timedelta(minutes=1)
         db.commit()
 
-    # Second attempt hits verify-email endpoint (allowed, limit=2), fails with 400 due to expiry
     assert client.post("/api/v1/auth/verify-email", json={"token": tok_expired}).status_code == 400
 
-    # Third attempt hits per-IP rate limit -> 429
     limited = client.post("/api/v1/auth/verify-email", json={"token": tok_expired})
     assert limited.status_code == 429
     assert "retry-after" in limited.headers
 
-    # Inactive user cannot verify even with a fresh unexpired token
     h2 = make_harness(registration_invite_code="alpine-2026")
     c2 = TestClient(h2.app)
     assert (
@@ -1524,7 +1481,6 @@ async def test_resend_verification_anti_enumeration_replacement_and_rate_limits(
     )
     first_token = sent[-1][1].split("token=", 1)[1]
 
-    # Unknown, already-verified, and inactive emails all return 202 without sending email
     sent_before = len(sent)
     for addr in ("nobody@example.com", "verified@example.com", "inactive@example.com"):
         r = client.post("/api/v1/auth/resend-verification", json={"email": addr})
@@ -1532,7 +1488,6 @@ async def test_resend_verification_anti_enumeration_replacement_and_rate_limits(
         assert r.json()["status"] == "accepted"
     assert len(sent) == sent_before
 
-    # Resend for unverified user replaces old unused token and delivers a working new token
     resend_resp = client.post(
         "/api/v1/auth/resend-verification", json={"email": "  PENDING@Example.COM "}
     )
@@ -1548,7 +1503,6 @@ async def test_resend_verification_anti_enumeration_replacement_and_rate_limits(
     assert client.post("/api/v1/auth/verify-email", json={"token": first_token}).status_code == 400
     assert client.post("/api/v1/auth/verify-email", json={"token": second_token}).status_code == 200
 
-    # Account rate limit across distinct client IPs -> 429
     proxied_app: Any = ProxyHeadersMiddleware(cast(Any, h.app), trusted_hosts=["127.0.0.1"])
     transport = httpx.ASGITransport(app=proxied_app, client=("127.0.0.1", 54321))
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as async_client:
@@ -1586,7 +1540,6 @@ def test_email_module_build_url_and_smtp_transports(
     url = build_verification_url("https://app.example.com/", "tok+abc/def=1")
     assert url == "https://app.example.com/verify-email?token=tok%2Babc%2Fdef%3D1"
 
-    # 1. Dev log fallback when smtp_host is empty
     dev_cfg = Settings(app_env="test", smtp_host="")
     with caplog.at_level(logging.INFO, logger="trip_api.email"):
         send_verification_email(dev_cfg, "rider@example.com", "Rider", url)
@@ -1596,7 +1549,6 @@ def test_email_module_build_url_and_smtp_transports(
         for rec in caplog.records
     )
 
-    # 2. Mocked smtplib.SMTP (STARTTLS + login) and smtplib.SMTP_SSL (port 465)
     calls: list[dict[str, Any]] = []
 
     class FakeSMTP:
@@ -1690,7 +1642,6 @@ def test_email_module_build_url_and_smtp_transports(
     assert calls[2]["starttls"] is False
     assert calls[2]["login"] is None
 
-    # 3. Password reset URL builder, dev log fallback, and SMTP delivery
     from trip_api.email import build_password_reset_url, send_password_reset_email
 
     reset_url = build_password_reset_url("https://app.example.com/", "rst+abc/def=1")
@@ -1758,7 +1709,6 @@ async def test_forgot_password_and_reset_password_lifecycle_and_rate_limits(
         inactive_row.is_active = False
         db.commit()
 
-    # Alice has two active sessions before resetting her password
     sess1, _ = h.login_client("alice.reset@example.com", "alice-old-password-123")
     sess2, _ = h.login_client("alice.reset@example.com", "alice-old-password-123")
     assert sess1.get("/api/v1/auth/me").status_code == 200
@@ -1766,14 +1716,12 @@ async def test_forgot_password_and_reset_password_lifecycle_and_rate_limits(
 
     anon = TestClient(h.app)
 
-    # Anti-enumeration: unknown and inactive emails return 202 without sending emails
     for addr in ("nobody@example.com", "inactive.reset@example.com"):
         r = anon.post("/api/v1/auth/forgot-password", json={"email": addr})
         assert r.status_code == 202
         assert r.json()["status"] == "accepted"
     assert len(sent_resets) == 0
 
-    # Active user gets a reset email; requesting again replaces the prior unused token
     r1 = anon.post("/api/v1/auth/forgot-password", json={"email": "  ALICE.RESET@Example.COM "})
     assert r1.status_code == 202
     assert len(sent_resets) == 1
@@ -1792,7 +1740,6 @@ async def test_forgot_password_and_reset_password_lifecycle_and_rate_limits(
         assert len(rows) == 1
         assert rows[0].token_hash != second_token
 
-    # Short malformed token -> 400; replaced first token -> 400
     assert (
         anon.post(
             "/api/v1/auth/reset-password",
@@ -1808,7 +1755,6 @@ async def test_forgot_password_and_reset_password_lifecycle_and_rate_limits(
         == 400
     )
 
-    # Valid reset updates password, marks token used, revokes ALL sessions, logs audit event
     reset_ok = anon.post(
         "/api/v1/auth/reset-password",
         json={"token": second_token, "new_password": "alice-new-password-123"},
@@ -1816,11 +1762,9 @@ async def test_forgot_password_and_reset_password_lifecycle_and_rate_limits(
     assert reset_ok.status_code == 200, reset_ok.text
     assert reset_ok.json()["ok"] is True
 
-    # Both prior sessions are immediately invalidated
     assert sess1.get("/api/v1/auth/me").status_code == 401
     assert sess2.get("/api/v1/auth/me").status_code == 401
 
-    # Token cannot be reused
     assert (
         anon.post(
             "/api/v1/auth/reset-password",
@@ -1829,7 +1773,6 @@ async def test_forgot_password_and_reset_password_lifecycle_and_rate_limits(
         == 400
     )
 
-    # Old password fails, new password logs in
     assert (
         anon.post(
             "/api/v1/auth/login",
@@ -1854,7 +1797,6 @@ async def test_forgot_password_and_reset_password_lifecycle_and_rate_limits(
         ).all()
         assert len(audits) == 1
 
-    # Unverified active user who resets via email link becomes verified
     assert (
         anon.post(
             "/api/v1/auth/forgot-password",
@@ -1875,7 +1817,6 @@ async def test_forgot_password_and_reset_password_lifecycle_and_rate_limits(
         assert u_refreshed is not None
         assert u_refreshed.email_verified_at is not None
 
-    # Expired token returns 400
     assert (
         anon.post(
             "/api/v1/auth/forgot-password",
@@ -1902,7 +1843,6 @@ async def test_forgot_password_and_reset_password_lifecycle_and_rate_limits(
         == 400
     )
 
-    # Inactive user cannot reset password even with an unexpired token
     assert (
         anon.post(
             "/api/v1/auth/forgot-password",
@@ -1933,7 +1873,6 @@ async def test_forgot_password_and_reset_password_lifecycle_and_rate_limits(
         rate_limit_reset_password_window_s=60,
     )
 
-    # Rate limit checks on forgot-password (per-account across IPs) and reset-password (per-IP)
     proxied_app: Any = ProxyHeadersMiddleware(cast(Any, h_rl.app), trusted_hosts=["127.0.0.1"])
     transport = httpx.ASGITransport(app=proxied_app, client=("127.0.0.1", 54321))
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as async_client:
@@ -1985,7 +1924,6 @@ def test_change_password_and_session_management_endpoints(
     alice_c3, csrf3 = h.login_client("alice.sessions@example.com", "alice-initial-pass-123")
     bob_c, _bob_csrf = h.login_client("bob.sessions@example.com", "bob-initial-pass-123")
 
-    # Insert an expired session and an unused PasswordResetToken for Alice
     with h.session_factory() as db:
         db.add(
             SessionRecord(
@@ -2004,7 +1942,6 @@ def test_change_password_and_session_management_endpoints(
         )
         db.commit()
 
-    # GET /sessions returns only non-expired sessions, current session first
     sessions_resp = alice_c1.get("/api/v1/auth/sessions")
     assert sessions_resp.status_code == 200
     sessions_data = sessions_resp.json()
@@ -2012,7 +1949,6 @@ def test_change_password_and_session_management_endpoints(
     assert sessions_data[0]["is_current"] is True
     assert all(item["is_current"] is False for item in sessions_data[1:])
 
-    # Wrong current password -> 400
     wrong_cp = alice_c1.post(
         "/api/v1/auth/change-password",
         json={"current_password": "wrong-password", "new_password": "alice-updated-pass-123"},
@@ -2021,7 +1957,6 @@ def test_change_password_and_session_management_endpoints(
     assert wrong_cp.status_code == 400
     assert wrong_cp.json()["detail"] == "Current password is incorrect"
 
-    # Reusing current password -> 400
     same_cp = alice_c1.post(
         "/api/v1/auth/change-password",
         json={
@@ -2033,7 +1968,6 @@ def test_change_password_and_session_management_endpoints(
     assert same_cp.status_code == 400
     assert same_cp.json()["detail"] == "New password must be different from your current password"
 
-    # Valid change-password revokes other sessions & unused reset tokens, keeps current alive
     ok_cp = alice_c1.post(
         "/api/v1/auth/change-password",
         json={
@@ -2058,7 +1992,6 @@ def test_change_password_and_session_management_endpoints(
             == []
         )
 
-    # New session with updated password, then test DELETE /sessions/{id} and POST /logout-all
     alice_c4, csrf4 = h.login_client("alice.sessions@example.com", "alice-updated-pass-123")
     alice_c5, _csrf5 = h.login_client("alice.sessions@example.com", "alice-updated-pass-123")
 
@@ -2067,7 +2000,6 @@ def test_change_password_and_session_management_endpoints(
     other_ids = [item["id"] for item in list_after if not item["is_current"]]
     assert len(other_ids) == 2
 
-    # Revoke one specific other session
     del_other = alice_c1.delete(
         f"/api/v1/auth/sessions/{other_ids[0]}",
         headers={"X-CSRF-Token": csrf1},
@@ -2076,7 +2008,6 @@ def test_change_password_and_session_management_endpoints(
     assert del_other.json() == {"ok": True}
     assert len(alice_c1.get("/api/v1/auth/sessions").json()) == 2
 
-    # Nonexistent session -> 404
     assert (
         alice_c1.delete(
             f"/api/v1/auth/sessions/{uuid.uuid4()}",
@@ -2085,7 +2016,6 @@ def test_change_password_and_session_management_endpoints(
         == 404
     )
 
-    # Revoking own current session via DELETE /sessions/{current_id} clears cookie
     current_id = list_after[0]["id"]
     del_self = alice_c1.delete(
         f"/api/v1/auth/sessions/{current_id}",
@@ -2094,7 +2024,6 @@ def test_change_password_and_session_management_endpoints(
     assert del_self.status_code == 200
     assert alice_c1.get("/api/v1/auth/me").status_code == 401
 
-    # Re-authenticate and test POST /logout-all revokes all remaining sessions for Alice only
     alice_c6, csrf6 = h.login_client("alice.sessions@example.com", "alice-updated-pass-123")
     active_before_all = alice_c6.get("/api/v1/auth/sessions").json()
     expected_revoked = len(active_before_all)

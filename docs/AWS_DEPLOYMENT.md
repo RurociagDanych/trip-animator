@@ -1,5 +1,20 @@
 # Trip Animator — Production AWS Deployment Architecture
 
+> Purpose: Describe the optional AWS deployment architecture that the Terraform in infra/terraform provisions.
+> Audience: operators, reviewers
+> Last reviewed: 2026-11-20
+
+Sections:
+
+- 1. Architecture Overview & Design Principles
+- 2. End-to-End AWS Architecture Diagram
+- 3. Edge & Ingress Tier (`CloudFront` + `WAFv2` + `S3 Web`)
+- 4. VPC Networking & Zero-Egress-Waste Design
+- 5. Compute, Scaling & Batch Orchestration (`ECS Fargate`)
+- 6. Data, Object Storage & Secrets Architecture
+- 7. Security Controls & Observability
+- 8. Terraform Module & Resource Blueprint (`infra/terraform/`)
+
 This document defines the production-grade, horizontally scalable AWS architecture for **Trip Animator** in **`eu-central-1` (Frankfurt)**, engineered for 1:1 behavioral parity with the hardened local stack (`infra/compose.yaml`, `infra/Caddyfile`, `docs/ARCHITECTURE.md`, and `docs/THREAT_MODEL.md`) while leveraging AWS managed services for high availability, zero-trust private networking, Spot render elasticity, and FinOps efficiency.
 
 ---

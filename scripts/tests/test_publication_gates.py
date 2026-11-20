@@ -1,4 +1,5 @@
 """Exercise publication gates without real credentials or application services."""
+
 from __future__ import annotations
 
 import hashlib
