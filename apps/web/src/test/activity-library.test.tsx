@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ActivityLibraryMap } from "../components/dashboard/ActivityLibraryMap";
 import { ActivityLibraryView } from "../components/dashboard/ActivityLibraryView";
 import { vaultApi, type VaultActivityFilters } from "../lib/api/endpoints";
+import { libraryViewsApi, type LibrarySavedView } from "../lib/api/library-views";
 import { apiClient } from "../lib/api/client";
 import type { VaultActivityDetailOut, VaultActivityListOut, VaultSyncStatusOut } from "../lib/api/types";
 
@@ -98,11 +99,12 @@ const listResult = (items: VaultActivityListOut["items"], offset: number, total 
     elevation_gain_known_count: 0,
     moving_seconds: null,
     moving_seconds_known_count: 0,
-    elapsed_seconds: null,
-    elapsed_seconds_known_count: 0,
+    elapsed_seconds: 7200,
+    elapsed_seconds_known_count: total,
     gps_activity_count: total,
     no_gps_activity_count: 0,
   },
+  by_sport: [],
 });
 const syncStatus = (vault_version: number, status = "idle"): VaultSyncStatusOut => ({
   connected: true,
@@ -124,10 +126,10 @@ const mapResult = {
   total: 1, drawable_count: 1, no_gps_count: 0, unavailable_count: 0, returned_count: 1, truncated: true, geographic_excluded_count: 0, unevaluated_count: 2,
 };
 
-function renderLibrary() {
+function renderLibrary(ownerId = "owner-a", savedViews: LibrarySavedView[] = []) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  render(<QueryClientProvider client={client}><ActivityLibraryView /></QueryClientProvider>);
-  return client;
+  vi.spyOn(libraryViewsApi, "list").mockResolvedValue({ items: savedViews });
+  return render(<QueryClientProvider client={client}><ActivityLibraryView ownerId={ownerId} /></QueryClientProvider>);
 }
 
 afterEach(() => {
@@ -136,9 +138,27 @@ afterEach(() => {
   mapHarness.instances.length = 0;
   mapHarness.holdLoad = false;
   mapHarness.bounds = [-2, 48, 3, 52];
+  localStorage.clear();
 });
 
 describe("ActivityLibraryView", () => {
+  it("keeps multiple activity selections after the event handler returns", async () => {
+    vi.spyOn(vaultApi, "map").mockResolvedValue(mapResult);
+    vi.spyOn(vaultApi, "list").mockResolvedValue(listResult([item("1", "First ride"), item("2", "Second ride")], 0));
+    vi.spyOn(vaultApi, "status").mockResolvedValue(syncStatus(1));
+    renderLibrary();
+
+    const first = await screen.findByRole("checkbox", { name: "Select First ride" });
+    fireEvent.click(first);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select Second ride" }));
+    expect(first).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Select Second ride" })).toBeChecked();
+    expect(screen.getByText("2 activities selected")).toBeInTheDocument();
+    fireEvent.click(first);
+    expect(first).not.toBeChecked();
+    expect(screen.getByText("1 activities selected")).toBeInTheDocument();
+  });
+
   it("sends the geometry page offset to the HTTP endpoint without a list page-size limit", async () => {
     const get = vi.spyOn(apiClient, "get").mockResolvedValue(mapResult);
     const controller = new AbortController();
@@ -159,6 +179,22 @@ describe("ActivityLibraryView", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "Search activity name" }), { target: { value: "summit" } });
     await waitFor(() => expect(list).toHaveBeenLastCalledWith(expect.objectContaining({ name: "summit", offset: 0 }), expect.anything()));
     expect(screen.getByText(/page 1 of 2/)).toBeInTheDocument();
+  });
+
+  it("resets owner-scoped filters and detail state when the owner changes", async () => {
+    vi.spyOn(vaultApi, "map").mockResolvedValue(mapResult);
+    const list = vi.spyOn(vaultApi, "list").mockResolvedValue(listResult([item("1", "Owner Activity")], 0));
+    vi.spyOn(vaultApi, "status").mockResolvedValue(syncStatus(1));
+    vi.spyOn(vaultApi, "get").mockResolvedValue(detail("1", "Owner Activity"));
+    const view = renderLibrary("owner-a");
+    fireEvent.change(await screen.findByRole("textbox", { name: "Search activity name" }), { target: { value: "private search" } });
+    fireEvent.click(await screen.findByRole("button", { name: "Owner Activity" }));
+    await screen.findByRole("dialog", { name: "Activity details" });
+
+    view.rerender(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><ActivityLibraryView ownerId="owner-b" /></QueryClientProvider>);
+    await waitFor(() => expect(list).toHaveBeenLastCalledWith(expect.not.objectContaining({ name: "private search" }), expect.anything()));
+    expect(screen.getByRole("textbox", { name: "Search activity name" })).toHaveValue("");
+    expect(screen.queryByRole("dialog", { name: "Activity details" })).not.toBeInTheDocument();
   });
 
   it("does not show stale details after selection changes and preserves detail errors", async () => {
@@ -195,11 +231,54 @@ describe("ActivityLibraryView", () => {
 
     await screen.findByText("Unknown Metrics Ride");
     expect(screen.getAllByText("Unknown").length).toBeGreaterThanOrEqual(3);
+    expect(screen.getByText(/2\.0 h elapsed/)).toBeInTheDocument();
     const initialListCalls = list.mock.calls.length;
     fireEvent.click(screen.getByRole("button", { name: "Sync Strava catalog" }));
     await waitFor(() => expect(statusCall).toBeGreaterThanOrEqual(2));
     await waitFor(() => expect(list.mock.calls.length).toBeGreaterThan(initialListCalls));
     expect(vaultApi.sync).toHaveBeenCalledOnce();
+  });
+
+  it("restores filters across remounts while isolating each authenticated owner", async () => {
+    vi.spyOn(vaultApi, "map").mockResolvedValue(mapResult);
+    const list = vi.spyOn(vaultApi, "list").mockResolvedValue(listResult([item("1", "Persistent Ride")], 0));
+    vi.spyOn(vaultApi, "status").mockResolvedValue(syncStatus(1));
+    const first = renderLibrary("owner-a");
+    await screen.findByRole("button", { name: "Persistent Ride" });
+    fireEvent.change(screen.getByRole("textbox", { name: "Search activity name" }), { target: { value: "ridge" } });
+    fireEvent.change(screen.getByLabelText("Sort by"), { target: { value: "distance_m" } });
+    await waitFor(() => expect(JSON.parse(localStorage.getItem("activity-library-selection:owner-a") ?? "{}")).toMatchObject({ name: "ridge", sort: "distance_m" }));
+
+    first.unmount();
+    renderLibrary("owner-a");
+    expect(screen.getByRole("textbox", { name: "Search activity name" })).toHaveValue("ridge");
+    await waitFor(() => expect(list).toHaveBeenLastCalledWith(expect.objectContaining({ name: "ridge", sort: "distance_m", offset: 0, limit: 50 }), expect.anything()));
+
+    cleanup();
+    renderLibrary("owner-b");
+    expect(screen.getByRole("textbox", { name: "Search activity name" })).toHaveValue("");
+    await waitFor(() => expect(list).toHaveBeenLastCalledWith(expect.not.objectContaining({ name: "ridge" }), expect.anything()));
+  });
+
+  it("opens an owner-scoped saved view and applies its filters to the activity query", async () => {
+    const view: LibrarySavedView = {
+      id: "view-1",
+      name: "Recent rides",
+      rules: { version: 1, filters: { sport: "Ride" }, sort: "distance_m", direction: "asc" },
+      resolved_filters: { sport: "Ride", start_date: "2026-11-15", end_date: "2026-11-21" },
+    };
+    const open = vi.spyOn(libraryViewsApi, "open").mockResolvedValue(view);
+    vi.spyOn(vaultApi, "map").mockResolvedValue(mapResult);
+    const list = vi.spyOn(vaultApi, "list").mockResolvedValue(listResult([item("1", "Saved Ride")], 0));
+    vi.spyOn(vaultApi, "status").mockResolvedValue(syncStatus(1));
+    renderLibrary("owner-a", [view]);
+
+    await screen.findByRole("option", { name: "Recent rides" });
+    fireEvent.change(screen.getByLabelText("Saved view"), { target: { value: "view-1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Open view" }));
+
+    await waitFor(() => expect(open).toHaveBeenCalledWith("view-1"));
+    await waitFor(() => expect(list).toHaveBeenLastCalledWith(expect.objectContaining({ sport: "Ride", start_date: "2026-11-15", end_date: "2026-11-21", sort: "distance_m", order: "asc", offset: 0, limit: 50 }), expect.anything()));
   });
 
   it("shares filters, filters an area only on explicit action, and links route selection to details", async () => {

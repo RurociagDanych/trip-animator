@@ -152,6 +152,87 @@ def test_activity_library_filters_and_summary_use_entire_filtered_selection(
     }
 
 
+def test_activity_library_summary_groups_metrics_by_exact_sport(harness: AppHarness) -> None:
+    user = harness.create_user("sport-summary@example.com")
+    _seed(
+        harness,
+        _activity(
+            user.id,
+            "Ride",
+            started=datetime(2025, 3, 1, tzinfo=UTC),
+            activity_type="cycling",
+            distance_m=12000,
+        ),
+        _activity(
+            user.id,
+            "Run",
+            started=datetime(2025, 3, 2, tzinfo=UTC),
+            activity_type="running",
+            distance_m=5000,
+            has_gps=False,
+        ),
+        _activity(
+            user.id,
+            "Gravel ride",
+            started=datetime(2025, 3, 3, tzinfo=UTC),
+            activity_type="gravel_mtb",
+            distance_m=2500,
+        ),
+    )
+    client, _ = harness.login_client("sport-summary@example.com")
+
+    response = client.get("/api/v1/vault/activities?limit=1")
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["total"] == 3
+    assert len(payload["items"]) == 1
+    assert payload["by_sport"] == [
+        {
+            "activity_type": "cycling",
+            "activity_count": 1,
+            "distance_m": 12000.0,
+            "distance_known_count": 1,
+            "elevation_gain_m": 10.0,
+            "elevation_gain_known_count": 1,
+            "moving_seconds": 600.0,
+            "moving_seconds_known_count": 1,
+            "elapsed_seconds": 700.0,
+            "elapsed_seconds_known_count": 1,
+            "gps_activity_count": 1,
+            "no_gps_activity_count": 0,
+        },
+        {
+            "activity_type": "running",
+            "activity_count": 1,
+            "distance_m": 5000.0,
+            "distance_known_count": 1,
+            "elevation_gain_m": 10.0,
+            "elevation_gain_known_count": 1,
+            "moving_seconds": 600.0,
+            "moving_seconds_known_count": 1,
+            "elapsed_seconds": 700.0,
+            "elapsed_seconds_known_count": 1,
+            "gps_activity_count": 0,
+            "no_gps_activity_count": 1,
+        },
+        {
+            "activity_type": "gravel_mtb",
+            "activity_count": 1,
+            "distance_m": 2500.0,
+            "distance_known_count": 1,
+            "elevation_gain_m": 10.0,
+            "elevation_gain_known_count": 1,
+            "moving_seconds": 600.0,
+            "moving_seconds_known_count": 1,
+            "elapsed_seconds": 700.0,
+            "elapsed_seconds_known_count": 1,
+            "gps_activity_count": 1,
+            "no_gps_activity_count": 0,
+        },
+    ]
+
+
 def test_activity_details_are_private_and_include_readiness_and_project_usages(
     harness: AppHarness,
 ) -> None:

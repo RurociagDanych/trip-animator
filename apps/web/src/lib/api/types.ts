@@ -5,7 +5,13 @@ export interface VaultActivityListItemOut {
   id: string; name: string; activity_type: string; raw_sport_type: string; source_provider: string;
   started_at: string; local_date: string; timezone_name: string | null; date_is_utc_fallback: boolean;
   distance_m: number | null; elevation_gain_m: number | null; moving_seconds: number | null; elapsed_seconds: number | null;
-  has_gps: boolean; readiness: VaultActivityReadinessOut;
+  has_gps: boolean; readiness: VaultActivityReadinessOut; hidden?: boolean;
+}
+export interface VaultActivitySportSummaryOut {
+  activity_type: string; activity_count: number; distance_m: number | null; distance_known_count: number;
+  elevation_gain_m: number | null; elevation_gain_known_count: number; moving_seconds: number | null;
+  moving_seconds_known_count: number; elapsed_seconds: number | null; elapsed_seconds_known_count: number;
+  gps_activity_count: number; no_gps_activity_count: number;
 }
 export interface VaultActivitySummaryOut {
   activity_count: number; distance_m: number | null; distance_known_count: number;
@@ -13,7 +19,12 @@ export interface VaultActivitySummaryOut {
   moving_seconds_known_count: number; elapsed_seconds: number | null; elapsed_seconds_known_count: number;
   gps_activity_count: number; no_gps_activity_count: number;
 }
-export interface VaultActivityListOut { items: VaultActivityListItemOut[]; total: number; offset: number; limit: number; summary: VaultActivitySummaryOut; geographic_excluded_count?: number }
+export interface VaultActivityListOut { items: VaultActivityListItemOut[]; total: number; offset: number; limit: number; summary: VaultActivitySummaryOut; by_sport: VaultActivitySportSummaryOut[]; geographic_excluded_count?: number }
+export interface LibraryDisconnectPreviewOut {
+  operation: "disconnect"; confirmation: string;
+  project_usages: { project_id: string; title: string; stage_id: string }[];
+  preserves_project_material: true; permanent_purge_available: false; retention_notice: string;
+}
 export interface VaultActivityMapFeature { type: "Feature"; geometry: { type: "LineString"; coordinates: number[][] }; properties: { id: string; name: string; precision: "summary_polyline" } }
 export interface VaultActivityMapOut { type: "FeatureCollection"; features: VaultActivityMapFeature[]; total: number; drawable_count: number; no_gps_count: number; unavailable_count: number; returned_count: number; truncated: boolean; geographic_excluded_count: number; unevaluated_count: number; next_offset?: number | null; unavailable_in_page_count?: number }
 export interface VaultActivityDetailOut extends VaultActivityListItemOut {

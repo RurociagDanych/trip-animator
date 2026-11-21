@@ -141,6 +141,7 @@ def test_alembic_vault_sqlite_upgrade_downgrade_roundtrip(
         "vault_activity_tiles",
         "vault_sync_states",
         "vault_gears",
+        "library_views",
     }
     engine = create_db_engine(db_url)
     try:
@@ -149,9 +150,12 @@ def test_alembic_vault_sqlite_upgrade_downgrade_roundtrip(
         stage_cols = {c["name"] for c in insp.get_columns("stages")}
         assert "vault_activity_id" in stage_cols
         assert "retry_count" in {c["name"] for c in insp.get_columns("vault_sync_states")}
+        assert {"hidden_at", "disconnected_at"} <= {
+            c["name"] for c in insp.get_columns("vault_activities")
+        }
         with engine.connect() as conn:
             ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-            assert ver == "0008_vault_sync_retries"
+            assert ver == "0009_library_views_lifecycle"
     finally:
         engine.dispose()
 
@@ -1001,6 +1005,139 @@ def test_stage_upload_split_mirroring_and_backfill_stages(
     assert missing_source_backfill.json()["mirrored_stages"] == 0
     assert missing_source_backfill.json()["linked_stages"] == 0
     assert alice_client.get("/api/v1/vault/sync/status").json()["total_activities"] == 0
+
+
+def test_catalog_first_mirror_attaches_only_eligible_local_strava_source(
+    make_harness: HarnessFactory,
+) -> None:
+    h = make_harness()
+    user = h.create_user("catalog-first-vault@example.com")
+    started_at = datetime(2026, 6, 2, 8, 0, 0, tzinfo=UTC)
+
+    with h.session_factory() as db:
+        catalog = upsert_strava_activity_to_vault(
+            db,
+            user_id=user.id,
+            item=_make_strava_summary(
+                91001,
+                started_at_utc=started_at,
+                name="Canonical Provider Name",
+            ),
+            now=started_at,
+        ).vault_activity
+        canonical_id = catalog.id
+        canonical_snapshot = (
+            catalog.name,
+            catalog.distance_m,
+            catalog.summary_polyline,
+            catalog.tile_count_z14,
+        )
+        project = Project(owner_user_id=user.id, title="Local Import", settings_json={})
+        db.add(project)
+        db.flush()
+        local_stage = Stage(
+            project_id=project.id,
+            source_type="strava",
+            source_format="strava",
+            activity_type="cycling",
+            external_source_id="91001",
+            strava_activity_id=91001,
+            name="Edited Project Name",
+            stage_order=0,
+            day_index=1,
+            bronze_object_key=f"bronze/{project.id}/91001.json",
+            silver_object_key=f"silver/{project.id}/91001.parquet",
+            point_count=3,
+            distance_m=123.0,
+        )
+        db.add(local_stage)
+        db.flush()
+        mirror_stage_to_vault(db, user_id=user.id, stage=local_stage)
+        assert catalog.source_stage_id == local_stage.id
+        assert local_stage.vault_activity_id == canonical_id
+        assert (
+            catalog.name,
+            catalog.distance_m,
+            catalog.summary_polyline,
+            catalog.tile_count_z14,
+        ) == canonical_snapshot
+
+        # Never replace an existing reusable source pointer.
+        preserved_source_id = local_stage.id
+        other_catalog = upsert_strava_activity_to_vault(
+            db,
+            user_id=user.id,
+            item=_make_strava_summary(
+                91002,
+                started_at_utc=started_at,
+                name="Second Canonical Activity",
+            ),
+            now=started_at,
+        ).vault_activity
+        other_catalog.source_stage_id = preserved_source_id
+        other_project = Project(owner_user_id=user.id, title="Second Import", settings_json={})
+        db.add(other_project)
+        db.flush()
+        second_stage = Stage(
+            project_id=other_project.id,
+            source_type="strava",
+            source_format="strava",
+            activity_type="cycling",
+            external_source_id="91002",
+            strava_activity_id=91002,
+            name="Second Project Name",
+            stage_order=0,
+            day_index=1,
+            bronze_object_key=f"bronze/{other_project.id}/91002.json",
+            silver_object_key=f"silver/{other_project.id}/91002.parquet",
+            point_count=3,
+            distance_m=123.0,
+        )
+        db.add(second_stage)
+        db.flush()
+        mirror_stage_to_vault(db, user_id=user.id, stage=second_stage)
+        assert other_catalog.source_stage_id == preserved_source_id
+
+        # A disconnected catalog row remains suppressed and is not attached.
+        disconnected = upsert_strava_activity_to_vault(
+            db,
+            user_id=user.id,
+            item=_make_strava_summary(
+                91003,
+                started_at_utc=started_at,
+                name="Disconnected Activity",
+            ),
+            now=started_at,
+        ).vault_activity
+        disconnected.disconnected_at = started_at
+        disconnected_project = Project(
+            owner_user_id=user.id,
+            title="Disconnected Import",
+            settings_json={},
+        )
+        db.add(disconnected_project)
+        db.flush()
+        disconnected_stage = Stage(
+            project_id=disconnected_project.id,
+            source_type="strava",
+            source_format="strava",
+            activity_type="cycling",
+            external_source_id="91003",
+            strava_activity_id=91003,
+            name="Disconnected Project Name",
+            stage_order=0,
+            day_index=1,
+            bronze_object_key=f"bronze/{disconnected_project.id}/91003.json",
+            silver_object_key=f"silver/{disconnected_project.id}/91003.parquet",
+            point_count=3,
+            distance_m=123.0,
+        )
+        db.add(disconnected_stage)
+        db.flush()
+        returned = mirror_stage_to_vault(db, user_id=user.id, stage=disconnected_stage)
+        assert returned.id == disconnected.id
+        assert disconnected.source_stage_id is None
+        assert disconnected_stage.vault_activity_id == disconnected.id
 
 
 @pytest.mark.parametrize("failure", ["server_error", "timeout"])

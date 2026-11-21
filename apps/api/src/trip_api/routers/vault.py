@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import Select, case, func, select
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
+from trip_telemetry import ActivityType
 
 from trip_api.db import Project, Stage, VaultActivity
 from trip_api.deps import AppSettings, CsrfAuth, CurrentAuth, DbSession, StoreDep
@@ -30,6 +31,7 @@ from trip_api.schemas import (
     VaultActivityListOut,
     VaultActivityProjectUsageOut,
     VaultActivityReadinessOut,
+    VaultActivitySportSummaryOut,
     VaultActivitySummaryOut,
     VaultBackfillStagesOut,
     VaultSyncStatusOut,
@@ -83,6 +85,7 @@ def _activity_item(activity: VaultActivity) -> VaultActivityListItemOut:
         moving_seconds=_stored_metric(activity, "moving_seconds"),
         elapsed_seconds=_stored_metric(activity, "elapsed_seconds"),
         has_gps=activity.has_gps,
+        hidden=getattr(activity, "hidden_at", None) is not None,
         readiness=VaultActivityReadinessOut(
             metadata_available=bool(activity.raw_metadata_json or activity.bronze_object_key),
             has_gps=activity.has_gps,
@@ -108,8 +111,15 @@ def _selection_query(
     min_moving_seconds: float | None,
     max_moving_seconds: float | None,
     has_gps: bool | None,
+    include_hidden: bool = False,
 ) -> Select[VaultActivity]:
     query = select(VaultActivity).where(VaultActivity.user_id == user_id)
+    disconnected_at = getattr(VaultActivity, "disconnected_at", None)
+    hidden_at = getattr(VaultActivity, "hidden_at", None)
+    if disconnected_at is not None:
+        query = query.where(disconnected_at.is_(None))
+    if not include_hidden and hidden_at is not None:
+        query = query.where(hidden_at.is_(None))
     if name is not None:
         escaped = name.replace("!", "!!").replace("%", "!%").replace("_", "!_")
         query = query.where(VaultActivity.name.ilike(f"%{escaped}%", escape="!"))
@@ -173,6 +183,55 @@ def _summary(db: Session, query: Select[VaultActivity]) -> VaultActivitySummaryO
     )
 
 
+def _summary_by_sport(
+    db: Session, query: Select[VaultActivity]
+) -> list[VaultActivitySportSummaryOut]:
+    activity = VaultActivity
+    distance = _metric_expression("distance_m")
+    elevation = _metric_expression("elevation_gain_m")
+    moving = _metric_expression("moving_seconds")
+    elapsed = _metric_expression("elapsed_seconds")
+    rows = db.execute(
+        select(
+            activity.activity_type,
+            func.count(activity.id),
+            func.sum(distance),
+            func.count(distance),
+            func.sum(elevation),
+            func.count(elevation),
+            func.sum(moving),
+            func.count(moving),
+            func.sum(elapsed),
+            func.count(elapsed),
+            func.sum(case((activity.has_gps.is_(True), 1), else_=0)),
+        )
+        .where(activity.id.in_(query.with_only_columns(activity.id)))
+        .group_by(activity.activity_type)
+        .order_by(func.min(activity.started_at), activity.activity_type)
+    ).all()
+    summaries = []
+    for row in rows:
+        count = int(row[1] or 0)
+        gps_count = int(row[10] or 0)
+        summaries.append(
+            VaultActivitySportSummaryOut(
+                activity_type=cast(ActivityType, row[0]),
+                activity_count=count,
+                distance_m=float(row[2]) if row[3] else None,
+                distance_known_count=int(row[3] or 0),
+                elevation_gain_m=float(row[4]) if row[5] else None,
+                elevation_gain_known_count=int(row[5] or 0),
+                moving_seconds=float(row[6]) if row[7] else None,
+                moving_seconds_known_count=int(row[7] or 0),
+                elapsed_seconds=float(row[8]) if row[9] else None,
+                elapsed_seconds_known_count=int(row[9] or 0),
+                gps_activity_count=gps_count,
+                no_gps_activity_count=count - gps_count,
+            )
+        )
+    return summaries
+
+
 @dataclass
 class LibrarySelection:
     query: Select[VaultActivity]
@@ -193,6 +252,7 @@ def library_selection(
     min_moving_seconds: float | None = Query(default=None, ge=0),
     max_moving_seconds: float | None = Query(default=None, ge=0),
     has_gps: bool | None = None,
+    include_hidden: bool = False,
     area: str | None = Query(default=None, max_length=160),
 ) -> LibrarySelection:
     if start_date is not None and end_date is not None and start_date > end_date:
@@ -218,6 +278,7 @@ def library_selection(
         min_moving_seconds=min_moving_seconds,
         max_moving_seconds=max_moving_seconds,
         has_gps=has_gps,
+        include_hidden=include_hidden,
     )
     excluded = 0
     if area is not None:
@@ -287,6 +348,7 @@ def list_vault_activities(
         offset=offset,
         limit=limit,
         summary=_summary(db, filters),
+        by_sport=_summary_by_sport(db, filters),
         geographic_excluded_count=selection.geographic_excluded_count,
     )
 
@@ -396,12 +458,14 @@ def get_vault_activity(
     auth: CurrentAuth,
     db: DbSession,
 ) -> VaultActivityDetailOut:
-    activity = db.scalar(
-        select(VaultActivity).where(
-            VaultActivity.id == activity_id,
-            VaultActivity.user_id == auth.user.id,
-        )
+    detail_query = select(VaultActivity).where(
+        VaultActivity.id == activity_id,
+        VaultActivity.user_id == auth.user.id,
     )
+    disconnected_at = getattr(VaultActivity, "disconnected_at", None)
+    if disconnected_at is not None:
+        detail_query = detail_query.where(disconnected_at.is_(None))
+    activity = db.scalar(detail_query)
     if activity is None:
         raise HTTPException(status_code=404, detail="Activity not found")
 

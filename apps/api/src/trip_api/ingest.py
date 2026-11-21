@@ -471,28 +471,6 @@ def process_pending_ingest_jobs(
                 user_id=conn.user_id,
                 strava_activity_id=job.external_object_id,
             )
-            matching_stages = list(
-                db.scalars(
-                    select(Stage)
-                    .join(Project, Stage.project_id == Project.id)
-                    .where(
-                        Project.owner_user_id == conn.user_id,
-                        Stage.strava_activity_id == job.external_object_id,
-                    )
-                ).all()
-            )
-            touched_projects = {st.project_id for st in matching_stages}
-            for st in matching_stages:
-                _delete_stage_and_artifacts(db, store, st)
-            for pid in touched_projects:
-                align_project_photos(db, store, pid)
-                write_audit_event(
-                    db,
-                    user_id=conn.user_id,
-                    project_id=pid,
-                    event_type="stage.strava_webhook_deleted",
-                    metadata={"strava_activity_id": job.external_object_id},
-                )
             if deleted_vault_count > 0:
                 write_audit_event(
                     db,

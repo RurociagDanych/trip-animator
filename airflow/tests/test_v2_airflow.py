@@ -315,6 +315,11 @@ def test_ingest_worker_webhook_queue_and_silver_replay(
         assert stage.etl_version == CURRENT_ETL_VERSION
         assert stage.bronze_sha256 is not None
 
+        project_artifacts = {
+            key: airflow_harness.store.get_bytes(key)
+            for key in (stage.bronze_object_key, stage.silver_object_key)
+            if key is not None
+        }
         db.add(
             IngestJob(
                 provider="strava",
@@ -333,7 +338,16 @@ def test_ingest_worker_webhook_queue_and_silver_replay(
             now=now,
         )
         assert del_res["succeeded"] == 1
-        assert db.scalar(select(Stage).where(Stage.strava_activity_id == 555001)) is None
+        preserved_stage = db.scalar(select(Stage).where(Stage.strava_activity_id == 555001))
+        assert preserved_stage is not None
+        assert preserved_stage.id == stage.id
+        assert preserved_stage.project_id == project.id
+        assert (
+            db.scalar(select(VaultActivity).where(VaultActivity.strava_activity_id == 555001))
+            is None
+        )
+        for key, original_bytes in project_artifacts.items():
+            assert airflow_harness.store.get_bytes(key) == original_bytes
 
 
 def test_materialize_gold_marts_seeds_existing_duckdb_from_s3_in_ephemeral_container(

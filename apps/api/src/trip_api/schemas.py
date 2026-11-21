@@ -706,6 +706,8 @@ class VaultActivityReadinessOut(BaseModel):
 
 
 class VaultActivityListItemOut(BaseModel):
+    """Activity metadata returned by the library, including visibility state."""
+
     id: uuid.UUID
     name: str
     activity_type: str
@@ -720,6 +722,7 @@ class VaultActivityListItemOut(BaseModel):
     moving_seconds: float | None
     elapsed_seconds: float | None
     has_gps: bool
+    hidden: bool = False
     readiness: VaultActivityReadinessOut
 
 
@@ -737,12 +740,32 @@ class VaultActivitySummaryOut(BaseModel):
     no_gps_activity_count: int
 
 
+class VaultActivitySportSummaryOut(BaseModel):
+    """Metric totals and measurement coverage for one canonical activity type."""
+
+    activity_type: ActivityType
+    activity_count: int
+    distance_m: float | None
+    distance_known_count: int
+    elevation_gain_m: float | None
+    elevation_gain_known_count: int
+    moving_seconds: float | None
+    moving_seconds_known_count: int
+    elapsed_seconds: float | None
+    elapsed_seconds_known_count: int
+    gps_activity_count: int
+    no_gps_activity_count: int
+
+
 class VaultActivityListOut(BaseModel):
+    """Paginated activities and summaries over the complete filtered selection."""
+
     items: list[VaultActivityListItemOut]
     total: int
     offset: int
     limit: int
     summary: VaultActivitySummaryOut
+    by_sport: list[VaultActivitySportSummaryOut]
     geographic_excluded_count: int = 0
 
 
