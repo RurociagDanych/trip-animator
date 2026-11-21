@@ -20,7 +20,7 @@ from alembic.config import Config
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from psycopg import sql
-from sqlalchemy import func, inspect, select, text
+from sqlalchemy import event, func, inspect, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 from trip_api.config import Settings
@@ -35,6 +35,7 @@ from trip_api.db import (
     SessionRecord,
     Stage,
     User,
+    VaultActivity,
     VaultSyncState,
     create_db_engine,
     create_session_factory,
@@ -221,6 +222,7 @@ def test_postgres_alembic_upgrade_downgrade_upgrade_roundtrip(pg_temp_db_url: st
         "vault_activity_tiles",
         "vault_sync_states",
         "vault_gears",
+        "library_views",
     }
 
     command.upgrade(cfg, "head")
@@ -233,6 +235,11 @@ def test_postgres_alembic_upgrade_downgrade_upgrade_roundtrip(pg_temp_db_url: st
         project_cols = {c["name"]: c for c in insp.get_columns("projects")}
         assert {"share_enabled", "share_slug", "share_created_at"} <= set(project_cols)
         assert "JSONB" in str(project_cols["settings_json"]["type"]).upper()
+        view_cols = {c["name"]: c for c in insp.get_columns("library_views")}
+        assert "JSONB" in str(view_cols["rules"]["type"]).upper()
+        assert {"hidden_at", "disconnected_at"} <= {
+            c["name"] for c in insp.get_columns("vault_activities")
+        }
         stage_checks = {c["name"] for c in insp.get_check_constraints("stages")}
         assert {
             "ck_stages_source_type",
@@ -273,7 +280,7 @@ def test_postgres_alembic_upgrade_downgrade_upgrade_roundtrip(pg_temp_db_url: st
         assert expected_tables <= set(inspect(engine_reup).get_table_names())
         with engine_reup.connect() as conn:
             ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-            assert ver == "0008_vault_sync_retries"
+            assert ver == "0009_library_views_lifecycle"
     finally:
         engine_reup.dispose()
 
@@ -789,3 +796,157 @@ def test_postgres_concurrent_vault_sync_claims_queued_state_once(
         assert state is not None
         assert state.status == "completed"
         assert state.lease_expires_at is None
+
+
+@pytest.mark.parametrize("reuse_path", ["create", "append"])
+def test_postgres_library_reuse_does_not_lock_source_during_artifact_copy(
+    reuse_path: str,
+    pg_app_factory: Any,
+    pg_temp_db_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, _settings, engine, sf, store = pg_app_factory()
+    assert engine.dialect.name == "postgresql"
+    user = _create_pg_user(sf, f"library-race-{reuse_path}@example.com")
+    activity_id = uuid.uuid4()
+    source_project_id = uuid.uuid4()
+    source_stage_id = uuid.uuid4()
+    bronze_key = f"source/{activity_id}.gpx"
+    silver_key = f"source/{activity_id}.parquet"
+    original_bronze = b"canonical bronze bytes"
+    original_silver = b"canonical silver bytes"
+    store.put_bytes(bronze_key, original_bronze)
+    store.put_bytes(silver_key, original_silver)
+    with sf() as db:
+        source_project = Project(
+            id=source_project_id, owner_user_id=user.id, title="Canonical source"
+        )
+        activity = VaultActivity(
+            id=activity_id,
+            user_id=user.id,
+            source_provider="strava",
+            external_activity_id=str(activity_id),
+            name="Concurrent ride",
+            activity_type="cycling",
+            started_at=datetime.now(UTC),
+            local_date=datetime.now(UTC).date(),
+            bronze_object_key=bronze_key,
+            has_gps=True,
+            tile_precision="full_stream",
+        )
+        source_stage = Stage(
+            id=source_stage_id,
+            project_id=source_project_id,
+            source_type="strava",
+            source_format="gpx",
+            activity_type="cycling",
+            vault_activity_id=activity_id,
+            name="Concurrent ride",
+            stage_order=0,
+            day_index=1,
+            bronze_object_key=bronze_key,
+            silver_object_key=silver_key,
+            point_count=3,
+            distance_m=1234.0,
+            elevation_gain_m=20.0,
+            elevation_loss_m=2.0,
+            moving_seconds=300.0,
+            elapsed_seconds=320.0,
+            has_timestamps=True,
+            warnings_json=[],
+        )
+        db.add_all([source_project, activity])
+        db.flush()
+        db.add(source_stage)
+        db.flush()
+        activity.source_stage_id = source_stage.id
+        if reuse_path == "append":
+            target = Project(owner_user_id=user.id, title="Append target")
+            db.add(target)
+            db.flush()
+            target_project_id = target.id
+        else:
+            target_project_id = source_project_id
+        db.commit()
+
+    client, csrf = _login_pg_client(app, user.email)
+    copy_started = Event()
+    allow_copy_to_finish = Event()
+    request_backend_pid: list[int] = []
+
+    def capture_request_backend(
+        conn: Any, _cursor: Any, _statement: str, _parameters: Any, _context: Any, _many: bool
+    ) -> None:
+        if not request_backend_pid:
+            raw_connection = conn.connection.driver_connection
+            request_backend_pid.append(int(raw_connection.info.backend_pid))
+
+    original_put = store.put_bytes
+
+    def paused_put(
+        key: str,
+        data: bytes,
+        *,
+        content_type: str = "application/octet-stream",
+    ) -> None:
+        original_put(key, data, content_type=content_type)
+        if key.startswith(("bronze/", "silver/")) and not copy_started.is_set():
+            copy_started.set()
+            if not allow_copy_to_finish.wait(timeout=10.0):
+                raise TimeoutError("Test did not release artifact copy")
+
+    monkeypatch.setattr(store, "put_bytes", paused_put)
+    event.listen(engine, "before_cursor_execute", capture_request_backend)
+    endpoint = (
+        "/api/v1/library/projects"
+        if reuse_path == "create"
+        else f"/api/v1/library/projects/{target_project_id}/activities"
+    )
+    payload = (
+        {"title": "Concurrent reuse", "activity_ids": [str(activity_id)]}
+        if reuse_path == "create"
+        else {"activity_ids": [str(activity_id)]}
+    )
+    before_counts: tuple[int, int]
+    with sf() as db:
+        before_counts = (
+            int(db.scalar(select(func.count()).select_from(Project)) or 0),
+            int(db.scalar(select(func.count()).select_from(Stage)) or 0),
+        )
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        request = pool.submit(client.post, endpoint, json=payload, headers={"X-CSRF-Token": csrf})
+        try:
+            assert copy_started.wait(timeout=10.0), "HTTP request did not reach artifact copy"
+            assert request_backend_pid
+            with psycopg.connect(_to_psycopg_url(pg_temp_db_url), connect_timeout=3) as concurrent:
+                concurrent_pid = int(concurrent.info.backend_pid)
+                assert concurrent_pid != request_backend_pid[0]
+                concurrent.execute("SET LOCAL lock_timeout = '1s'")
+                concurrent.execute(
+                    "UPDATE vault_activities SET disconnected_at = now() WHERE id = %s",
+                    (activity_id,),
+                )
+                concurrent.commit()
+        finally:
+            allow_copy_to_finish.set()
+        response = request.result(timeout=15.0)
+    event.remove(engine, "before_cursor_execute", capture_request_backend)
+
+    assert response.status_code == 409, response.text
+    assert store.get_bytes(bronze_key) == original_bronze
+    assert store.get_bytes(silver_key) == original_silver
+    stored_keys = {
+        path.relative_to(store.root_dir).as_posix()
+        for path in Path(store.root_dir).rglob("*")
+        if path.is_file()
+    }
+    assert stored_keys == {bronze_key, silver_key}
+    with sf() as db:
+        after_counts = (
+            int(db.scalar(select(func.count()).select_from(Project)) or 0),
+            int(db.scalar(select(func.count()).select_from(Stage)) or 0),
+        )
+        assert after_counts == before_counts
+        activity = db.get(VaultActivity, activity_id)
+        assert activity is not None and activity.disconnected_at is not None

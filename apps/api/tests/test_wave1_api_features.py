@@ -619,7 +619,7 @@ def test_strava_polyline_webhook_queue_render_cache_reaper_and_cli(
     db_url = f"sqlite:///{h.db_path}"
     assert cli_main(["process-ingest-jobs", "--database-url", db_url]) == 0
     with h.session_factory() as db:
-        assert db.scalar(select(Stage).where(Stage.strava_activity_id == 777)) is None
+        assert db.scalar(select(Stage).where(Stage.strava_activity_id == 777)) is not None
         ing = db.scalar(select(IngestJob))
         assert ing is not None
         assert ing.status == "succeeded"

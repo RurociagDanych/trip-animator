@@ -652,14 +652,21 @@ def upsert_strava_activity_to_vault(
     existing: VaultActivity | None
     if existing_by_ext_id is not None:
         existing = existing_by_ext_id.get(ext_id)
+        if existing is not None:
+            db.refresh(existing, with_for_update=True)
     else:
         existing = db.scalar(
-            select(VaultActivity).where(
+            select(VaultActivity)
+            .where(
                 VaultActivity.user_id == user_id,
                 VaultActivity.source_provider == "strava",
                 VaultActivity.external_activity_id == ext_id,
             )
+            .with_for_update()
         )
+
+    if existing is not None and existing.disconnected_at is not None:
+        return UpsertActivityResult(existing, False, existing.has_gps, False)
 
     raw_meta: dict[str, object] = {}
     # Preserve measurement presence separately from legacy non-null columns.
@@ -848,6 +855,7 @@ def delete_strava_vault_activity(
             select(VaultActivity).where(
                 VaultActivity.user_id == user_id,
                 VaultActivity.strava_activity_id == strava_activity_id,
+                VaultActivity.disconnected_at.is_(None),
             )
         ).all()
     )
@@ -1803,6 +1811,10 @@ def mirror_stage_to_vault(
         )
         vault_act = upsert_res.vault_activity
 
+    if vault_act is not None and vault_act.disconnected_at is not None:
+        stage.vault_activity_id = vault_act.id
+        return vault_act
+
     geom = geometry or PreparedStageVaultGeometry(summary_polyline=None, tiles_z14=frozenset())
     # An already existing library activity is canonical source data. A project
     # stage may be trimmed, renamed, or split, so never mirror its metrics or
@@ -1839,6 +1851,29 @@ def mirror_stage_to_vault(
             )
             vault_act.tile_precision = "full_stream"
             vault_act.synced_at = now_utc
+        # A catalog-first Strava activity can be missing its local reusable
+        # source pointer. Attach only an untrimmed, unsplit Strava import from
+        # the same owner; project edits/copies are not canonical provenance.
+        if (
+            vault_act.source_stage_id is None
+            and vault_act.user_id == user_id
+            and vault_act.source_provider == "strava"
+            and stage.source_type == "strava"
+            and stage.strava_activity_id is not None
+            and stage.external_source_id == str(stage.strava_activity_id)
+            and vault_act.strava_activity_id == stage.strava_activity_id
+            and vault_act.external_activity_id == str(stage.strava_activity_id)
+            and stage.trim_start_s is None
+            and stage.trim_end_s is None
+            and not any(
+                isinstance(warning, dict)
+                and warning.get("code") == "vault_canonical_excluded_split_segment"
+                for warning in (stage.warnings_json or [])
+            )
+            and (project := db.get(Project, stage.project_id)) is not None
+            and project.owner_user_id == user_id
+        ):
+            vault_act.source_stage_id = stage.id
         stage.vault_activity_id = vault_act.id
         db.flush()
         if recompute_new_tiles:

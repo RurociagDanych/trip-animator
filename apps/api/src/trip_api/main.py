@@ -35,6 +35,9 @@ from trip_api.reaper import build_object_store
 from trip_api.routers import (
     analytics,
     auth,
+    library_lifecycle,
+    library_projects,
+    library_views,
     photos,
     projects,
     renders,
@@ -306,6 +309,9 @@ def create_app(
     application.include_router(telemetry.router)
     application.include_router(analytics.router)
     application.include_router(strava.router)
+    application.include_router(library_views.router)
+    application.include_router(library_lifecycle.router)
+    application.include_router(library_projects.router)
     application.include_router(vault.router)
     application.include_router(renders.router)
     application.include_router(share.router)

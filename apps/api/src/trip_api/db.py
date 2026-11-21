@@ -565,6 +565,8 @@ class VaultActivity(Base):
     primary_country: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     bronze_object_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    hidden_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    disconnected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     raw_metadata_json: Mapped[dict[str, object]] = mapped_column(
         JSONVariant, default=dict, nullable=False
     )

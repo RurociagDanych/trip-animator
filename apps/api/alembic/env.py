@@ -4,6 +4,7 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 from trip_api.db import Base
+from trip_api.library_view import LibraryView  # noqa: F401  # registers saved-view metadata
 
 config = context.config
 if config.config_file_name is not None:

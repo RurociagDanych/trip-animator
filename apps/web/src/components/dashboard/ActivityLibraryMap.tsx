@@ -8,6 +8,7 @@ const SOURCE = "activity-routes";
 const LAYER = "activity-routes-line";
 
 interface Props {
+  ownerId?: string | null;
   filters: VaultActivityFilters;
   area: string | undefined;
   refreshKey?: number;
@@ -16,7 +17,7 @@ interface Props {
   onSelect: (id: string) => void;
 }
 
-export function ActivityLibraryMap({ filters, area, refreshKey, onAreaChange, selectedId, onSelect }: Props) {
+export function ActivityLibraryMap({ ownerId = null, filters, area, refreshKey, onAreaChange, selectedId, onSelect }: Props) {
   const container = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const loaded = useRef(false);
@@ -25,7 +26,7 @@ export function ActivityLibraryMap({ filters, area, refreshKey, onAreaChange, se
   const routeDataRef = useRef<VaultActivityMapOut | null>(null);
   const [bounds, setBounds] = useState<string | undefined>(undefined);
   const requestFilters = useMemo(() => ({ ...filters, area }), [filters, area]);
-  const requestKey = JSON.stringify([requestFilters, refreshKey]);
+  const requestKey = JSON.stringify([ownerId, requestFilters, refreshKey]);
   const [requestState, setRequestState] = useState<{ key: string; data: VaultActivityMapOut | null; error: boolean } | null>(null);
   const [mapReady, setMapReady] = useState(false);
   const routeData = requestState?.key === requestKey ? requestState.data : null;

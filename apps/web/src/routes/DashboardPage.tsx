@@ -275,7 +275,7 @@ export function DashboardPage() {
           </div>
         ) : null}
 
-        {dashboardTab === "library" ? <ActivityLibraryView /> : dashboardTab === "atlas" ? (
+        {dashboardTab === "library" ? <ActivityLibraryView key={user?.id ?? "anonymous"} ownerId={user?.id ?? null} /> : dashboardTab === "atlas" ? (
           <Suspense
             fallback={
               <div className="flex items-center justify-center rounded-lg border border-border bg-surface p-10 text-xs text-ink-muted">

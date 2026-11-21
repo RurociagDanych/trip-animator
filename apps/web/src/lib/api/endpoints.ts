@@ -63,7 +63,7 @@ export interface VaultActivityFilters {
   name?: string; start_date?: string; end_date?: string; sport?: string;
   min_distance_m?: number; max_distance_m?: number; min_elevation_gain_m?: number;
   max_elevation_gain_m?: number; min_moving_seconds?: number; max_moving_seconds?: number;
-  has_gps?: boolean; sort?: string; order?: string; offset?: number; limit?: number; area?: string;
+  has_gps?: boolean; include_hidden?: boolean; sort?: string; order?: string; offset?: number; limit?: number; area?: string;
 }
 
 export const vaultApi = {
