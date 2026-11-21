@@ -1,3 +1,4 @@
+/** Present the activity library and curated project workspace. */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
@@ -40,10 +41,11 @@ import { createDefaultRenderSpecV2 } from "../lib/api/types";
 import { formatDistance, formatElevation } from "../lib/geo/format";
 import { polylinesToSvgPath } from "../lib/geo/polyline";
 
+/** Open the activity library by default while keeping trips and Atlas accessible. */
 export function DashboardPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [dashboardTab, setDashboardTab] = useState<"trips" | "atlas" | "library">("trips");
+  const [dashboardTab, setDashboardTab] = useState<"trips" | "atlas" | "library">("library");
   const [newTitle, setNewTitle] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -181,7 +183,7 @@ export function DashboardPage() {
   return (
     <div className="flex min-h-screen flex-col bg-canvas text-ink">
       <AppHeader
-        sectionLabel={dashboardTab === "atlas" ? "Atlas" : "Trips"}
+        sectionLabel={dashboardTab === "library" ? "Activity Library" : dashboardTab === "atlas" ? "Atlas" : "Trips"}
         user={user}
         onLogout={user ? () => void handleLogout() : undefined}
       />
@@ -190,9 +192,9 @@ export function DashboardPage() {
         <section className="flex flex-col gap-4 border-b border-border pb-6 lg:flex-row lg:items-end lg:justify-between">
           <div className="space-y-3 max-w-xl">
             <div className="space-y-1.5">
-              <h1 className="text-2xl font-semibold tracking-tight text-ink">Trip projects</h1>
+              <h1 className="text-2xl font-semibold tracking-tight text-ink">{dashboardTab === "library" ? "Activity Library" : dashboardTab === "atlas" ? "Atlas" : "Trip projects"}</h1>
               <p className="text-sm text-ink-muted">
-                Assemble multi-day GPX, FIT, and TCX tracks or Strava activities into synchronized 1:1 map films.
+                {dashboardTab === "library" ? "Explore your activities, filter routes and select tracks for a trip film." : "Assemble multi-day GPX, FIT, and TCX tracks or Strava activities into synchronized 1:1 map films."}
               </p>
             </div>
 

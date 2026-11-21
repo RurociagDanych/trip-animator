@@ -8,6 +8,10 @@ import { clearCsrfToken } from "../lib/api/client";
 import { createDefaultRenderSpecV2 } from "../lib/api/types";
 import { createAppRouter } from "../router";
 
+vi.mock("../components/dashboard/ActivityLibraryView", () => ({
+  ActivityLibraryView: () => <div>Activity catalog</div>,
+}));
+
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -114,6 +118,7 @@ describe("Route tests: DashboardPage, LoginPage, ForgotPasswordPage, ResetPasswo
       });
 
       const { router } = renderAtRoute("/");
+      fireEvent.click(await screen.findByRole("tab", { name: "Trips" }));
       expect(await screen.findByText(/No trip projects yet/i)).toBeInTheDocument();
       expect(screen.getByRole("link", { name: /Account: Developer/i })).toHaveAttribute(
         "href",
@@ -184,6 +189,7 @@ describe("Route tests: DashboardPage, LoginPage, ForgotPasswordPage, ResetPasswo
       });
 
       renderAtRoute("/");
+      fireEvent.click(await screen.findByRole("tab", { name: "Trips" }));
       expect(await screen.findByText("Fictional Meridian Raid")).toBeInTheDocument();
 
       fireEvent.click(screen.getByRole("button", { name: /Delete Fictional Meridian Raid/i }));
@@ -279,6 +285,7 @@ describe("Route tests: DashboardPage, LoginPage, ForgotPasswordPage, ResetPasswo
       });
 
       renderAtRoute("/");
+      fireEvent.click(await screen.findByRole("tab", { name: "Trips" }));
       expect(await screen.findByText("Fictional Meridian Circuit")).toBeInTheDocument();
       expect(screen.getByTestId("project-silhouette-proj-atlas-1")).toBeInTheDocument();
       expect(screen.getByText("+3100 m")).toBeInTheDocument();

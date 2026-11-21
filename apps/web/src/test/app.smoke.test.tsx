@@ -1,6 +1,6 @@
 import { QueryClient } from "@tanstack/react-query";
 import { createMemoryHistory } from "@tanstack/react-router";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../App";
 import { apiClient, clearCsrfToken, setCsrfToken } from "../lib/api/client";
@@ -8,6 +8,10 @@ import { createDefaultRenderSpecV2 } from "../lib/api/types";
 import { buildTelemetryPlotOptions } from "../lib/charts/telemetry-options";
 import { buildDeckOverlayProps, resolveMapStyleUrl } from "../lib/geo/map-config";
 import { createAppRouter } from "../router";
+
+vi.mock("../components/dashboard/ActivityLibraryMap", () => ({
+  ActivityLibraryMap: () => <div aria-label="Activity routes map" />,
+}));
 
 function mockJsonResponse(body: unknown, status = 200, headers?: Record<string, string>): Response {
   return new Response(JSON.stringify(body), {
@@ -36,6 +40,9 @@ function mockStandardApiFetch() {
         csrf_token: "csrf-smoke-token",
         dev_auth_enabled: true,
       });
+    }
+    if (url.includes("/api/v1/vault/activities")) {
+      return mockJsonResponse({ items: [], total: 0, limit: 50, offset: 0, summary: null, by_sport: [] });
     }
     if (url.endsWith("/api/v1/projects")) {
       return mockJsonResponse([
@@ -130,6 +137,10 @@ describe("Trip Animator web routes and config builders", () => {
 
     render(<App router={router} queryClient={queryClient} />);
 
+    expect(await screen.findByRole("heading", { name: "Activity Library", level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Activity Library" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.queryByRole("heading", { name: "Trip projects" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "Trips" }));
     expect(await screen.findByRole("heading", { name: "Trip projects" })).toBeInTheDocument();
     expect(screen.queryByText("v2")).not.toBeInTheDocument();
     expect(screen.queryByText(/Trip Animator v2/i)).not.toBeInTheDocument();

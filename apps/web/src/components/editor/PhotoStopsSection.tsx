@@ -1,5 +1,6 @@
+/** Manage photo stops and expose the outcome of each selected upload. */
 import { Camera, Check, Clock, ImagePlus, Loader2, MapPin, Pencil, Sparkles, Trash2 } from "lucide-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiError } from "../../lib/api/client";
 import { photosApi } from "../../lib/api/endpoints";
 import type { PhotoMatchMethod, PhotoShiftClockOut, ProjectPhotoOut } from "../../lib/api/types";
@@ -13,6 +14,17 @@ export interface PhotoStopsSectionProps {
   pinModePhotoId?: string | null;
   onTogglePinMode?: (photoId: string | null) => void;
   onPhotosMutated?: () => Promise<void> | void;
+}
+
+type UploadStatus = "queued" | "uploading" | "success" | "duplicate" | "error";
+
+interface PendingPhoto {
+  id: string;
+  file: File;
+  status: UploadStatus;
+  fingerprint?: string;
+  uploadedId?: string;
+  error?: string;
 }
 
 const MATCH_BADGE_STYLES: Record<PhotoMatchMethod, string> = {
@@ -33,6 +45,7 @@ function formatOffsetSummary(offsetSeconds: number): string {
   return `${sign}${m}m`;
 }
 
+/** Edit project photo stops and show individual upload progress. */
 export function PhotoStopsSection({
   projectId,
   photos,
@@ -43,8 +56,11 @@ export function PhotoStopsSection({
   onPhotosMutated,
 }: PhotoStopsSectionProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const previewUrls = useRef(new Set<string>());
+  const uploadInProgress = useRef(false);
   const [isDragOver, setIsDragOver] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [pendingPhotos, setPendingPhotos] = useState<PendingPhoto[]>([]);
   const [busyPhotoId, setBusyPhotoId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftCaption, setDraftCaption] = useState("");
@@ -52,6 +68,7 @@ export function PhotoStopsSection({
   const [draftLat, setDraftLat] = useState("");
   const [draftLon, setDraftLon] = useState("");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [refreshFailed, setRefreshFailed] = useState(false);
   const [clockSyncOpen, setClockSyncOpen] = useState(false);
   const [shiftHours, setShiftHours] = useState(0);
   const [shiftMinutes, setShiftMinutes] = useState(0);
@@ -59,6 +76,19 @@ export function PhotoStopsSection({
   const [clockPreview, setClockPreview] = useState<PhotoShiftClockOut | null>(null);
   const [googlePickerBusy, setGooglePickerBusy] = useState(false);
   const [googlePickerNotice, setGooglePickerNotice] = useState<string | null>(null);
+
+  useEffect(() => () => {
+    for (const url of previewUrls.current) URL.revokeObjectURL(url);
+  }, []);
+
+  useEffect(() => {
+    setPendingPhotos((current) => current.filter((pending) => {
+      if (!pending.uploadedId || !photos.some((photo) => photo.id === pending.uploadedId)) return true;
+      URL.revokeObjectURL(pending.id);
+      previewUrls.current.delete(pending.id);
+      return false;
+    }));
+  }, [photos]);
 
   const matchedById = new Map(matchedPhotos.map((m) => [m.id, m]));
 
@@ -140,25 +170,76 @@ export function PhotoStopsSection({
   async function handlePhotoFiles(fileList: FileList | File[]) {
     const files = Array.from(fileList);
     if (files.length === 0) return;
+    if (uploadInProgress.current) {
+      setErrorMsg("Please wait for the current photo batch to finish before adding more files.");
+      return;
+    }
+    uploadInProgress.current = true;
+    for (const url of previewUrls.current) URL.revokeObjectURL(url);
+    previewUrls.current.clear();
 
+    const batch: PendingPhoto[] = files.map((file) => {
+      const id = URL.createObjectURL(file);
+      previewUrls.current.add(id);
+      return { id, file, status: "queued" };
+    });
+    setPendingPhotos(batch);
     setUploading(true);
     setErrorMsg(null);
-    const errors: string[] = [];
+    const knownFingerprints = new Set(
+      photos.flatMap((photo) => photo.content_hash ? [photo.content_hash] : []),
+    );
 
-    for (const file of files) {
+    for (const pending of batch) {
       try {
-        await photosApi.upload(projectId, file);
+        setPendingPhotos((current) => current.map((item) =>
+          item.id === pending.id ? { ...item, status: "uploading" } : item,
+        ));
+        let fingerprint: string | undefined;
+        try {
+          fingerprint = await sha256(pending.file);
+        } catch {
+          // Server-side deduplication remains available without browser Web Crypto.
+        }
+        if (fingerprint && knownFingerprints.has(fingerprint)) {
+          setPendingPhotos((current) => current.map((item) =>
+            item.id === pending.id ? { ...item, fingerprint, status: "duplicate" } : item,
+          ));
+          continue;
+        }
+        const uploaded = await photosApi.upload(projectId, pending.file);
+        if (uploaded.content_hash) knownFingerprints.add(uploaded.content_hash);
+        if (fingerprint) knownFingerprints.add(fingerprint);
+        setPendingPhotos((current) => current.map((item) =>
+          item.id === pending.id ? { ...item, fingerprint, uploadedId: uploaded.id, status: "success" } : item,
+        ));
+        try {
+          await onPhotosMutated?.();
+          setRefreshFailed(false);
+        } catch {
+          setRefreshFailed(true);
+        }
       } catch (err) {
-        const msg = err instanceof ApiError ? err.message : `Failed to upload ${file.name}`;
-        errors.push(msg);
+        if (err instanceof ApiError && err.status === 409) {
+          setPendingPhotos((current) => current.map((item) =>
+            item.id === pending.id ? { ...item, status: "duplicate" } : item,
+          ));
+        } else {
+          const message = err instanceof ApiError ? err.message : `Failed to upload ${pending.file.name}`;
+          setPendingPhotos((current) => current.map((item) =>
+            item.id === pending.id ? { ...item, status: "error", error: message } : item,
+          ));
+        }
       }
     }
 
     setUploading(false);
-    if (errors.length > 0) {
-      setErrorMsg(errors.join(" • "));
-    }
-    await onPhotosMutated?.();
+    uploadInProgress.current = false;
+  }
+
+  async function sha256(file: File): Promise<string> {
+    const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
   }
 
   function startEditing(photo: ProjectPhotoOut) {
@@ -287,6 +368,7 @@ export function PhotoStopsSection({
           type="file"
           accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
           multiple
+          disabled={uploading}
           className="hidden"
           onClick={(e) => e.stopPropagation()}
           onChange={(e) => {
@@ -306,7 +388,37 @@ export function PhotoStopsSection({
           {uploading ? "Uploading photos…" : "Drop JPEG/PNG/WebP photos"}
         </p>
         <p className="text-[10px] text-ink-muted">Auto-matched by EXIF time or GPS</p>
+        {photos.some((photo) => photo.content_hash == null) ? (
+          <p className="text-[10px] text-ink-muted">Older photos are checked for duplicates by the server after transfer.</p>
+        ) : null}
       </div>
+
+      {pendingPhotos.length > 0 ? (
+        <ul aria-label="Photo upload status" className="grid grid-cols-2 gap-1.5">
+          {pendingPhotos.map((pending) => (
+            <li key={pending.id} className="flex min-w-0 flex-col items-center gap-1 rounded border border-border bg-canvas/70 p-1.5">
+              <img src={pending.id} alt="" className="h-20 w-full rounded object-cover" />
+              <span className="w-full truncate text-[10px] text-ink">{pending.file.name}</span>
+              <span role="status" className={`text-[10px] ${pending.status === "error" ? "text-red-500" : "text-ink-muted"}`}>
+                {pending.status === "queued" ? "Queued" : null}
+                {pending.status === "uploading" ? "Uploading…" : null}
+                {pending.status === "success" ? "Uploaded" : null}
+                {pending.status === "duplicate" ? "Duplicate — skipped" : null}
+                {pending.status === "error" ? `Error${pending.error ? `: ${pending.error}` : ""}` : null}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
+      {refreshFailed ? (
+        <div role="alert" className="text-[11px] text-ink-muted">
+          Photos were uploaded, but the photo list could not be refreshed.
+          <button type="button" className="ml-1 underline" onClick={() => {
+            void Promise.resolve().then(() => onPhotosMutated?.()).then(() => setRefreshFailed(false)).catch(() => setRefreshFailed(true));
+          }}>Refresh photos</button>
+        </div>
+      ) : null}
 
       {googlePhotosConfigured ? (
         <div className="space-y-1.5">

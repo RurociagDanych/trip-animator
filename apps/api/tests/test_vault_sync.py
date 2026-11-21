@@ -1,5 +1,9 @@
+"""Verify activity catalog synchronization, provenance and lifecycle behavior."""
+
 from __future__ import annotations
 
+import hashlib
+import json
 import socket
 import uuid
 from datetime import UTC, date, datetime, timedelta
@@ -155,7 +159,7 @@ def test_alembic_vault_sqlite_upgrade_downgrade_roundtrip(
         }
         with engine.connect() as conn:
             ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-            assert ver == "0009_library_views_lifecycle"
+            assert ver == "0011_vault_activity_search_name"
     finally:
         engine.dispose()
 
@@ -1052,7 +1056,19 @@ def test_catalog_first_mirror_attaches_only_eligible_local_strava_source(
         )
         db.add(local_stage)
         db.flush()
-        mirror_stage_to_vault(db, user_id=user.id, stage=local_stage)
+        provider_metadata = _make_strava_summary(
+            91001, started_at_utc=started_at, name="Canonical Provider Name"
+        )
+        bronze = json.dumps({"activity": provider_metadata, "streams": {}}).encode()
+        h.store.put_bytes(local_stage.bronze_object_key, bronze)
+        h.store.put_bytes(local_stage.silver_object_key, b"local track")
+        local_stage.bronze_sha256 = hashlib.sha256(bronze).hexdigest()
+        mirror_stage_to_vault(
+            db,
+            user_id=user.id,
+            stage=local_stage,
+            strava_activity_json=provider_metadata,
+        )
         assert catalog.source_stage_id == local_stage.id
         assert local_stage.vault_activity_id == canonical_id
         assert (

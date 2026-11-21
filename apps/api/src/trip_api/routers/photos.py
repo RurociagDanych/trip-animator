@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import logging
 import math
@@ -454,7 +455,33 @@ async def upload_project_photo(
     if not raw_bytes:
         raise HTTPException(status_code=422, detail="Uploaded photo file is empty")
 
+    content_hash = hashlib.sha256(raw_bytes).hexdigest()
+    duplicate = db.scalar(
+        select(ProjectPhoto.id).where(
+            ProjectPhoto.project_id == project.id,
+            ProjectPhoto.content_hash == content_hash,
+        )
+    )
+    if duplicate is not None:
+        raise HTTPException(status_code=409, detail="Duplicate photo content")
+
     processed = await asyncio.to_thread(process_uploaded_image, raw_bytes)
+    legacy_keys = list(
+        db.scalars(
+            select(ProjectPhoto.object_key).where(
+                ProjectPhoto.project_id == project.id,
+                ProjectPhoto.content_hash.is_(None),
+            )
+        )
+    )
+    # Legacy originals were discarded, so compare the deterministic stored image instead.
+    for legacy_key in legacy_keys:
+        try:
+            legacy_bytes = await asyncio.to_thread(store.get_bytes, legacy_key)
+        except FileNotFoundError:
+            continue
+        if legacy_bytes == processed.full_bytes:
+            raise HTTPException(status_code=409, detail="Duplicate photo content")
     final_taken_at = (
         ensure_utc(taken_at_utc) if taken_at_utc is not None else processed.taken_at_utc
     )
@@ -475,7 +502,7 @@ async def upload_project_photo(
             store.put_bytes, thumb_key, processed.thumb_bytes, content_type="image/webp"
         )
 
-        # Lock parent project row on Postgres right before authoritative quota check + insert
+        # Concurrent uploads must serialize the final deduplication and quota checks.
         is_postgres = db.get_bind().dialect.name == "postgresql"
         lock_stmt = select(Project).where(
             Project.id == project.id,
@@ -486,6 +513,15 @@ async def upload_project_photo(
         locked_project = db.scalar(lock_stmt)
         if locked_project is None:
             raise HTTPException(status_code=404, detail="Project not found")
+
+        duplicate = db.scalar(
+            select(ProjectPhoto.id).where(
+                ProjectPhoto.project_id == project.id,
+                ProjectPhoto.content_hash == content_hash,
+            )
+        )
+        if duplicate is not None:
+            raise HTTPException(status_code=409, detail="Duplicate photo content")
 
         authoritative_count = int(
             db.scalar(
@@ -511,6 +547,7 @@ async def upload_project_photo(
             width=processed.width,
             height=processed.height,
             byte_size=len(processed.full_bytes),
+            content_hash=content_hash,
             caption=(caption or "").strip()[:280],
             taken_at_utc=final_taken_at,
             lat=final_lat,
