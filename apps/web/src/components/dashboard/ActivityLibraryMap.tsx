@@ -1,3 +1,4 @@
+/** Draw owner-scoped catalog routes while replacement filters load. */
 import { useEffect, useMemo, useRef, useState } from "react";
 import maplibregl, { type Map as MapLibreMap } from "maplibre-gl";
 import { vaultApi, type VaultActivityFilters } from "../../lib/api/endpoints";
@@ -17,6 +18,7 @@ interface Props {
   onSelect: (id: string) => void;
 }
 
+/** Display approximate activity routes with explicit viewport filtering. */
 export function ActivityLibraryMap({ ownerId = null, filters, area, refreshKey, onAreaChange, selectedId, onSelect }: Props) {
   const container = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
@@ -24,12 +26,13 @@ export function ActivityLibraryMap({ ownerId = null, filters, area, refreshKey, 
   const fittedInitialData = useRef(false);
   const latestProps = useRef({ selectedId, onSelect, onAreaChange });
   const routeDataRef = useRef<VaultActivityMapOut | null>(null);
+  const routeDataOwnerRef = useRef<string | null>(ownerId);
   const [bounds, setBounds] = useState<string | undefined>(undefined);
   const requestFilters = useMemo(() => ({ ...filters, area }), [filters, area]);
   const requestKey = JSON.stringify([ownerId, requestFilters, refreshKey]);
-  const [requestState, setRequestState] = useState<{ key: string; data: VaultActivityMapOut | null; error: boolean } | null>(null);
+  const [requestState, setRequestState] = useState<{ key: string; ownerId: string | null; data: VaultActivityMapOut | null; error: boolean } | null>(null);
   const [mapReady, setMapReady] = useState(false);
-  const routeData = requestState?.key === requestKey ? requestState.data : null;
+  const routeData = requestState?.ownerId === ownerId ? requestState.data : null;
   const loading = requestState?.key !== requestKey;
   const error = requestState?.key === requestKey && requestState.error;
 
@@ -38,9 +41,11 @@ export function ActivityLibraryMap({ ownerId = null, filters, area, refreshKey, 
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
-    routeDataRef.current = null;
-    const source = mapRef.current?.getSource(SOURCE) as maplibregl.GeoJSONSource | undefined;
-    if (loaded.current) source?.setData({ type: "FeatureCollection", features: [] });
+    if (routeDataOwnerRef.current !== ownerId) {
+      routeDataRef.current = null;
+      routeDataOwnerRef.current = ownerId;
+      fittedInitialData.current = false;
+    }
     async function loadRoutes(): Promise<VaultActivityMapOut> {
       let offset = 0;
       let result: VaultActivityMapOut | null = null;
@@ -68,19 +73,24 @@ export function ActivityLibraryMap({ ownerId = null, filters, area, refreshKey, 
     loadRoutes().then((data) => {
       if (!cancelled) {
         routeDataRef.current = data;
-        setRequestState({ key: requestKey, data, error: false });
+        routeDataOwnerRef.current = ownerId;
+        setRequestState({ key: requestKey, ownerId, data, error: false });
       }
     }).catch(() => {
-      if (!cancelled) setRequestState({ key: requestKey, data: null, error: true });
+      if (!cancelled) setRequestState({ key: requestKey, ownerId, data: routeDataOwnerRef.current === ownerId ? routeDataRef.current : null, error: true });
     });
     return () => { cancelled = true; controller.abort(); };
-  }, [requestFilters, refreshKey, requestKey]);
+  }, [ownerId, requestFilters, refreshKey, requestKey]);
 
   useEffect(() => {
     if (!container.current) return;
     const map = new maplibregl.Map({ container: container.current, style: resolveMapStyleUrl("positron"), center: [0, 20], zoom: 1.2 });
     mapRef.current = map;
+    let initialized = false;
+    let disposed = false;
     const onLoad = () => {
+      if (initialized || disposed) return;
+      initialized = true;
       map.addSource(SOURCE, { type: "geojson", data: { type: "FeatureCollection", features: [] } });
       map.addLayer({ id: LAYER, type: "line", source: SOURCE, paint: {
         "line-color": ["case", ["==", ["get", "id"], latestProps.current.selectedId ?? ""], "#f97316", "#0284c7"],
@@ -95,6 +105,7 @@ export function ActivityLibraryMap({ ownerId = null, filters, area, refreshKey, 
       });
       loaded.current = true;
       setMapReady(true);
+      map.resize?.();
       updateBounds();
       const source = map.getSource(SOURCE) as maplibregl.GeoJSONSource | undefined;
       if (source) source.setData(routeDataRef.current ?? { type: "FeatureCollection", features: [] });
@@ -118,7 +129,10 @@ export function ActivityLibraryMap({ ownerId = null, filters, area, refreshKey, 
       setBounds([normalizedWest, south, normalizedEast, north].join(","));
     }
     map.on("load", onLoad);
-    return () => { loaded.current = false; map.remove(); mapRef.current = null; };
+    if (map.isStyleLoaded?.()) onLoad();
+    const resizeObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => map.resize?.());
+    if (resizeObserver && container.current) resizeObserver.observe(container.current);
+    return () => { disposed = true; resizeObserver?.disconnect(); loaded.current = false; map.remove(); mapRef.current = null; };
   }, []);
 
   useEffect(() => {

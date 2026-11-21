@@ -753,9 +753,10 @@ describe("Component tests: InspectorPanel, StageSidebar, ExportPanel, Statistics
       const badFile = new File(["not-an-image"], "bad.svg", { type: "image/svg+xml" });
       fireEvent.change(fileInput, { target: { files: [badFile] } });
 
-      expect(await screen.findByTestId("photo-upload-error")).toHaveTextContent(
-        /Unsupported image format/i,
-      );
+      await waitFor(() => {
+        expect(screen.getByRole("status")).toHaveTextContent(/Unsupported image format/i);
+      });
+      expect(screen.getByRole("list", { name: "Photo upload status" })).toHaveTextContent("bad.svg");
 
       fireEvent.click(screen.getByRole("button", { name: /Delete photo Fictional Ridge Stage/i }));
       await waitFor(() => {

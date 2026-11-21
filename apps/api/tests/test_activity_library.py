@@ -95,6 +95,34 @@ def test_activity_library_searches_beyond_first_page_and_sorts_stably(
     assert search["items"][0]["name"] == "Alpine Dawn"
 
 
+def test_activity_library_name_search_ignores_accents_across_views(harness: AppHarness) -> None:
+    user = harness.create_user("accent-search@example.com")
+    started = datetime(2025, 3, 1, tzinfo=UTC)
+    activities = [
+        _activity(user.id, "Koło", started=started),
+        _activity(user.id, "Koło12", started=started),
+    ]
+    for activity in activities:
+        activity.summary_polyline = "_p~iF~ps|U_ulLnnqC_mqNvxq`@"
+    _seed(harness, *activities)
+    client, _ = harness.login_client("accent-search@example.com")
+
+    for term in ("kolo", "KOŁO", "koło"):
+        listing = client.get("/api/v1/vault/activities", params={"name": term, "limit": 1})
+        assert listing.status_code == 200, listing.text
+        assert listing.json()["total"] == 2
+        assert len(listing.json()["items"]) == 1
+        assert listing.json()["summary"]["activity_count"] == 2
+
+        map_view = client.get("/api/v1/vault/activities/map", params={"name": term})
+        assert map_view.status_code == 200, map_view.text
+        assert map_view.json()["total"] == 2
+        assert {item["properties"]["name"] for item in map_view.json()["features"]} == {
+            "Koło",
+            "Koło12",
+        }
+
+
 def test_activity_library_filters_and_summary_use_entire_filtered_selection(
     harness: AppHarness,
 ) -> None:

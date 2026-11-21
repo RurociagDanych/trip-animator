@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 from trip_telemetry import ActivityType
 
+from trip_api.activity_search import normalize_activity_search
 from trip_api.db import Project, Stage, VaultActivity
 from trip_api.deps import AppSettings, CsrfAuth, CurrentAuth, DbSession, StoreDep
 from trip_api.library_geometry import (
@@ -121,8 +122,9 @@ def _selection_query(
     if not include_hidden and hidden_at is not None:
         query = query.where(hidden_at.is_(None))
     if name is not None:
-        escaped = name.replace("!", "!!").replace("%", "!%").replace("_", "!_")
-        query = query.where(VaultActivity.name.ilike(f"%{escaped}%", escape="!"))
+        normalized = normalize_activity_search(name)
+        escaped = normalized.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+        query = query.where(VaultActivity.search_name.like(f"%{escaped}%", escape="!"))
     if start_date is not None:
         query = query.where(VaultActivity.local_date >= start_date)
     if end_date is not None:

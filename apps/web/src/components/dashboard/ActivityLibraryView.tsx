@@ -1,3 +1,4 @@
+/** Display the searchable activity catalog and its shared selection. */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { ApiError } from "../../lib/api/client";
@@ -10,9 +11,17 @@ import { loadActivityLibrarySelection, saveActivityLibrarySelection } from "./ac
 
 const PAGE_SIZE = 50;
 const baseInput = "rounded border border-border bg-surface px-2 py-1.5 text-sm text-ink";
-const metric = (value: number | null, unit: string) => value == null ? "Unknown" : `${(value / unitFactor(unit)).toFixed(1)} ${unit}`;
+const metric = (value: number | null, unit: string) => value == null ? "Unknown" : unit === "h" ? duration(value) : `${(value / unitFactor(unit)).toFixed(1)} ${unit}`;
 function unitFactor(unit: string) { return unit === "km" ? 1000 : unit === "m" ? 1 : unit === "h" ? 3600 : 1; }
 
+function duration(seconds: number): string {
+  if (!Number.isFinite(seconds)) return "Unknown";
+  if (seconds > 0 && seconds < 60) return "<1 min";
+  const minutes = Math.max(0, Math.floor(seconds / 60));
+  return minutes < 60 ? `${minutes} min` : `${minutes} min (${Math.floor(minutes / 60)}h ${minutes % 60}min)`;
+}
+
+/** Render an owner-scoped catalog with filters, map and project actions. */
 export function ActivityLibraryView({ ownerId }: { ownerId: string | null }) {
   return <ActivityLibraryOwnerView key={ownerId ?? "anonymous"} ownerId={ownerId} />;
 }

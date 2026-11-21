@@ -142,6 +142,26 @@ afterEach(() => {
 });
 
 describe("ActivityLibraryView", () => {
+  it("formats moving and elapsed durations consistently in summaries, rows and details", async () => {
+    vi.spyOn(vaultApi, "map").mockResolvedValue(mapResult);
+    const activity = { ...item("1", "Timed ride"), moving_seconds: 4200, elapsed_seconds: 4500 };
+    const result = listResult([activity], 0);
+    result.summary.moving_seconds = 4200;
+    result.summary.elapsed_seconds = 4500;
+    vi.spyOn(vaultApi, "list").mockResolvedValue(result);
+    vi.spyOn(vaultApi, "status").mockResolvedValue(syncStatus(1));
+    vi.spyOn(vaultApi, "get").mockResolvedValue({ ...detail("1", "Timed ride"), moving_seconds: 4200, elapsed_seconds: 4500 });
+    renderLibrary();
+
+    await screen.findByRole("button", { name: "Timed ride" });
+    expect(screen.getByText(/70 min \(1h 10min\) moving/)).toBeInTheDocument();
+    expect(screen.getByText(/75 min \(1h 15min\) elapsed/)).toBeInTheDocument();
+    expect(screen.getAllByText("70 min (1h 10min)")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Timed ride" }));
+    const dialog = await screen.findByRole("dialog", { name: "Activity details" });
+    expect(await within(dialog).findByText(/moving 70 min \(1h 10min\)/)).toHaveTextContent("elapsed 75 min (1h 15min)");
+  });
+
   it("keeps multiple activity selections after the event handler returns", async () => {
     vi.spyOn(vaultApi, "map").mockResolvedValue(mapResult);
     vi.spyOn(vaultApi, "list").mockResolvedValue(listResult([item("1", "First ride"), item("2", "Second ride")], 0));
@@ -231,7 +251,7 @@ describe("ActivityLibraryView", () => {
 
     await screen.findByText("Unknown Metrics Ride");
     expect(screen.getAllByText("Unknown").length).toBeGreaterThanOrEqual(3);
-    expect(screen.getByText(/2\.0 h elapsed/)).toBeInTheDocument();
+    expect(screen.getByText(/120 min \(2h 0min\) elapsed/)).toBeInTheDocument();
     const initialListCalls = list.mock.calls.length;
     fireEvent.click(screen.getByRole("button", { name: "Sync Strava catalog" }));
     await waitFor(() => expect(statusCall).toBeGreaterThanOrEqual(2));

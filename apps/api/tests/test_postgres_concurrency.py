@@ -280,7 +280,7 @@ def test_postgres_alembic_upgrade_downgrade_upgrade_roundtrip(pg_temp_db_url: st
         assert expected_tables <= set(inspect(engine_reup).get_table_names())
         with engine_reup.connect() as conn:
             ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-            assert ver == "0009_library_views_lifecycle"
+            assert ver == "0011_vault_activity_search_name"
     finally:
         engine_reup.dispose()
 
@@ -559,19 +559,17 @@ def test_postgres_concurrent_photo_upload_quota_for_update(
         db.commit()
     assert user.id is not None
 
-    buf = io.BytesIO()
-    Image.new("RGB", (32, 32), color=(249, 115, 22)).save(buf, format="JPEG")
-    jpg_bytes = buf.getvalue()
-
     workers = 5
     barrier = Barrier(workers)
 
     def _upload(idx: int) -> int:
+        buf = io.BytesIO()
+        Image.new("RGB", (32, 32), color=(249, 115, 22 + idx * 20)).save(buf, format="JPEG")
         c = TestClient(app, cookies=cookies)
         barrier.wait(timeout=10.0)
         resp = c.post(
             f"/api/v1/projects/{proj_id}/photos",
-            files={"file": (f"race_{idx}.jpg", jpg_bytes, "image/jpeg")},
+            files={"file": (f"race_{idx}.jpg", buf.getvalue(), "image/jpeg")},
             headers={"X-CSRF-Token": csrf},
         )
         return int(resp.status_code)
@@ -591,6 +589,145 @@ def test_postgres_concurrent_photo_upload_quota_for_update(
     # Rejected uploads rolled back their stored blobs; only the single winner's 2 WebP files remain
     uploaded_webp_files = list(Path(store.root_dir).rglob("*.webp"))
     assert len(uploaded_webp_files) == 2
+
+
+def test_postgres_concurrent_duplicate_photo_upload_returns_conflict_and_cleans_loser(
+    pg_app_factory: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+
+    from PIL import Image
+
+    app, _settings, engine, sf, store = pg_app_factory(rate_limit_photo_max=50)
+    assert engine.dialect.name == "postgresql"
+    user = _create_pg_user(sf, "photo-duplicate-pg@example.com")
+    client, csrf = _login_pg_client(app, "photo-duplicate-pg@example.com")
+    cookies = dict(client.cookies)
+    project_id = uuid.UUID(
+        client.post(
+            "/api/v1/projects",
+            json={"title": "PG Duplicate Photo"},
+            headers={"X-CSRF-Token": csrf},
+        ).json()["id"]
+    )
+    assert user.id is not None
+
+    image = io.BytesIO()
+    Image.new("RGB", (32, 32), color=(24, 128, 232)).save(image, format="JPEG")
+    jpeg_bytes = image.getvalue()
+    put_barrier = Barrier(2)
+    original_put_bytes = store.put_bytes
+
+    def synchronized_put_bytes(
+        key: str,
+        data: bytes,
+        *,
+        content_type: str = "application/octet-stream",
+    ) -> None:
+        original_put_bytes(key, data, content_type=content_type)
+        if key.endswith(".webp") and not key.endswith("_thumb.webp"):
+            put_barrier.wait(timeout=10.0)
+
+    monkeypatch.setattr(store, "put_bytes", synchronized_put_bytes)
+
+    def _upload(filename: str) -> int:
+        thread_client = TestClient(app, cookies=cookies)
+        response = thread_client.post(
+            f"/api/v1/projects/{project_id}/photos",
+            files={"file": (filename, jpeg_bytes, "image/jpeg")},
+            headers={"X-CSRF-Token": csrf},
+        )
+        return int(response.status_code)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        statuses = list(pool.map(_upload, ("duplicate-a.jpg", "duplicate-b.jpg")))
+
+    assert statuses.count(201) == 1
+    assert statuses.count(409) == 1
+
+    with sf() as db:
+        photos = db.scalars(select(ProjectPhoto).where(ProjectPhoto.project_id == project_id)).all()
+        assert len(photos) == 1
+        persisted_keys = {photos[0].object_key, photos[0].thumb_object_key}
+
+    object_files = {
+        path.relative_to(store.root_dir).as_posix()
+        for path in Path(store.root_dir).rglob("*")
+        if path.is_file()
+    }
+    assert object_files == persisted_keys
+
+
+def test_postgres_activity_search_backfills_names_and_preserves_literal_filters(
+    pg_app_factory: Any,
+    pg_temp_db_url: str,
+) -> None:
+    app, _settings, engine, sf, _store = pg_app_factory()
+    user = _create_pg_user(sf, "search-backfill@example.com")
+    other = _create_pg_user(sf, "search-isolation@example.com")
+    now = datetime.now(UTC)
+    first_id = uuid.uuid4()
+    with sf() as db:
+        for index, (owner_id, name) in enumerate(
+            [
+                (user.id, "Koło"),
+                (user.id, "Koło12"),
+                (user.id, "100%_!"),
+                (user.id, "ß" * 200),
+                (other.id, "Koło"),
+            ]
+        ):
+            db.add(
+                VaultActivity(
+                    id=first_id if index == 0 else uuid.uuid4(),
+                    user_id=owner_id,
+                    source_provider="strava",
+                    external_activity_id=str(uuid.uuid4()),
+                    name=name,
+                    started_at=now,
+                    local_date=now.date(),
+                    has_gps=True,
+                    summary_polyline="_p~iF~ps|U_ulLnnqC_mqNvxq`@",
+                )
+            )
+        db.commit()
+
+    cfg = _make_alembic_config(pg_temp_db_url)
+    command.downgrade(cfg, "0010_project_photo_content_hash")
+    assert "search_name" not in {
+        column["name"] for column in inspect(engine).get_columns("vault_activities")
+    }
+    command.upgrade(cfg, "head")
+    with sf() as db:
+        assert (
+            db.scalar(select(VaultActivity.search_name).where(VaultActivity.name == "ß" * 200))
+            == "ss" * 200
+        )
+
+    client, _csrf = _login_pg_client(app, "search-backfill@example.com")
+    for term in ("kolo", "KOŁO", "koło"):
+        listing = client.get("/api/v1/vault/activities", params={"name": term, "limit": 1}).json()
+        assert listing["total"] == 2
+        assert len(listing["items"]) == 1
+        assert listing["summary"]["activity_count"] == 2
+        second = client.get(
+            "/api/v1/vault/activities", params={"name": term, "limit": 1, "offset": 1}
+        ).json()
+        assert second["items"][0]["id"] != listing["items"][0]["id"]
+        assert (
+            client.get("/api/v1/vault/activities/map", params={"name": term}).json()["total"] == 2
+        )
+    for term in ("%", "_", "!", "ss" * 80):
+        assert client.get("/api/v1/vault/activities", params={"name": term}).json()["total"] == 1
+
+    with sf() as db:
+        activity = db.get(VaultActivity, first_id)
+        assert activity is not None
+        activity.name = "Żółw"
+        db.commit()
+    assert client.get("/api/v1/vault/activities", params={"name": "zolw"}).json()["total"] == 1
+    assert client.get("/api/v1/vault/activities", params={"name": "kolo"}).json()["total"] == 1
 
 
 def test_postgres_concurrent_ingest_parsed_track_unique_stage_order(

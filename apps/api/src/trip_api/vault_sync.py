@@ -1863,6 +1863,12 @@ def mirror_stage_to_vault(
             and stage.external_source_id == str(stage.strava_activity_id)
             and vault_act.strava_activity_id == stage.strava_activity_id
             and vault_act.external_activity_id == str(stage.strava_activity_id)
+            and strava_activity_json is not None
+            and str(strava_activity_json.get("id")) == str(stage.strava_activity_id)
+            and len(stage.bronze_sha256 or "") == 64
+            and all(char in "0123456789abcdef" for char in stage.bronze_sha256 or "")
+            and bool(stage.bronze_object_key)
+            and bool(stage.silver_object_key)
             and stage.trim_start_s is None
             and stage.trim_end_s is None
             and not any(

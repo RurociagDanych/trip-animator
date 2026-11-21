@@ -277,6 +277,7 @@ class ProjectPhotoOut(BaseModel):
     width: int
     height: int
     byte_size: int
+    content_hash: str | None = None
     caption: str = ""
     taken_at_utc: datetime | None = None
     lat: float | None = None

@@ -10,8 +10,8 @@ import pytest
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from PIL import ExifTags, Image, TiffImagePlugin
-from sqlalchemy import inspect
-from trip_api.db import create_db_engine
+from sqlalchemy import inspect, update
+from trip_api.db import ProjectPhoto, create_db_engine
 from trip_api.routers.photos import MAX_PHOTO_BYTES, MAX_PHOTOS_PER_PROJECT
 
 if TYPE_CHECKING:
@@ -84,6 +84,7 @@ def test_alembic_migration_0003_project_photos(tmp_path: Path, monkeypatch: Any)
             "width",
             "height",
             "byte_size",
+            "content_hash",
             "caption",
             "taken_at_utc",
             "lat",
@@ -254,6 +255,7 @@ def test_photo_exif_extraction_metadata_stripping_crud_and_project_cleanup(
     assert up1.status_code == 201, up1.text
     p1 = up1.json()
     assert p1["caption"] == "Top of the col"
+    assert len(p1["content_hash"]) == 64
     assert p1["lat"] == pytest.approx(0.1, abs=1e-5)
     assert p1["lon"] == pytest.approx(0.2, abs=1e-5)
     assert datetime.fromisoformat(p1["taken_at_utc"].replace("Z", "+00:00")) == datetime(
@@ -262,6 +264,26 @@ def test_photo_exif_extraction_metadata_stripping_crud_and_project_cleanup(
     assert p1["width"] == 700
     assert p1["height"] == 1400
     assert p1["enabled"] is True
+
+    duplicate = alice.post(
+        f"/api/v1/projects/{proj_id}/photos",
+        files={"file": ("renamed.jpg", jpeg_bytes, "image/jpeg")},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"] == "Duplicate photo content"
+
+    other_project_id = alice.post(
+        "/api/v1/projects",
+        json={"title": "Independent Photo Scope"},
+        headers={"X-CSRF-Token": csrf},
+    ).json()["id"]
+    same_content_other_project = alice.post(
+        f"/api/v1/projects/{other_project_id}/photos",
+        files={"file": ("same.jpg", jpeg_bytes, "image/jpeg")},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert same_content_other_project.status_code == 201
 
     full_key = f"photos/{proj_id}/{p1['id']}.webp"
     thumb_key = f"photos/{proj_id}/{p1['id']}_thumb.webp"
@@ -398,6 +420,45 @@ def test_photo_exif_extraction_metadata_stripping_crud_and_project_cleanup(
         h.store.resolve_existing_path(thumb_key)
 
 
+def test_legacy_photo_duplicate_is_rejected_without_original_fingerprint(
+    make_harness: HarnessFactory,
+) -> None:
+    h = make_harness(rate_limit_photo_max=30)
+    h.create_user("legacy@example.com")
+    client, csrf = h.login_client("legacy@example.com")
+    headers = {"X-CSRF-Token": csrf}
+    project_id = client.post(
+        "/api/v1/projects", json={"title": "Legacy Photos"}, headers=headers
+    ).json()["id"]
+    payload = _make_jpeg_with_exif(size=(64, 48))
+    uploaded = client.post(
+        f"/api/v1/projects/{project_id}/photos",
+        files={"file": ("original.jpg", payload, "image/jpeg")},
+        headers=headers,
+    )
+    assert uploaded.status_code == 201
+    with h.session_factory() as db:
+        db.execute(
+            update(ProjectPhoto)
+            .where(ProjectPhoto.id == uuid.UUID(uploaded.json()["id"]))
+            .values(content_hash=None)
+        )
+        db.commit()
+    duplicate = client.post(
+        f"/api/v1/projects/{project_id}/photos",
+        files={"file": ("renamed.jpg", payload, "image/jpeg")},
+        headers=headers,
+    )
+    assert duplicate.status_code == 409
+    different = client.post(
+        f"/api/v1/projects/{project_id}/photos",
+        files={"file": ("different.jpg", _make_jpeg_with_exif(size=(65, 48)), "image/jpeg")},
+        headers=headers,
+    )
+    assert different.status_code == 201
+    assert len(client.get(f"/api/v1/projects/{project_id}/photos").json()) == 2
+
+
 def test_photo_project_limit_and_rate_limit(
     make_harness: HarnessFactory,
     monkeypatch: pytest.MonkeyPatch,
@@ -412,36 +473,37 @@ def test_photo_project_limit_and_rate_limit(
         headers={"X-CSRF-Token": csrf},
     ).json()["id"]
 
-    small_jpg = _make_jpeg_with_exif(size=(32, 32))
+    small_jpgs = [_make_jpeg_with_exif(size=(32 + i, 32)) for i in range(3)]
     monkeypatch.setattr("trip_api.routers.photos.MAX_PHOTOS_PER_PROJECT", 2)
 
     for i in range(2):
         r = alice.post(
             f"/api/v1/projects/{proj_id}/photos",
-            files={"file": (f"p{i}.jpg", small_jpg, "image/jpeg")},
+            files={"file": (f"p{i}.jpg", small_jpgs[i], "image/jpeg")},
             headers={"X-CSRF-Token": csrf},
         )
         assert r.status_code == 201
 
     cap_resp = alice.post(
         f"/api/v1/projects/{proj_id}/photos",
-        files={"file": ("p3.jpg", small_jpg, "image/jpeg")},
+        files={"file": ("p3.jpg", small_jpgs[2], "image/jpeg")},
         headers={"X-CSRF-Token": csrf},
     )
     assert cap_resp.status_code == 422
 
     monkeypatch.setattr("trip_api.routers.photos.MAX_PHOTOS_PER_PROJECT", 50)
+    rate_jpgs = [_make_jpeg_with_exif(size=(40 + i, 32)) for i in range(3)]
     for i in range(2):
         r = alice.post(
             f"/api/v1/projects/{proj_id}/photos",
-            files={"file": (f"r{i}.jpg", small_jpg, "image/jpeg")},
+            files={"file": (f"r{i}.jpg", rate_jpgs[i], "image/jpeg")},
             headers={"X-CSRF-Token": csrf},
         )
         assert r.status_code == 201
 
     rl_resp = alice.post(
         f"/api/v1/projects/{proj_id}/photos",
-        files={"file": ("r_over.jpg", small_jpg, "image/jpeg")},
+        files={"file": ("r_over.jpg", rate_jpgs[2], "image/jpeg")},
         headers={"X-CSRF-Token": csrf},
     )
     assert rl_resp.status_code == 429

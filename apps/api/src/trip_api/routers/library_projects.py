@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import re
 import uuid
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -56,7 +59,7 @@ class LibraryProjectOut(BaseModel):
 
 
 def _owned_activities(
-    db: Session, user_id: uuid.UUID, activity_ids: list[uuid.UUID]
+    db: Session, store: StoreDep, user_id: uuid.UUID, activity_ids: list[uuid.UUID]
 ) -> list[tuple[VaultActivity, Stage]]:
     activities = list(
         db.scalars(
@@ -75,24 +78,95 @@ def _owned_activities(
     for activity_id in activity_ids:
         activity = by_id[activity_id]
         if activity.source_stage_id is None:
-            raise HTTPException(status_code=409, detail="Activity has no ready local track data")
-        source = db.scalar(
-            select(Stage)
-            .join(Project, Project.id == Stage.project_id)
-            .where(
-                Stage.id == activity.source_stage_id,
-                Project.owner_user_id == user_id,
-                Stage.vault_activity_id == activity.id,
+            source = _find_unlinked_original(db, store, user_id, activity)
+        else:
+            source = db.scalar(
+                select(Stage)
+                .join(Project, Project.id == Stage.project_id)
+                .where(
+                    Stage.id == activity.source_stage_id,
+                    Project.owner_user_id == user_id,
+                    Stage.vault_activity_id == activity.id,
+                )
             )
-        )
         if source is None or not source.silver_object_key or not source.bronze_object_key:
             raise HTTPException(status_code=409, detail="Activity has no ready local track data")
         result.append((activity, source))
     return result
 
 
+def _is_original_provider_stage(stage: Stage, activity: VaultActivity) -> bool:
+    if (
+        stage.source_type != "strava"
+        or stage.source_format != "strava"
+        or stage.strava_activity_id is None
+        or stage.strava_activity_id != activity.strava_activity_id
+        or stage.external_source_id != str(activity.strava_activity_id)
+        or stage.trim_start_s is not None
+        or stage.trim_end_s is not None
+        or stage.vault_activity_id not in (None, activity.id)
+        or not re.fullmatch(r"[0-9a-f]{64}", stage.bronze_sha256 or "")
+        or any(
+            isinstance(warning, dict)
+            and warning.get("code") == "vault_canonical_excluded_split_segment"
+            for warning in stage.warnings_json or []
+        )
+    ):
+        return False
+    return True
+
+
+def _find_unlinked_original(
+    db: Session, store: StoreDep, owner_id: uuid.UUID, activity: VaultActivity
+) -> Stage | None:
+    if (
+        activity.source_provider != "strava"
+        or activity.strava_activity_id is None
+        or activity.external_activity_id != str(activity.strava_activity_id)
+    ):
+        return None
+    candidates = list(
+        db.scalars(
+            select(Stage)
+            .join(Project, Project.id == Stage.project_id)
+            .where(
+                Project.owner_user_id == owner_id,
+                Stage.strava_activity_id == activity.strava_activity_id,
+                (Stage.vault_activity_id.is_(None) | (Stage.vault_activity_id == activity.id)),
+            )
+        ).all()
+    )
+    for stage in candidates:
+        if not _is_original_provider_stage(stage, activity):
+            continue
+        project = db.get(Project, stage.project_id)
+        if project is None or project.owner_user_id != owner_id:
+            continue
+        try:
+            raw = store.get_bytes(stage.bronze_object_key)
+            bronze = json.loads(raw)
+        except (FileNotFoundError, OSError, ValueError, TypeError):
+            continue
+        provider_activity = bronze.get("activity") if isinstance(bronze, dict) else None
+        if (
+            hashlib.sha256(raw).hexdigest() == stage.bronze_sha256
+            and isinstance(provider_activity, dict)
+            and str(provider_activity.get("id")) == str(activity.strava_activity_id)
+            and isinstance(bronze.get("streams"), dict)
+        ):
+            return stage
+    return None
+
+
 def _row_snapshot(row: Any) -> dict[str, Any]:
     return {column.key: deepcopy(getattr(row, column.key)) for column in row.__table__.columns}
+
+
+def _attach_recovered_sources(sources: list[tuple[VaultActivity, Stage]]) -> None:
+    for activity, source in sources:
+        if activity.source_stage_id is None:
+            source.vault_activity_id = activity.id
+            activity.source_stage_id = source.id
 
 
 def _lock_and_validate_sources(
@@ -125,16 +199,30 @@ def _lock_and_validate_sources(
         activity = by_id[prepared_activity.id]
         if _row_snapshot(activity) != activity_snapshot:
             raise HTTPException(status_code=409, detail="Library activity changed during reuse")
-        source = db.scalar(
-            select(Stage)
-            .join(Project, Project.id == Stage.project_id)
-            .where(
-                Stage.id == activity.source_stage_id,
-                Project.owner_user_id == user_id,
-                Stage.vault_activity_id == activity.id,
+        if activity_snapshot["source_stage_id"] is None:
+            source = db.scalar(
+                select(Stage)
+                .join(Project, Project.id == Stage.project_id)
+                .where(
+                    Stage.id == prepared_source.id,
+                    Project.owner_user_id == user_id,
+                    (Stage.vault_activity_id.is_(None) | (Stage.vault_activity_id == activity.id)),
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
             )
-            .execution_options(populate_existing=True)
-        )
+        else:
+            source = db.scalar(
+                select(Stage)
+                .join(Project, Project.id == Stage.project_id)
+                .where(
+                    Stage.id == activity.source_stage_id,
+                    Project.owner_user_id == user_id,
+                    Stage.vault_activity_id == activity.id,
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
         if (
             source is None
             or not source.bronze_object_key
@@ -262,7 +350,7 @@ def create_project_from_library(
     store: StoreDep,
 ) -> LibraryProjectOut:
     """Create a project with independent local copies of selected activities."""
-    sources = _owned_activities(db, auth.user.id, body.activity_ids)
+    sources = _owned_activities(db, store, auth.user.id, body.activity_ids)
     snapshots = [(_row_snapshot(activity), _row_snapshot(source)) for activity, source in sources]
     artifacts = _validate_artifacts(store, sources)
     project = Project(
@@ -282,6 +370,7 @@ def create_project_from_library(
         )
         db.add(project)
         db.add_all(stages)
+        _attach_recovered_sources(sources)
         project.updated_at = datetime.now(UTC)
         project.revision = 1
         for index, stage in enumerate(stages):
@@ -308,7 +397,7 @@ def add_library_activities_to_project(
     store: StoreDep,
 ) -> LibraryProjectOut:
     """Append independent local copies of selected activities to a project."""
-    sources = _owned_activities(db, auth.user.id, body.activity_ids)
+    sources = _owned_activities(db, store, auth.user.id, body.activity_ids)
     snapshots = [(_row_snapshot(activity), _row_snapshot(source)) for activity, source in sources]
     artifacts = _validate_artifacts(store, sources)
     project = db.scalar(
@@ -340,6 +429,7 @@ def add_library_activities_to_project(
             stage.stage_order = order + index
             stage.day_index = order + index + 1
         db.add_all(stages)
+        _attach_recovered_sources(sources)
         project.updated_at = datetime.now(UTC)
         project.revision += 1
         db.commit()

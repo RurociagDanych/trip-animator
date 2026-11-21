@@ -362,6 +362,7 @@ export interface ProjectPhotoOut {
   width: number;
   height: number;
   byte_size: number;
+  content_hash?: string | null;
   caption: string | null;
   taken_at_utc: string | null;
   lat: number | null;

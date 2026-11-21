@@ -263,6 +263,7 @@ def photo_to_out(photo: ProjectPhoto) -> ProjectPhotoOut:
         width=photo.width,
         height=photo.height,
         byte_size=photo.byte_size,
+        content_hash=getattr(photo, "content_hash", None),
         caption=photo.caption,
         taken_at_utc=ensure_utc(photo.taken_at_utc) if photo.taken_at_utc else None,
         lat=photo.lat,

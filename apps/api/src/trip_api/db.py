@@ -28,8 +28,10 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker, validates
 from trip_telemetry import VALID_ACTIVITY_TYPES
+
+from trip_api.activity_search import normalize_activity_search
 
 if TYPE_CHECKING:
     from trip_api.config import Settings
@@ -234,8 +236,11 @@ class Stage(Base):
 
 
 class ProjectPhoto(Base):
+    """Store project-scoped images and their deduplication fingerprints."""
+
     __tablename__ = "project_photos"
     __table_args__ = (
+        Index("ix_project_photos_project_id_content_hash", "project_id", "content_hash"),
         CheckConstraint(
             "source_type IN ('upload', 'google_photos')",
             name="ck_project_photos_source_type",
@@ -266,6 +271,7 @@ class ProjectPhoto(Base):
     width: Mapped[int] = mapped_column(Integer, nullable=False)
     height: Mapped[int] = mapped_column(Integer, nullable=False)
     byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     caption: Mapped[str] = mapped_column(String(280), default="", nullable=False)
     taken_at_utc: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
@@ -486,6 +492,7 @@ class VaultActivity(Base):
     )
 
     name: Mapped[str] = mapped_column(String(200), nullable=False)
+    search_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_sport_type: Mapped[str] = mapped_column(
         String(64), default="", server_default="", nullable=False
     )
@@ -580,6 +587,11 @@ class VaultActivity(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+
+    @validates("name")
+    def _set_search_name(self, _key: str, value: str) -> str:
+        self.search_name = normalize_activity_search(value)
+        return value
 
 
 class VaultActivityTile(Base):
