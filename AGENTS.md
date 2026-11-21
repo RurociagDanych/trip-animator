@@ -31,7 +31,7 @@ Repository guide for AI coding agents working on Trip Animator: a GPX/TCX and St
 ## Conventions
 
 - Language: English only for identifiers, filenames, test names, log messages, error strings, commit messages and docs.
-- No comments or docstrings in source code (Python, TypeScript, JavaScript, Terraform, shell, Makefile, Dockerfile, YAML); explanations go in `docs/`. Tool directives such as `noqa` or `type: ignore` are allowed.
+- Public modules, classes and functions have docstrings. Comments explain why, not what. Tool directives such as # noqa are allowed.
 - Formatters and linters: Ruff (`uv run ruff check` / `uv run ruff format --check` on `apps packages airflow infra/scripts`), mypy (`apps/api/src apps/worker/src packages/telemetry/src airflow/src`), ESLint and `tsc --noEmit` for `apps/web`.
 - Commit style: Conventional Commits (`feat:`, `fix:`, `docs:`, `ci:`, optional scope such as `feat(web):`).
 - Branch naming: short prefixed branches such as `feat/...`, `fix/...`, `docs/...`, `chore/...`.
