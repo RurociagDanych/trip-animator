@@ -290,14 +290,7 @@ export function DashboardPage() {
               projects={projects}
               career={careerQuery.data}
               heatmap={heatmapQuery.data}
-              stravaConfigured={stravaConfigured}
-              stravaConnected={Boolean(user?.strava_connected)}
-              isConnectingStrava={stravaConnectMutation.isPending}
-              onConnectStrava={() => stravaConnectMutation.mutate()}
-              onStravaImported={() => {
-                void queryClient.invalidateQueries({ queryKey: ["projects"] });
-                void queryClient.invalidateQueries({ queryKey: ["analytics"] });
-              }}
+              onOpenLibrary={() => setDashboardTab("library")}
             />
           </Suspense>
         ) : (
