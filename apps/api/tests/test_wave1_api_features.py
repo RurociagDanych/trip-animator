@@ -318,6 +318,22 @@ def test_photos_exif_camera_align_clock_shift_and_pin(
     assert still_unmatched["match_method"] == "unmatched"
     assert still_unmatched["exif_offset_s"] == 0
 
+    auto_dry = alice.post(
+        f"/api/v1/projects/{proj_id}/photos/shift-clock",
+        json={"dry_run": True},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert auto_dry.status_code == 200, auto_dry.text
+    auto_dry_json = auto_dry.json()
+    assert auto_dry_json["dry_run"] is True
+    assert auto_dry_json["applied_offset_seconds"] == -7200
+    assert auto_dry_json["newly_matched_count"] >= 1
+    assert {p["id"] for p in auto_dry_json["photos"]} == {p1["id"], p2["id"]}
+    after_dry = {p["id"]: p for p in alice.get(f"/api/v1/projects/{proj_id}/photos").json()}
+    assert after_dry[p1["id"]]["exif_offset_s"] == 0
+    assert after_dry[p2["id"]]["exif_offset_s"] == 0
+    assert after_dry[p2["id"]]["match_method"] == "unmatched"
+
     auto_shift = alice.post(
         f"/api/v1/projects/{proj_id}/photos/shift-clock",
         json={"dry_run": False, "camera_make_model": "SONY ILCE-7M4"},

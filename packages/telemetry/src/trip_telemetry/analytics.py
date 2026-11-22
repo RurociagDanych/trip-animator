@@ -17,7 +17,7 @@ import pyarrow as pa  # type: ignore[import-untyped]
 import pyarrow.parquet as pq  # type: ignore[import-untyped]
 from pydantic import BaseModel, Field
 
-from trip_telemetry.gpx_parser import haversine_distance_m
+from trip_telemetry.gpx_parser import EARTH_RADIUS_M, haversine_distance_m
 from trip_telemetry.ref_data import resolve_ref_data_dir
 from trip_telemetry.schemas import (
     ClimbCategory,
@@ -1266,14 +1266,119 @@ def align_photos_to_stages(
         con.close()
 
 
+@dataclass(frozen=True, slots=True)
+class ClockSkewTrack:
+    """Time-sorted track samples shared by every candidate offset of one clock-skew solve."""
+
+    ts_us: np.ndarray
+    lat: np.ndarray
+    lon: np.ndarray
+
+
+def load_clock_skew_track(stages: Sequence[StageTrackInput]) -> ClockSkewTrack:
+    """Load active, timestamped points of all stages once, sorted by time."""
+    con = duckdb.connect(database=":memory:")
+    try:
+        ts_parts: list[np.ndarray] = []
+        lat_parts: list[np.ndarray] = []
+        lon_parts: list[np.ndarray] = []
+        for st in sorted(stages, key=lambda s: s.stage_order):
+            _load_active_silver_table(
+                con,
+                st.parquet_path,
+                trim_start_s=st.trim_start_s,
+                trim_end_s=st.trim_end_s,
+                table_name="_one_stage",
+            )
+            cols = con.execute(
+                """
+                SELECT
+                    EPOCH_US(CAST(ts_utc AS TIMESTAMPTZ))::BIGINT AS ts_us,
+                    lat::DOUBLE AS lat,
+                    lon::DOUBLE AS lon
+                FROM _one_stage
+                WHERE ts_utc IS NOT NULL
+                ORDER BY seq ASC
+                """
+            ).fetchnumpy()
+            ts_parts.append(np.asarray(cols["ts_us"], dtype=np.int64))
+            lat_parts.append(np.asarray(cols["lat"], dtype=np.float64))
+            lon_parts.append(np.asarray(cols["lon"], dtype=np.float64))
+    finally:
+        con.close()
+
+    if not ts_parts:
+        empty = np.empty(0)
+        return ClockSkewTrack(empty.astype(np.int64), empty, empty)
+    ts = np.concatenate(ts_parts)
+    order = np.argsort(ts, kind="stable")
+    return ClockSkewTrack(
+        ts_us=ts[order],
+        lat=np.concatenate(lat_parts)[order],
+        lon=np.concatenate(lon_parts)[order],
+    )
+
+
+def _haversine_many_m(
+    lat1: np.ndarray, lon1: np.ndarray, lat2: np.ndarray, lon2: np.ndarray
+) -> np.ndarray:
+    phi1 = np.radians(lat1)
+    phi2 = np.radians(lat2)
+    dphi = np.radians(lat2 - lat1)
+    # Wrap into [-180, 180] like haversine_distance_m so antimeridian pairs stay short.
+    dlon = (lon2 - lon1 + 180.0) % 360.0 - 180.0
+    dlambda = np.radians(dlon)
+    a = np.sin(dphi / 2.0) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlambda / 2.0) ** 2
+    a = np.clip(a, 0.0, 1.0)
+    return np.asarray(2.0 * EARTH_RADIUS_M * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a)))
+
+
+def _timestamp_match_errors_m(
+    track: ClockSkewTrack,
+    target_us: np.ndarray,
+    photo_lat: np.ndarray,
+    photo_lon: np.ndarray,
+    *,
+    max_time_gap_us: float,
+) -> np.ndarray:
+    """Return rounded GPS errors of photos whose nearest track point is within the gap.
+
+    Mirrors the ASOF prev/next rule of `align_photos_to_stages`: the earlier point wins ties.
+    """
+    n = track.ts_us.shape[0]
+    prev_i = np.searchsorted(track.ts_us, target_us, side="right") - 1
+    next_i = np.searchsorted(track.ts_us, target_us, side="left")
+    has_prev = prev_i >= 0
+    has_next = next_i < n
+    prev_diff = np.where(
+        has_prev, target_us - track.ts_us[np.maximum(prev_i, 0)], np.iinfo(np.int64).max
+    )
+    next_diff = np.where(
+        has_next, track.ts_us[np.minimum(next_i, n - 1)] - target_us, np.iinfo(np.int64).max
+    )
+    use_next = next_diff < prev_diff
+    best_diff = np.where(use_next, next_diff, prev_diff)
+    best_i = np.where(use_next, np.minimum(next_i, n - 1), np.maximum(prev_i, 0))
+    ok = (has_prev | has_next) & (best_diff <= max_time_gap_us)
+    if not ok.any():
+        return np.empty(0)
+    idx = best_i[ok]
+    err = _haversine_many_m(photo_lat[ok], photo_lon[ok], track.lat[idx], track.lon[idx])
+    return np.array([round(float(e), 2) for e in err])
+
+
 def solve_camera_clock_skew(
     photos: Sequence[PhotoAlignmentInput],
     stages: Sequence[StageTrackInput],
     *,
     camera_make_model: str | None = None,
     max_time_gap_s: float = 600.0,
+    track: ClockSkewTrack | None = None,
 ) -> ClockSkewResult:
-    """Solve median integer-hour camera clock offset [-12h..+14h] minimizing spatial error."""
+    """Solve median integer-hour camera clock offset [-12h..+14h] minimizing spatial error.
+
+    Pass a `track` from `load_clock_skew_track` to reuse it across several solves.
+    """
     candidates = [
         p
         for p in photos
@@ -1285,29 +1390,39 @@ def solve_camera_clock_skew(
     if not candidates or not stages:
         return ClockSkewResult(offset_seconds=0, matched_count=0, median_error_m=None)
 
+    if track is None:
+        track = load_clock_skew_track(stages)
+    if track.ts_us.shape[0] == 0:
+        return ClockSkewResult(offset_seconds=0, matched_count=0, median_error_m=None)
+
+    one_us = timedelta(microseconds=1)
+    base_us = np.array(
+        [
+            ((_normalize_ts_utc(p.taken_at_utc) or _UNIX_EPOCH_UTC) - _UNIX_EPOCH_UTC) // one_us
+            for p in candidates
+        ],
+        dtype=np.int64,
+    )
+    photo_lat = np.array([p.lat for p in candidates], dtype=np.float64)
+    photo_lon = np.array([p.lon for p in candidates], dtype=np.float64)
+
     best_offset = 0
     best_matched = 0
     best_median_err: float | None = None
 
     for delta_h in range(-12, 15):
         offset_s = delta_h * 3600
-        shifted = [
-            p.model_copy(update={"exif_offset_s": offset_s, "match_method": "unmatched"})
-            for p in candidates
-        ]
-        aligned = align_photos_to_stages(
-            shifted,
-            stages,
-            max_time_gap_s=max_time_gap_s,
-            max_spatial_dist_m=0.0,  # evaluate timestamp match error only
+        errors = _timestamp_match_errors_m(
+            track,
+            base_us + offset_s * 1_000_000,
+            photo_lat,
+            photo_lon,
+            max_time_gap_us=max_time_gap_s * 1_000_000,
         )
-        errors = [
-            r.error_m for r in aligned if r.match_method == "timestamp" and r.error_m is not None
-        ]
-        if not errors:
+        if errors.shape[0] == 0:
             continue
-        med_err = float(statistics.median(errors))
-        matched_cnt = len(errors)
+        med_err = float(statistics.median(errors.tolist()))
+        matched_cnt = int(errors.shape[0])
 
         better_count = matched_cnt > best_matched
         same_count_better_err = matched_cnt == best_matched and (

@@ -10,7 +10,7 @@ import tempfile
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -439,8 +439,12 @@ def align_project_photos(
     photo_ids: set[uuid.UUID] | None = None,
     override_offsets: dict[uuid.UUID, int] | None = None,
     persist: bool = True,
+    materialized: list[tuple[Stage, Path]] | None = None,
 ) -> list[ProjectPhoto]:
-    """Align non-manual project photos against project stages via DuckDB ASOF + spatial."""
+    """Align non-manual project photos against project stages via DuckDB ASOF + spatial.
+
+    `materialized` reuses already downloaded Silver parquets of the same stages.
+    """
     photos = get_project_photos(db, project_id)
     stages = get_project_stages(db, project_id)
     if not photos:
@@ -465,7 +469,12 @@ def align_project_photos(
                 db.refresh(p)
         return photos
 
-    with materialize_silver_parquets(store, stages) as pairs:
+    with ExitStack() as stack:
+        pairs = (
+            materialized
+            if materialized is not None
+            else stack.enter_context(materialize_silver_parquets(store, stages))
+        )
         stage_inputs = [
             StageTrackInput(
                 stage_id=str(st.id),
