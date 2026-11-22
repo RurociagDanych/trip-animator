@@ -154,6 +154,14 @@ function matchByTimestamp(
   }
   const a = bestStagePts[lo]!;
   const b = bestStagePts[hi]!;
+  if (a.segmentIdx !== b.segmentIdx) {
+    // The marker holds the last point of a segment until it reaches the next one, so a
+    // photo inside a track gap must sit on that same point to appear when the marker does.
+    const metricA = metricValueOf(a, useTimeMetric);
+    const metricSpan = maxMetric - minMetric;
+    const progress = metricSpan > 0 ? clamp01((metricA - minMetric) / metricSpan) : 0;
+    return { position: [a.lonUnwrapped, a.lat], progress };
+  }
   const tsSpan = (b.tsUtcMs ?? 0) - (a.tsUtcMs ?? 0);
   const t = tsSpan > 0 ? clamp01((takenAtMs - (a.tsUtcMs ?? 0)) / tsSpan) : 0;
 
@@ -304,6 +312,22 @@ export function matchPhotosToTimeline(
         matchedPosition = [photo.matched_lon, photo.matched_lat];
         pinPosition = hasValidGps ? [photo.lon!, photo.lat!] : matchedPosition;
         matchMethod = "manual";
+        // The backend progress is a fraction of the raw track length, while the timeline
+        // distance can be stretched to stage distance_m. Re-project the pin so the photo
+        // triggers exactly when the marker reaches its position on the timeline.
+        if (bounds) {
+          const projected = matchByGps(
+            photo.matched_lon,
+            photo.matched_lat,
+            stages,
+            useTimeMetric,
+            minMetric,
+            maxMetric,
+          );
+          if (projected) {
+            matchedProgress = projected.progress;
+          }
+        }
       } else {
         // Timestamp match with timezone-mismatch fallback (>50km from GPS)
         let tsCandidate: { position: [number, number]; progress: number } | null = null;

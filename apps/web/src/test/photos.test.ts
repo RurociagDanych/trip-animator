@@ -67,6 +67,11 @@ function makeStage(): TimelineStage {
   };
 }
 
+/** Pins on makeStage's straight route (lon 0.2 to 0.3 at lat 0.1), at the given progress. */
+function onRouteCoords(progress: number) {
+  return { matched_lon: 0.2 + 0.1 * progress, matched_lat: 0.1 };
+}
+
 function makePhoto(overrides: Partial<ProjectPhotoOut>): ProjectPhotoOut {
   return {
     id: "photo-1",
@@ -113,7 +118,7 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
   });
 
   describe("cinematic_stop preview and export parity", () => {
-    const manual = { match_method: "manual" as const, matched_lat: 0.1, matched_lon: 0.2 };
+    const manual = { match_method: "manual" as const };
     const cinematicSpec = (overrides: Partial<ReturnType<typeof createDefaultRenderSpecV2>> = {}) => ({
       ...createDefaultRenderSpecV2(),
       photo_card_style: "cinematic_stop" as const,
@@ -126,7 +131,7 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
     });
     const photosAt = (spec: ReturnType<typeof cinematicSpec>, stages: TimelineStage[], progresses: number[]) =>
       matchPhotosToTimeline(
-        progresses.map((p, i) => makePhoto({ ...manual, id: `p${i}`, matched_progress: p })),
+        progresses.map((p, i) => makePhoto({ ...manual, ...onRouteCoords(p), id: `p${i}`, matched_progress: p })),
         stages,
         spec,
         () => "/photo.jpg",
@@ -216,12 +221,12 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
       photo_display_seconds: 2,
     };
     const stages = [makeStage()];
-    const manual = { match_method: "manual" as const, matched_lat: 0.1, matched_lon: 0.2 };
+    const manual = { match_method: "manual" as const };
     const photos = matchPhotosToTimeline([
-      makePhoto({ ...manual, id: "c", matched_progress: 0.29 }),
-      makePhoto({ ...manual, id: "a", matched_progress: 0.2 }),
-      makePhoto({ ...manual, id: "b", matched_progress: 0.25 }),
-      makePhoto({ ...manual, id: "disabled", enabled: false, matched_progress: 0.7 }),
+      makePhoto({ ...manual, ...onRouteCoords(0.29), id: "c", matched_progress: 0.29 }),
+      makePhoto({ ...manual, ...onRouteCoords(0.2), id: "a", matched_progress: 0.2 }),
+      makePhoto({ ...manual, ...onRouteCoords(0.25), id: "b", matched_progress: 0.25 }),
+      makePhoto({ ...manual, ...onRouteCoords(0.7), id: "disabled", enabled: false, matched_progress: 0.7 }),
       makePhoto({ id: "unmatched" }),
     ], stages, spec, () => "/photo.jpg");
     const duration = computePhotoStopTotalDurationS(spec, photos, stages);
@@ -231,7 +236,7 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
     expect(at(6.6).activePhoto?.outgoingPhoto?.id).toBe("a");
     expect(at(6.8).activePhoto?.photo.id).toBe("b");
     expect(at(9.1).activePhoto?.photo.id).toBe("c");
-    expect(at(11.49).progressRatio).toBe(0.2);
+    expect(at(11.49).progressRatio).toBeCloseTo(0.2, 9);
     expect(at(11.52).progressRatio).toBeCloseTo(0.201);
     expect(at(13.3).activePhoto).toBeNull();
     expect(computePhotoStopTotalDurationS({ ...spec, photo_group_gap_seconds: 0 }, photos, stages)).toBe(29);
