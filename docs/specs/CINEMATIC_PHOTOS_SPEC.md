@@ -10,7 +10,7 @@
 - Existing-system observations
 - Glossary
 
-Status: Implemented for cinematic_stop playback (editor, shared view, render worker). Quota step is on main; grouped photos use the defaults in Open decisions. Verified with unit, worker and PostgreSQL tests and a rendered one-photo MP4. Editor browser check is open.
+Status: In review. cinematic_stop playback is implemented in the editor, shared view and render worker. The quota step is on main and grouped photos use the defaults in Open decisions. Verified with unit, worker and PostgreSQL tests and rendered single-photo and grouped-photo MP4s. Open: the manual editor check in a browser has not been done.
 
 ## Confirmed requirements
 
@@ -31,15 +31,19 @@ Status: Implemented for cinematic_stop playback (editor, shared view, render wor
 
 ## Open decisions
 
-- Q9 — Grouping control defaults (applied: default 1 second, range 0-180). Recommendation: default to 1 second; 0 seconds groups only photos at the same route position. Include adjacent photos whose travel-time gap is exactly the configured threshold.
-- Q10 — Return to the route (applied). Recommendation: start the stop when the marker reaches the first photo in the group, then return to that exact point and show the remaining route without jumps or repeated photo stops for photos the group already displayed.
+- Q9: Grouping control defaults (applied: default 1 second, range 0-180). Recommendation: default to 1 second; 0 seconds groups only photos at the same route position. Include adjacent photos whose travel-time gap is exactly the configured threshold.
+- Q10: Return to the route (applied). Recommendation: start the stop when the marker reaches the first photo in the group, then return to that exact point and show the remaining route without jumps or repeated photo stops for photos the group already displayed.
+- Q11: Long films and chunking (applied: no cap). Chunking stays enabled for cinematic_stop. Only the shared web schedule knows the film length, so the worker loads the render page once before splitting, reads the frame count it reports and uses that total for the chunk ranges, the stored manifest and the ffprobe duration check. Jobs without photo stops skip this step. The API stream deadline uses an upper bound of the base duration plus one stop per enabled photo.
+- Q12: Preview rule (applied, owner to confirm). A preview shortens only the journey to 5 seconds. Photo holds and transitions keep their export length, and groups are decided from export travel seconds, so preview and export group the same photos. A preview with photos therefore runs longer than 5 seconds.
+- Q13: Full-frame image (applied). cinematic_stop uses the full photo variant, served to the render through the virtual asset URL and to the editor and shared view through the existing image endpoints.
+- Q14: Map zoom (accepted limitation). The zoom into the marker is a CSS scale of the map layer, so tiles are not re-rendered at a higher zoom and look softer at the peak of the zoom.
 
 ## Existing-system observations
 
 - The [photo upload endpoint](../../apps/api/src/trip_api/routers/photos.py) enforces a 100-photo project quota and rechecks it under a project lock before insertion.
 - The [shared playback scheduler](../../apps/web/src/lib/geo/photos.ts) uses matched route progress to trigger displayed photos. Its existing pause rule can shorten holds to fit within 65% of active playback; short previews also scale hold time.
 - The editor already offers a Cinematic Ken Burns photo card, not a map zoom or a full-frame display. The [render manifest](../../apps/worker/src/trip_worker/manifest.py) excludes that card style from repeated-frame pause windows. The new mode must not be confused with or replace that style.
-- The [render spec](../../packages/telemetry/src/trip_telemetry/schemas.py) currently caps the configured duration at 180 seconds. At four seconds each, 100 fully visible photos take 400 seconds before travel or transitions. The safe effective runtime and corresponding worker limits are not yet verified.
+- The [render spec](../../packages/telemetry/src/trip_telemetry/schemas.py) currently caps the configured duration at 180 seconds. At four seconds each, 100 fully visible photos take 400 seconds before travel or transitions. The film length is therefore not capped by this limit; see Q11.
 
 ## Glossary
 
