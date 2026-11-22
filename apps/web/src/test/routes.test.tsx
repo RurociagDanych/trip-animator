@@ -298,7 +298,56 @@ describe("Route tests: DashboardPage, LoginPage, ForgotPasswordPage, ResetPasswo
       expect(screen.getByText("05:00:00")).toBeInTheDocument();
     });
 
-    it("renders Atlas Strava bar in disconnected state and triggers Strava OAuth connect", async () => {
+    it("keeps the connected Atlas free of activity import controls", async () => {
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
+        if (url.includes("/api/v1/auth/me")) {
+          return jsonResponse({
+            user: { id: "u-1", email: "rider@example.com", display_name: "Rider", strava_connected: true },
+            csrf_token: "csrf-atlas-connected",
+            dev_auth_enabled: true,
+          });
+        }
+        if (url.endsWith("/api/v1/projects")) {
+          return jsonResponse([{
+            id: "proj-atlas-1",
+            title: "Fictional Meridian Circuit",
+            revision: 1,
+            stage_count: 2,
+            total_distance_m: 60_000,
+            settings: createDefaultRenderSpecV2(),
+            created_at: "2001-06-14T08:00:00Z",
+            updated_at: "2001-06-14T08:00:00Z",
+          }]);
+        }
+        if (url.includes("/api/v1/analytics/heatmap")) return jsonResponse({
+          trips: [{
+            project_id: "proj-atlas-1", title: "Fictional Meridian Circuit", year: 2001,
+            primary_activity: "cycling", distance_m: 60_000, elevation_gain_m: 0,
+            stage_count: 2, bbox: [0.1, 0.1, 0.3, 0.3],
+            polylines: [[[0.1, 0.1], [0.3, 0.3]]],
+          }],
+          hex_cells: [],
+        });
+        if (url.includes("/api/v1/analytics/career")) return jsonResponse({
+          total_projects: 1, total_stages: 2, total_distance_m: 60_000,
+          total_elevation_gain_m: 0, total_moving_seconds: 0,
+          countries_visited: [], by_year: [], by_activity: [],
+        });
+        return jsonResponse({});
+      });
+
+      renderAtRoute("/");
+      fireEvent.click(await screen.findByRole("tab", { name: "Atlas" }));
+
+      expect(await screen.findByTestId("atlas-view")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /Import from Strava/i })).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Target trip for Strava import")).not.toBeInTheDocument();
+      expect(screen.queryByRole("dialog", { name: /Import Strava activity/i })).not.toBeInTheDocument();
+      expect(fetchSpy.mock.calls.some(([input]) => String(input).includes("/api/v1/strava/"))).toBe(false);
+    });
+
+    it("does not offer Strava OAuth from Atlas when disconnected", async () => {
       const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
         const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
         if (url.includes("/api/v1/public-config")) {
@@ -306,251 +355,59 @@ describe("Route tests: DashboardPage, LoginPage, ForgotPasswordPage, ResetPasswo
         }
         if (url.includes("/api/v1/auth/me")) {
           return jsonResponse({
-            user: {
-              id: "u-1",
-              email: "dev@trip-animator.local",
-              display_name: "Developer",
-              strava_connected: false,
-            },
-            csrf_token: "csrf-atlas-1",
+            user: { id: "u-1", email: "rider@example.com", display_name: "Rider", strava_connected: false },
+            csrf_token: "csrf-atlas-disconnected",
             dev_auth_enabled: true,
           });
         }
-        if (url.endsWith("/api/v1/projects")) {
-          return jsonResponse([]);
-        }
-        if (url.includes("/api/v1/analytics/heatmap")) {
-          return jsonResponse({ trips: [], hex_cells: [] });
-        }
-        if (url.includes("/api/v1/analytics/career")) {
-          return jsonResponse({
-            total_projects: 0,
-            total_stages: 0,
-            total_distance_m: 0,
-            total_elevation_gain_m: 0,
-            total_moving_seconds: 0,
-            countries_visited: [],
-            by_year: [],
-            by_activity: [],
-          });
-        }
-        if (url.includes("/api/v1/strava/connect")) {
-          return jsonResponse({
-            authorize_url: "https://example.com/strava-auth",
-            state: "state-1",
-          });
-        }
+        if (url.endsWith("/api/v1/projects")) return jsonResponse([]);
+        if (url.includes("/api/v1/analytics/heatmap")) return jsonResponse({ trips: [], hex_cells: [] });
+        if (url.includes("/api/v1/analytics/career")) return jsonResponse({
+          total_projects: 0, total_stages: 0, total_distance_m: 0,
+          total_elevation_gain_m: 0, total_moving_seconds: 0,
+          countries_visited: [], by_year: [], by_activity: [],
+        });
         return jsonResponse({});
       });
 
       renderAtRoute("/");
       fireEvent.click(await screen.findByRole("tab", { name: "Atlas" }));
 
-      const bar = await screen.findByTestId("atlas-strava-bar");
-      expect(bar).toHaveTextContent("Not connected");
-      const connectBtn = screen.getByRole("button", { name: /Connect Strava/i });
-      expect(connectBtn).toBeEnabled();
-
-      fireEvent.click(connectBtn);
-      await waitFor(() => {
-        const connectCall = fetchSpy.mock.calls.find(([u]) =>
-          String(u).includes("/api/v1/strava/connect"),
-        );
-        expect(connectCall).toBeDefined();
-      });
+      expect(await screen.findByTestId("atlas-view")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /Connect Strava/i })).not.toBeInTheDocument();
+      expect(fetchSpy.mock.calls.some(([input]) => String(input).includes("/api/v1/strava/"))).toBe(false);
     });
 
-    it("renders connected Atlas Strava sync status and opens StravaPickerModal", async () => {
-      const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    it("opens Activity Library from Atlas without creating a project or starting Strava OAuth", async () => {
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
         const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
-        const method = init?.method ?? "GET";
-        if (url.includes("/api/v1/public-config")) {
-          return jsonResponse({ dev_auth_enabled: true, strava_configured: true });
-        }
         if (url.includes("/api/v1/auth/me")) {
           return jsonResponse({
-            user: {
-              id: "u-1",
-              email: "dev@trip-animator.local",
-              display_name: "Developer",
-              strava_connected: true,
-            },
-            csrf_token: "csrf-atlas-2",
+            user: { id: "u-1", email: "rider@example.com", display_name: "Rider", strava_connected: false },
+            csrf_token: "csrf-atlas-library",
             dev_auth_enabled: true,
           });
         }
-        if (url.endsWith("/api/v1/projects") && method === "GET") {
-          return jsonResponse([
-            {
-              id: "proj-atlas-1",
-              title: "Fictional Meridian Circuit",
-              revision: 1,
-              stage_count: 2,
-              total_distance_m: 60_000,
-              settings: createDefaultRenderSpecV2(),
-              created_at: "2001-06-14T08:00:00Z",
-              updated_at: "2001-06-14T08:00:00Z",
-            },
-            {
-              id: "proj-atlas-2",
-              title: "Fictional Ridge Loop",
-              revision: 1,
-              stage_count: 1,
-              total_distance_m: 30_000,
-              settings: createDefaultRenderSpecV2(),
-              created_at: "2001-06-15T08:00:00Z",
-              updated_at: "2001-06-15T08:00:00Z",
-            },
-          ]);
-        }
-        if (url.includes("/api/v1/strava/import-status")) {
-          return jsonResponse({
-            connected: true,
-            athlete_id: "athlete-1",
-            scope: "read,activity:read_all",
-            pending_jobs: 2,
-            queued_jobs: 2,
-            running_jobs: 0,
-            succeeded_jobs: 4,
-            failed_jobs: 0,
-            ignored_jobs: 0,
-            imported_stages_count: 4,
-            last_error: null,
-          });
-        }
-
-        if (url.includes("/api/v1/strava/activities")) {
-          return jsonResponse([
-            {
-              id: 2001,
-              name: "Fictional Summit Spin",
-              sport_type: "Ride",
-              start_date: "2001-06-18T08:00:00Z",
-              distance_m: 35_000,
-              elevation_gain_m: 800,
-              moving_time_s: 4200,
-              has_gps: true,
-            },
-          ]);
-        }
-        if (url.includes("/api/v1/analytics/heatmap")) {
-          return jsonResponse({ trips: [], hex_cells: [] });
-        }
-        if (url.includes("/api/v1/analytics/career")) {
-          return jsonResponse({
-            total_projects: 2,
-            total_stages: 3,
-            total_distance_m: 90_000,
-            total_elevation_gain_m: 1800,
-            total_moving_seconds: 10_000,
-            countries_visited: [],
-            by_year: [],
-            by_activity: [],
-          });
-        }
+        if (url.endsWith("/api/v1/projects")) return jsonResponse([]);
+        if (url.includes("/api/v1/analytics/heatmap")) return jsonResponse({ trips: [], hex_cells: [] });
+        if (url.includes("/api/v1/analytics/career")) return jsonResponse({
+          total_projects: 0, total_stages: 0, total_distance_m: 0,
+          total_elevation_gain_m: 0, total_moving_seconds: 0,
+          countries_visited: [], by_year: [], by_activity: [],
+        });
         return jsonResponse({});
       });
 
       renderAtRoute("/");
       fireEvent.click(await screen.findByRole("tab", { name: "Atlas" }));
+      fireEvent.click(await screen.findByRole("button", { name: /Activity Library/i }));
 
-      const bar = await screen.findByTestId("atlas-strava-bar");
-      expect(bar).toHaveTextContent("Connected");
-      expect(await screen.findByText(/Syncing 2 queued/i)).toBeInTheDocument();
-      expect(screen.getByText(/4 imported stages/i)).toBeInTheDocument();
-
-      fireEvent.click(screen.getByTestId("atlas-open-strava-picker"));
-      expect(await screen.findByRole("dialog", { name: /Import Strava activity/i })).toBeInTheDocument();
-      expect(await screen.findByText("Fictional Summit Spin")).toBeInTheDocument();
-      expect(
-        fetchSpy.mock.calls.some(([u]) => String(u).includes("/api/v1/strava/activities")),
-      ).toBe(true);
-    });
-
-    it("auto-creates a Strava Activities project when opening picker from Atlas with no projects", async () => {
-      let createdTitle: string | null = null;
-      vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-        const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
-        const method = init?.method ?? "GET";
-        if (url.includes("/api/v1/public-config")) {
-          return jsonResponse({ dev_auth_enabled: true, strava_configured: true });
-        }
-        if (url.includes("/api/v1/auth/me")) {
-          return jsonResponse({
-            user: {
-              id: "u-1",
-              email: "dev@trip-animator.local",
-              display_name: "Developer",
-              strava_connected: true,
-            },
-            csrf_token: "csrf-atlas-3",
-            dev_auth_enabled: true,
-          });
-        }
-        if (url.endsWith("/api/v1/projects") && method === "GET") {
-          return jsonResponse([]);
-        }
-        if (url.endsWith("/api/v1/projects") && method === "POST") {
-          const body = JSON.parse(String(init?.body ?? "{}")) as { title?: string };
-          createdTitle = body.title ?? null;
-          return jsonResponse(
-            {
-              id: "proj-auto-1",
-              title: body.title ?? "Strava Activities",
-              revision: 1,
-              stage_count: 0,
-              total_distance_m: 0,
-              settings: createDefaultRenderSpecV2(),
-              created_at: "2001-06-14T08:00:00Z",
-              updated_at: "2001-06-14T08:00:00Z",
-            },
-            201,
-          );
-        }
-        if (url.includes("/api/v1/strava/import-status")) {
-          return jsonResponse({
-            connected: true,
-            athlete_id: "athlete-1",
-            scope: "read,activity:read_all",
-            pending_jobs: 0,
-            queued_jobs: 0,
-            running_jobs: 0,
-            succeeded_jobs: 0,
-            failed_jobs: 0,
-            ignored_jobs: 0,
-            imported_stages_count: 0,
-            last_error: null,
-          });
-        }
-        if (url.includes("/api/v1/strava/activities")) {
-          return jsonResponse([]);
-        }
-        if (url.includes("/api/v1/analytics/heatmap")) {
-          return jsonResponse({ trips: [], hex_cells: [] });
-        }
-        if (url.includes("/api/v1/analytics/career")) {
-          return jsonResponse({
-            total_projects: 0,
-            total_stages: 0,
-            total_distance_m: 0,
-            total_elevation_gain_m: 0,
-            total_moving_seconds: 0,
-            countries_visited: [],
-            by_year: [],
-            by_activity: [],
-          });
-        }
-        return jsonResponse({});
-      });
-
-      renderAtRoute("/");
-      fireEvent.click(await screen.findByRole("tab", { name: "Atlas" }));
-      await screen.findByTestId("atlas-strava-bar");
-      expect(screen.queryByLabelText("Target trip for Strava import")).not.toBeInTheDocument();
-
-      fireEvent.click(screen.getByTestId("atlas-open-strava-picker"));
-      expect(await screen.findByRole("dialog", { name: /Import Strava activity/i })).toBeInTheDocument();
-      expect(createdTitle).toBe("Strava Activities");
+      expect(await screen.findByText("Activity catalog")).toBeInTheDocument();
+      expect(screen.getByRole("tab", { name: "Activity Library" })).toHaveAttribute("aria-selected", "true");
+      expect(fetchSpy.mock.calls.some(([input, init]) =>
+        String(input).includes("/api/v1/strava/") ||
+        (String(input).endsWith("/api/v1/projects") && init?.method === "POST"),
+      )).toBe(false);
     });
   });
 
