@@ -185,6 +185,32 @@ def test_render_spec_v2_new_fields_and_keyframe_validation() -> None:
         RenderSpecV2(terrain_exaggeration=float("inf"))
 
 
+@pytest.mark.parametrize("style", ["corner", "polaroid", "cinematic", "cinematic_stop"])
+def test_render_spec_photo_card_styles_round_trip_and_default_group_gap(style: str) -> None:
+    legacy_payload = {"version": 2, "photo_card_style": style, "photo_display_seconds": 4.5}
+    legacy = RenderSpecV2.model_validate(legacy_payload)
+    assert legacy.photo_card_style == style
+    assert legacy.photo_display_seconds == pytest.approx(4.5)
+    assert legacy.photo_group_gap_seconds == pytest.approx(1.0)
+
+    restored = RenderSpecV2.model_validate_json(legacy.model_dump_json())
+    assert restored == legacy
+
+    tuned = RenderSpecV2.model_validate({**legacy_payload, "photo_group_gap_seconds": 12.5})
+    assert RenderSpecV2.model_validate(tuned.model_dump()).photo_group_gap_seconds == 12.5
+
+
+@pytest.mark.parametrize("gap", [0, 0.0, 1, 180])
+def test_render_spec_photo_group_gap_accepts_bounds(gap: float) -> None:
+    assert RenderSpecV2(photo_group_gap_seconds=gap).photo_group_gap_seconds == gap
+
+
+@pytest.mark.parametrize("gap", [-0.1, 180.1, float("nan"), float("inf")])
+def test_render_spec_photo_group_gap_rejects_out_of_range(gap: float) -> None:
+    with pytest.raises(ValueError):
+        RenderSpecV2(photo_group_gap_seconds=gap)
+
+
 def test_stage_camera_override_and_climb_callout_duration_validation() -> None:
     street_mode: StageFocusMode = "street"
     street = StageCameraOverride(focus_mode=street_mode)
