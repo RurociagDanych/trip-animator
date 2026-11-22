@@ -1,11 +1,12 @@
 import type { ActivityType } from "../../components/icons";
 
 export interface VaultActivityReadinessOut { metadata_available: boolean; has_gps: boolean; track_ready: boolean; tile_precision: "none" | "summary_polyline" | "full_stream" }
+export type ProjectReuseEligibility = "ready" | "waiting" | "no_gps" | "unavailable";
 export interface VaultActivityListItemOut {
   id: string; name: string; activity_type: string; raw_sport_type: string; source_provider: string;
   started_at: string; local_date: string; timezone_name: string | null; date_is_utc_fallback: boolean;
   distance_m: number | null; elevation_gain_m: number | null; moving_seconds: number | null; elapsed_seconds: number | null;
-  has_gps: boolean; readiness: VaultActivityReadinessOut; hidden?: boolean;
+  has_gps: boolean; readiness: VaultActivityReadinessOut; project_reuse_eligibility?: ProjectReuseEligibility; hidden?: boolean;
 }
 export interface VaultActivitySportSummaryOut {
   activity_type: string; activity_count: number; distance_m: number | null; distance_known_count: number;

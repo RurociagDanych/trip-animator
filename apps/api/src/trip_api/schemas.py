@@ -725,6 +725,7 @@ class VaultActivityListItemOut(BaseModel):
     has_gps: bool
     hidden: bool = False
     readiness: VaultActivityReadinessOut
+    project_reuse_eligibility: Literal["ready", "waiting", "no_gps", "unavailable"]
 
 
 class VaultActivitySummaryOut(BaseModel):

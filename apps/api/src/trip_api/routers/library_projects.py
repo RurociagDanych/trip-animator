@@ -9,14 +9,17 @@ import re
 import uuid
 from copy import deepcopy
 from datetime import UTC, datetime
-from typing import Any
+from io import BytesIO
+from typing import Any, Literal
 
+import polars as pl
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from trip_telemetry import build_silver_dataframe, parse_strava_streams, parse_track_bytes
 
-from trip_api.db import Project, Stage, VaultActivity
+from trip_api.db import IngestJob, Project, Stage, VaultActivity
 from trip_api.deps import CsrfAuth, DbSession, StoreDep
 
 router = APIRouter(prefix="/api/v1/library/projects", tags=["library-projects"])
@@ -77,9 +80,12 @@ def _owned_activities(
     result: list[tuple[VaultActivity, Stage]] = []
     for activity_id in activity_ids:
         activity = by_id[activity_id]
-        if activity.source_stage_id is None:
+        # Canonical standalone bytes are independent of project stages, which
+        # may have been locally trimmed or edited since provider sync.
+        source = _standalone_original(store, activity)
+        if source is None and activity.source_stage_id is None:
             source = _find_unlinked_original(db, store, user_id, activity)
-        else:
+        elif source is None:
             source = db.scalar(
                 select(Stage)
                 .join(Project, Project.id == Stage.project_id)
@@ -93,6 +99,109 @@ def _owned_activities(
             raise HTTPException(status_code=409, detail="Activity has no ready local track data")
         result.append((activity, source))
     return result
+
+
+def project_reuse_eligibility(
+    db: Session, store: StoreDep, activity: VaultActivity
+) -> Literal["ready", "waiting", "no_gps", "unavailable"]:
+    """Report readiness using the same owner-scoped original validation as project reuse."""
+    if not activity.has_gps:
+        return "no_gps"
+    try:
+        sources = _owned_activities(db, store, activity.user_id, [activity.id])
+        _validate_artifacts(store, sources)
+    except HTTPException as exc:
+        if exc.status_code not in (404, 409):
+            raise
+    else:
+        return "ready"
+    failed_job = db.scalar(
+        select(IngestJob.id)
+        .where(
+            IngestJob.provider == "strava",
+            IngestJob.payload_json["kind"].as_string() == "library_enrichment",
+            IngestJob.payload_json["owner_user_id"].as_string() == str(activity.user_id),
+            IngestJob.payload_json["catalog_activity_id"].as_string() == str(activity.id),
+            IngestJob.status.in_(["failed", "ignored"]),
+        )
+        .limit(1)
+    )
+    if (
+        failed_job is not None
+        or activity.disconnected_at is not None
+        or activity.silver_object_key
+        or activity.source_stage_id is not None
+    ):
+        return "unavailable"
+    return "waiting"
+
+
+def _standalone_original(store: StoreDep, activity: VaultActivity) -> Stage | None:
+    """Build transient stage metadata only from digest-verified original provider bytes."""
+    if (
+        activity.source_provider != "strava"
+        or activity.strava_activity_id is None
+        or activity.external_activity_id != str(activity.strava_activity_id)
+        or not activity.bronze_object_key
+        or not activity.silver_object_key
+        or not re.fullmatch(r"[0-9a-f]{64}", activity.source_sha256 or "")
+    ):
+        return None
+    try:
+        raw = store.get_bytes(activity.bronze_object_key)
+        bronze = json.loads(raw)
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        return None
+    provider = bronze.get("activity") if isinstance(bronze, dict) else None
+    streams = bronze.get("streams") if isinstance(bronze, dict) else None
+    if (
+        hashlib.sha256(raw).hexdigest() != activity.source_sha256
+        or not isinstance(provider, dict)
+        or str(provider.get("id")) != str(activity.strava_activity_id)
+        or not isinstance(streams, dict)
+        or not isinstance(streams.get("latlng"), dict)
+        or not streams["latlng"].get("data")
+        or not isinstance(activity.bronze_object_key, str)
+        or not isinstance(activity.silver_object_key, str)
+        or not activity.bronze_object_key.startswith(f"bronze/{activity.id}/")
+        or not activity.silver_object_key.startswith(f"silver/{activity.id}/")
+    ):
+        return None
+    try:
+        parsed = parse_strava_streams(
+            streams, start_date=provider.get("start_date"), name=activity.name
+        )
+        expected, summary = build_silver_dataframe(
+            parsed, trip_id=str(activity.id), stage_id="original"
+        )
+        silver = pl.read_parquet(BytesIO(store.get_bytes(activity.silver_object_key)))
+        columns = [name for name in expected.columns if name not in {"trip_id", "stage_id"}]
+        if not expected.select(columns).equals(silver.select(columns)):
+            return None
+    except (FileNotFoundError, OSError, ValueError, TypeError, pl.exceptions.PolarsError):
+        return None
+    return Stage(
+        id=uuid.uuid5(activity.id, "standalone-source"),
+        source_type="strava",
+        source_format="strava",
+        bronze_sha256=activity.source_sha256,
+        activity_type=activity.activity_type,
+        external_source_id=activity.external_activity_id,
+        strava_activity_id=activity.strava_activity_id,
+        vault_activity_id=activity.id,
+        name=activity.name,
+        bronze_object_key=activity.bronze_object_key,
+        silver_object_key=activity.silver_object_key,
+        started_at=activity.started_at,
+        point_count=parsed.point_count,
+        distance_m=summary.distance_m,
+        elevation_gain_m=summary.elevation_gain_m,
+        elevation_loss_m=summary.elevation_loss_m,
+        moving_seconds=summary.moving_seconds,
+        elapsed_seconds=summary.elapsed_seconds,
+        has_timestamps=parsed.has_timestamps,
+        warnings_json=[],
+    )
 
 
 def _is_original_provider_stage(stage: Stage, activity: VaultActivity) -> bool:
@@ -164,6 +273,8 @@ def _row_snapshot(row: Any) -> dict[str, Any]:
 
 def _attach_recovered_sources(sources: list[tuple[VaultActivity, Stage]]) -> None:
     for activity, source in sources:
+        if source.id == uuid.uuid5(activity.id, "standalone-source"):
+            continue
         if activity.source_stage_id is None:
             source.vault_activity_id = activity.id
             activity.source_stage_id = source.id
@@ -171,6 +282,7 @@ def _attach_recovered_sources(sources: list[tuple[VaultActivity, Stage]]) -> Non
 
 def _lock_and_validate_sources(
     db: Session,
+    store: StoreDep,
     user_id: uuid.UUID,
     activity_ids: list[uuid.UUID],
     prepared: list[tuple[VaultActivity, Stage]],
@@ -193,13 +305,18 @@ def _lock_and_validate_sources(
         raise HTTPException(status_code=409, detail="Library activity changed during reuse")
 
     validated: list[tuple[VaultActivity, Stage]] = []
+    source: Stage | None
     for (prepared_activity, prepared_source), (activity_snapshot, source_snapshot) in zip(
         prepared, snapshots, strict=True
     ):
         activity = by_id[prepared_activity.id]
         if _row_snapshot(activity) != activity_snapshot:
             raise HTTPException(status_code=409, detail="Library activity changed during reuse")
-        if activity_snapshot["source_stage_id"] is None:
+        if prepared_source.id == uuid.uuid5(activity.id, "standalone-source"):
+            # Artifacts were verified before locking. Under locks, only
+            # database snapshots are revalidated; do no storage I/O.
+            source = prepared_source
+        elif activity_snapshot["source_stage_id"] is None:
             source = db.scalar(
                 select(Stage)
                 .join(Project, Project.id == Stage.project_id)
@@ -239,15 +356,58 @@ def _validate_artifacts(
     store: StoreDep, sources: list[tuple[VaultActivity, Stage]]
 ) -> list[tuple[bytes, bytes]]:
     artifacts: list[tuple[bytes, bytes]] = []
-    for _, source in sources:
+    for activity, source in sources:
+        namespace = (
+            activity.id
+            if source.id == uuid.uuid5(activity.id, "standalone-source")
+            else source.project_id
+        )
         try:
-            artifacts.append(
-                (
-                    store.get_bytes(source.bronze_object_key),
-                    store.get_bytes(source.silver_object_key),
+            bronze = store.get_bytes(source.bronze_object_key)
+            silver = store.get_bytes(source.silver_object_key)
+            if (
+                hashlib.sha256(bronze).hexdigest() != source.bronze_sha256
+                or not source.bronze_object_key.startswith(f"bronze/{namespace}/")
+                or not source.silver_object_key.startswith(f"silver/{namespace}/")
+                or source.trim_start_s is not None
+                or source.trim_end_s is not None
+                or any(
+                    isinstance(warning, dict)
+                    and warning.get("code") == "vault_canonical_excluded_split_segment"
+                    for warning in source.warnings_json or []
                 )
-            )
-        except (FileNotFoundError, OSError, ValueError) as exc:
+            ):
+                raise ValueError("Unverified or edited source")
+            if source.source_format == "strava":
+                payload = json.loads(bronze)
+                provider = payload["activity"]
+                if (
+                    not isinstance(provider, dict)
+                    or str(provider.get("id")) != str(activity.strava_activity_id)
+                    or source.strava_activity_id != activity.strava_activity_id
+                ):
+                    raise ValueError("Source identity mismatch")
+                parsed = parse_strava_streams(
+                    payload["streams"], start_date=provider.get("start_date"), name=source.name
+                )
+            else:
+                parsed = parse_track_bytes(bronze, format_hint=source.source_format)
+            expected, _ = build_silver_dataframe(parsed, trip_id="source", stage_id="source")
+            stored = pl.read_parquet(BytesIO(silver))
+            if not set(expected.columns).issubset(stored.columns):
+                raise ValueError("Incomplete source telemetry schema")
+            columns = ["lat", "lon", "ts_utc", "segment_idx", "is_trimmed"]
+            if not expected.select(columns).equals(stored.select(columns)):
+                raise ValueError("Source geometry mismatch")
+            artifacts.append((bronze, silver))
+        except (
+            FileNotFoundError,
+            OSError,
+            ValueError,
+            TypeError,
+            KeyError,
+            pl.exceptions.PolarsError,
+        ) as exc:
             raise HTTPException(
                 status_code=409,
                 detail="Activity source artifacts are unavailable",
@@ -366,7 +526,7 @@ def create_project_from_library(
     created_keys = _copy_artifacts(store, stages, artifacts)
     try:
         sources = _lock_and_validate_sources(
-            db, auth.user.id, body.activity_ids, sources, snapshots
+            db, store, auth.user.id, body.activity_ids, sources, snapshots
         )
         db.add(project)
         db.add_all(stages)
@@ -409,7 +569,7 @@ def add_library_activities_to_project(
     created_keys = _copy_artifacts(store, stages, artifacts)
     try:
         sources = _lock_and_validate_sources(
-            db, auth.user.id, body.activity_ids, sources, snapshots
+            db, store, auth.user.id, body.activity_ids, sources, snapshots
         )
         project = db.scalar(
             select(Project)

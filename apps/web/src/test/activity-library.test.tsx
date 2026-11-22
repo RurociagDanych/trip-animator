@@ -142,6 +142,28 @@ afterEach(() => {
 });
 
 describe("ActivityLibraryView", () => {
+  it("refreshes waiting selections outside the visible page before allowing project reuse", async () => {
+    let enriched = false;
+    vi.spyOn(vaultApi, "map").mockResolvedValue(mapResult);
+    vi.spyOn(vaultApi, "status").mockResolvedValue(syncStatus(1));
+    vi.spyOn(vaultApi, "list").mockImplementation(async (filters) => listResult([
+      { ...item(filters.offset ? "2" : "1", filters.offset ? "Second ride" : "First ride"), project_reuse_eligibility: filters.offset ? "ready" : "waiting" },
+    ], filters.offset ?? 0, 60));
+    const get = vi.spyOn(vaultApi, "get").mockImplementation(async (id) => ({
+      ...detail(id, "First ride"), project_reuse_eligibility: enriched ? "ready" : "waiting",
+    }));
+    renderLibrary();
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Select First ride" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "New project title" }), { target: { value: "QA — Reuse" } });
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Select Second ride" }));
+    expect(screen.getByRole("button", { name: "Create project" })).toBeDisabled();
+    enriched = true;
+    await waitFor(() => expect(screen.getByRole("button", { name: "Create project" })).toBeEnabled(), { timeout: 5000 });
+    expect(get).toHaveBeenCalledWith("1", expect.anything());
+    expect(screen.getByText("2 activities selected")).toBeInTheDocument();
+  });
+
   it("formats moving and elapsed durations consistently in summaries, rows and details", async () => {
     vi.spyOn(vaultApi, "map").mockResolvedValue(mapResult);
     const activity = { ...item("1", "Timed ride"), moving_seconds: 4200, elapsed_seconds: 4500 };

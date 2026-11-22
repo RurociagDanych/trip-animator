@@ -10,6 +10,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 from trip_api.config import Settings
 from trip_api.db import OAuthConnection, User, VaultSyncState
+from trip_api.ingest import process_pending_ingest_jobs
+from trip_api.library_enrichment import enqueue_library_enrichment
+from trip_api.reaper import build_object_store
 from trip_api.vault_sync import process_pending_vault_syncs, start_or_resume_strava_vault_sync
 
 INCREMENTAL_INTERVAL = timedelta(minutes=30)
@@ -39,6 +42,12 @@ def discover_queue_and_process_vault_syncs(
         "syncs_rate_limited": 0,
         "syncs_requeued": 0,
         "syncs_failed": 0,
+        "enrichment_jobs_queued": 0,
+        "ingest_jobs_claimed": 0,
+        "ingest_jobs_succeeded": 0,
+        "ingest_jobs_ignored": 0,
+        "ingest_jobs_failed": 0,
+        "ingest_jobs_deferred": 0,
     }
 
     with session_factory() as db:
@@ -98,6 +107,22 @@ def discover_queue_and_process_vault_syncs(
             "syncs_failed": int(stats.get("failed", 0)),
         }
     )
+    store = build_object_store(settings)
+    with session_factory() as db:
+        counters["enrichment_jobs_queued"] = enqueue_library_enrichment(
+            db, batch_size=batch_size, now=current_time
+        )
+    with session_factory() as db:
+        enrichment_stats = process_pending_ingest_jobs(
+            db,
+            store,
+            settings,
+            batch_size=batch_size,
+            http_client_factory=http_client_factory,
+            now=current_time,
+        )
+    for key in ("claimed", "succeeded", "ignored", "failed", "deferred"):
+        counters[f"ingest_jobs_{key}"] = int(enrichment_stats.get(key, 0))
     return counters
 
 

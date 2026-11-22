@@ -13,6 +13,7 @@ from test_postgres_concurrency import (
     pg_app_factory,  # noqa: F401  # registers the isolated PostgreSQL application fixture
     pg_temp_db_url,  # noqa: F401  # registers the disposable database fixture dependency
 )
+from trip_api.activity_search import normalize_activity_search
 from trip_api.db import VaultActivity
 from trip_api.library_geometry import MAX_RESPONSE_POINTS
 
@@ -21,17 +22,18 @@ pytestmark = pytest.mark.postgres
 
 def test_reference_history_catalog_and_complete_bounded_map(request: pytest.FixtureRequest) -> None:
     build_app = request.getfixturevalue("pg_app_factory")
-    app, _, _, sf, _ = build_app()
+    app, _, _, sf, _ = build_app(strava_client_id="", strava_client_secret="")
     owner = _create_pg_user(sf, "scale@example.test")
     other = _create_pg_user(sf, "scale-other@example.test")
     start = datetime(2026, 1, 1, tzinfo=UTC)
+    late_name = "Koło — synthetic reference activity 19999"
     rows = [
         {
             "id": uuid4(),
             "user_id": owner.id,
             "source_provider": "upload",
             "external_activity_id": f"scale-{index}",
-            "name": f"Synthetic reference activity {index}",
+            "name": late_name if index == 19_999 else f"Synthetic reference activity {index}",
             "activity_type": "cycling" if index % 2 else "running",
             "started_at": start - timedelta(hours=index),
             "local_date": (start - timedelta(hours=index)).date(),
@@ -46,6 +48,8 @@ def test_reference_history_catalog_and_complete_bounded_map(request: pytest.Fixt
         }
         for index in range(20_000)
     ]
+    for row in rows:
+        row["search_name"] = normalize_activity_search(str(row["name"]))
     with sf() as db:
         db.execute(insert(VaultActivity), rows)
         db.commit()
@@ -55,6 +59,7 @@ def test_reference_history_catalog_and_complete_bounded_map(request: pytest.Fixt
         ("first_page", {"limit": 50}, 20_000),
         ("last_page", {"limit": 50, "offset": 19_950}, 20_000),
         ("sport_filter", {"limit": 50, "sport": "cycling"}, 10_000),
+        ("name_search", {"limit": 50, "name": "kolo"}, 1),
     ):
         timings[label] = []
         for _ in range(3):
@@ -65,7 +70,9 @@ def test_reference_history_catalog_and_complete_bounded_map(request: pytest.Fixt
             payload = response.json()
             assert payload["total"] == expected
             assert payload["summary"]["activity_count"] == expected
-            assert len(payload["items"]) == 50
+            assert len(payload["items"]) == min(expected, 50)
+            if label == "name_search":
+                assert payload["items"][0]["name"] == late_name
     before = perf_counter()
     ids: set[str] = set()
     points = 0
@@ -81,9 +88,12 @@ def test_reference_history_catalog_and_complete_bounded_map(request: pytest.Fixt
         assert len(features) <= 1000
         assert payload["total"] == 20_000
         page_ids = {feature["properties"]["id"] for feature in features}
+        assert len(page_ids) == len(features)
         assert not ids.intersection(page_ids)
         ids.update(page_ids)
-        points += sum(len(feature["geometry"]["coordinates"]) for feature in features)
+        page_points = sum(len(feature["geometry"]["coordinates"]) for feature in features)
+        assert page_points <= MAX_RESPONSE_POINTS
+        points += page_points
         pages += 1
         next_offset = payload["next_offset"]
         if next_offset is None:
@@ -91,8 +101,7 @@ def test_reference_history_catalog_and_complete_bounded_map(request: pytest.Fixt
         assert next_offset > offset
         offset = next_offset
     timings["complete_map"] = [round((perf_counter() - before) * 1000, 2)]
-    assert len(ids) == 20_000
-    assert points <= MAX_RESPONSE_POINTS
+    assert ids == {str(row["id"]) for row in rows}
     other_client, _ = _login_pg_client(app, other.email)
     assert other_client.get("/api/v1/vault/activities").json()["total"] == 0
     assert other_client.get("/api/v1/vault/activities/map").json()["features"] == []

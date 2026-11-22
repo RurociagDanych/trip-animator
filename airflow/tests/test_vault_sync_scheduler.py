@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 from sqlalchemy import select
 from trip_airflow.vault_sync_scheduler import discover_queue_and_process_vault_syncs
-from trip_api.db import OAuthConnection, Project, VaultActivity, VaultSyncState
+from trip_api.db import IngestJob, OAuthConnection, Project, Stage, VaultActivity, VaultSyncState
 from trip_api.security import encrypt_secret
 
 if TYPE_CHECKING:
@@ -95,6 +95,12 @@ def test_scheduler_runs_real_vault_processor_and_keeps_payload_safe(
         "syncs_rate_limited": 0,
         "syncs_requeued": 0,
         "syncs_failed": 0,
+        "enrichment_jobs_queued": 0,
+        "ingest_jobs_claimed": 0,
+        "ingest_jobs_succeeded": 0,
+        "ingest_jobs_ignored": 0,
+        "ingest_jobs_failed": 0,
+        "ingest_jobs_deferred": 0,
     }
     assert requests == [
         "/api/v3/athlete",
@@ -120,6 +126,129 @@ def test_scheduler_runs_real_vault_processor_and_keeps_payload_safe(
         assert activity.name == "Indoor ride without GPS"
         assert activity.start_lat is None
         assert project is None
+
+
+def test_scheduler_enriches_history_activity_into_standalone_artifacts(
+    airflow_harness: AirflowTaskHarness,
+    monkeypatch: Any,
+) -> None:
+    user = airflow_harness.create_user("history-enrichment@example.com")
+    key = airflow_harness.settings.decoded_encryption_key
+    with airflow_harness.session_factory() as db:
+        db.add(
+            OAuthConnection(
+                user_id=user.id,
+                provider="strava",
+                external_athlete_id="9002",
+                access_token_enc=encrypt_secret(
+                    "history-access-token", key, aad=f"oauth:{user.id}:strava".encode()
+                ),
+                refresh_token_enc=encrypt_secret(
+                    "history-refresh-token", key, aad=f"oauth:{user.id}:strava".encode()
+                ),
+                expires_at=datetime(2030, 1, 1, tzinfo=UTC),
+                scope="read,activity:read_all",
+            )
+        )
+        db.commit()
+
+    summary = {
+        "id": 7002,
+        "name": "History ride with GPS",
+        "type": "Ride",
+        "sport_type": "Ride",
+        "start_date": "2025-04-02T12:00:00Z",
+        "start_latlng": [46.5, 11.8],
+        "end_latlng": [46.52, 11.82],
+        "map": {"summary_polyline": "_p~iF~ps|U_ulLnnqC_mqNvxq`@"},
+        "distance": 3200,
+        "moving_time": 600,
+    }
+    requests: list[str] = []
+
+    def strava_handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.headers.get("Authorization") != "Bearer history-access-token":
+            return httpx.Response(401)
+        if request.url.path == "/api/v3/athlete":
+            return httpx.Response(200, json={"id": 9002, "bikes": [], "shoes": []})
+        if request.url.path == "/api/v3/athletes/9002/stats":
+            return httpx.Response(200, json={"all_ride_totals": {"count": 1}})
+        if request.url.path == "/api/v3/athlete/activities":
+            return httpx.Response(200, json=[summary])
+        if request.url.path == "/api/v3/activities/7002":
+            return httpx.Response(200, json=summary)
+        if request.url.path == "/api/v3/activities/7002/streams":
+            return httpx.Response(
+                200,
+                json={
+                    "latlng": {"data": [[46.5, 11.8], [46.51, 11.81], [46.52, 11.82]]},
+                    "time": {"data": [0, 60, 120]},
+                    "altitude": {"data": [1000, 1010, 1020]},
+                },
+            )
+        return httpx.Response(404, json={"message": "Not Found"})
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_public_getaddrinfo)
+    transport = httpx.MockTransport(strava_handler)
+
+    def client_factory() -> httpx.Client:
+        return httpx.Client(transport=transport, follow_redirects=False)
+
+    now = datetime(2026, 6, 2, 12, tzinfo=UTC)
+    result = discover_queue_and_process_vault_syncs(
+        airflow_harness.session_factory,
+        airflow_harness.settings,
+        now=now,
+        http_client_factory=client_factory,
+    )
+
+    assert result["syncs_completed"] == 1
+    assert result["enrichment_jobs_queued"] == 1
+    assert result["ingest_jobs_claimed"] == 1
+    assert result["ingest_jobs_succeeded"] == 1
+    assert result["ingest_jobs_failed"] == 0
+    assert requests == [
+        "/api/v3/athlete",
+        "/api/v3/athletes/9002/stats",
+        "/api/v3/athlete/activities",
+        "/api/v3/activities/7002",
+        "/api/v3/activities/7002/streams",
+    ]
+
+    with airflow_harness.session_factory() as db:
+        activity = db.scalar(select(VaultActivity).where(VaultActivity.strava_activity_id == 7002))
+        job = db.scalar(select(IngestJob).where(IngestJob.external_object_id == 7002))
+        assert activity is not None
+        assert activity.has_gps is True
+        assert activity.bronze_object_key is not None
+        assert activity.silver_object_key is not None
+        assert activity.source_stage_id is None
+        assert job is not None and job.status == "succeeded"
+        assert db.scalars(select(Project)).all() == []
+        assert db.scalars(select(Stage)).all() == []
+        bronze = airflow_harness.store.get_bytes(activity.bronze_object_key)
+        silver = airflow_harness.store.get_bytes(activity.silver_object_key)
+        assert json.loads(bronze) == {
+            "activity": summary,
+            "streams": {
+                "latlng": {"data": [[46.5, 11.8], [46.51, 11.81], [46.52, 11.82]]},
+                "time": {"data": [0, 60, 120]},
+                "altitude": {"data": [1000, 1010, 1020]},
+            },
+        }
+        assert silver
+
+    request_count = len(requests)
+    repeated = discover_queue_and_process_vault_syncs(
+        airflow_harness.session_factory,
+        airflow_harness.settings,
+        now=now + timedelta(minutes=1),
+        http_client_factory=client_factory,
+    )
+    assert repeated["enrichment_jobs_queued"] == 0
+    assert repeated["ingest_jobs_claimed"] == 0
+    assert len(requests) == request_count
 
 
 def test_scheduler_does_not_reset_active_or_rate_limited_progress(

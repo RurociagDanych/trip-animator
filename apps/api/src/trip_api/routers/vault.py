@@ -26,6 +26,7 @@ from trip_api.library_geometry import (
     parse_area,
 )
 from trip_api.rate_limit import check_rate_limit
+from trip_api.routers.library_projects import project_reuse_eligibility
 from trip_api.schemas import (
     VaultActivityDetailOut,
     VaultActivityListItemOut,
@@ -70,7 +71,9 @@ def _stored_metric(activity: VaultActivity, field: str) -> float | None:
     return None
 
 
-def _activity_item(activity: VaultActivity) -> VaultActivityListItemOut:
+def _activity_item(
+    activity: VaultActivity, db: Session, store: StoreDep
+) -> VaultActivityListItemOut:
     return VaultActivityListItemOut(
         id=activity.id,
         name=activity.name,
@@ -95,6 +98,7 @@ def _activity_item(activity: VaultActivity) -> VaultActivityListItemOut:
                 Literal["none", "summary_polyline", "full_stream"], activity.tile_precision
             ),
         ),
+        project_reuse_eligibility=project_reuse_eligibility(db, store, activity),
     )
 
 
@@ -322,6 +326,7 @@ Selection = Annotated[LibrarySelection, Depends(library_selection)]
 @router.get("/activities", response_model=VaultActivityListOut)
 def list_vault_activities(
     db: DbSession,
+    store: StoreDep,
     selection: Selection,
     sort: str = Query(
         default="started_at",
@@ -345,7 +350,7 @@ def list_vault_activities(
     activities = list(db.scalars(page_query).all())
     total = int(db.scalar(select(func.count()).select_from(filters.subquery())) or 0)
     return VaultActivityListOut(
-        items=[_activity_item(item) for item in activities],
+        items=[_activity_item(item, db, store) for item in activities],
         total=total,
         offset=offset,
         limit=limit,
@@ -459,6 +464,7 @@ def get_vault_activity(
     activity_id: UUID,
     auth: CurrentAuth,
     db: DbSession,
+    store: StoreDep,
 ) -> VaultActivityDetailOut:
     detail_query = select(VaultActivity).where(
         VaultActivity.id == activity_id,
@@ -486,7 +492,7 @@ def get_vault_activity(
         else None
     )
     return VaultActivityDetailOut(
-        **_activity_item(activity).model_dump(),
+        **_activity_item(activity, db, store).model_dump(),
         strava_activity_id=activity.strava_activity_id,
         started_at_local=activity.started_at_local,
         utc_offset_s=activity.utc_offset_s,

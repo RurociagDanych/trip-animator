@@ -1,10 +1,18 @@
 """Behavioral coverage for private rule-based library views."""
 
-from datetime import date, timedelta
+from datetime import UTC, datetime
 from uuid import uuid4
 
+from trip_api.routers import library_views
 
-def test_saved_view_persists_rules_and_resolves_relative_dates(harness):
+
+def test_saved_view_persists_rules_and_resolves_relative_dates(harness, monkeypatch):
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 11, 21, 23, 30, tzinfo=UTC).astimezone(tz)
+
+    monkeypatch.setattr(library_views, "datetime", _FrozenDatetime)
     harness.create_user("views@example.test")
     client, csrf = harness.login_client("views@example.test")
     rules = {
@@ -26,8 +34,8 @@ def test_saved_view_persists_rules_and_resolves_relative_dates(harness):
     assert opened.status_code == 200
     assert opened.json()["resolved_filters"] == {
         "sport": "cycling",
-        "start_date": (date.today() - timedelta(days=6)).isoformat(),
-        "end_date": date.today().isoformat(),
+        "start_date": "2026-11-15",
+        "end_date": "2026-11-21",
     }
     assert opened.json()["rules"] == rules
 

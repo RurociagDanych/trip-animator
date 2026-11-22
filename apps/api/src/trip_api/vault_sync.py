@@ -445,6 +445,7 @@ def recompute_user_chronological_new_tiles(
     user_id: uuid.UUID,
 ) -> int:
     """Recompute chronological first-visit `new_tiles_z14_count` ordered by (started_at, id)."""
+    db.flush()
     activities = list(
         db.scalars(
             select(VaultActivity)
@@ -1704,6 +1705,41 @@ def prepare_vault_geometry_from_parsed_track(parsed: ParsedTrack) -> PreparedSta
         if pt.watts is not None and math.isfinite(pt.watts):
             watts.append(float(pt.watts))
     return _prepare_geometry_from_tuples(pts, elevations=elevs, heart_rates=hrs, watts=watts)
+
+
+def apply_strava_track_geometry(
+    db: Session,
+    activity: VaultActivity,
+    geometry: PreparedStageVaultGeometry,
+    *,
+    now: datetime,
+) -> None:
+    """Replace canonical geometry from original provider streams without touching project stages."""
+    if activity.source_provider != "strava":
+        raise ValueError("Original Strava geometry requires a Strava catalog activity")
+    for field in (
+        "summary_polyline",
+        "start_lat",
+        "start_lon",
+        "end_lat",
+        "end_lon",
+        "min_lat",
+        "max_lat",
+        "min_lon",
+        "max_lon",
+        "elev_high_m",
+        "elev_low_m",
+        "avg_hr_bpm",
+        "max_hr_bpm",
+        "avg_watts",
+    ):
+        setattr(activity, field, getattr(geometry, field))
+    activity.has_gps = bool(geometry.tiles_z14)
+    activity.tile_precision = "full_stream" if activity.has_gps else "none"
+    activity.tile_count_z14 = _replace_activity_z14_tiles(
+        db, vault_activity_id=activity.id, user_id=activity.user_id, tiles=geometry.tiles_z14
+    )
+    activity.synced_at = ensure_utc(now)
 
 
 def prepare_vault_geometry_from_dataframe(df: pl.DataFrame) -> PreparedStageVaultGeometry:
