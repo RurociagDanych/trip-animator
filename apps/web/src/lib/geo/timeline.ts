@@ -337,11 +337,9 @@ function indexRealTimestamps(points: readonly TelemetryTimelinePoint[]): RealTim
   const distM: number[] = [];
   const tsMs: number[] = [];
   for (const pt of points) {
-    if (!pt.ts_utc || !Number.isFinite(pt.cum_dist_m)) continue;
-    const ms = Date.parse(pt.ts_utc);
-    if (!Number.isFinite(ms)) continue;
+    if (!Number.isFinite(pt.cum_dist_m) || !Number.isFinite(pt.ts_ms)) continue;
     distM.push(pt.cum_dist_m);
-    tsMs.push(ms);
+    tsMs.push(pt.ts_ms);
   }
   return distM.length >= 2 ? { distM, tsMs } : null;
 }
@@ -370,7 +368,7 @@ function interpolateRealTimestampMs(index: RealTimestampIndex, distM: number): n
 
 /**
  * Builds timeline stages from geometry and chart data. When `timeline` carries real
- * `ts_utc` samples for a stage, point timestamps are interpolated from them; otherwise
+ * `ts_ms` samples for a stage, point timestamps are interpolated from them; otherwise
  * they fall back to the constant-speed estimate over the stage duration.
  */
 export function buildTimelineFromProject(

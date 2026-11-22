@@ -61,6 +61,7 @@ from trip_api.services import (
     stage_chart_cache_key,
     stage_events_cache_key,
     stage_lod_cache_key,
+    stage_timeline_cache_key,
     stage_to_out,
     write_audit_event,
 )
@@ -735,6 +736,7 @@ def delete_stage(
         silver_key,
         stage_lod_cache_key(project.id, stage_id),
         stage_chart_cache_key(project.id, stage_id),
+        stage_timeline_cache_key(project.id, stage_id),
         stage_events_cache_key(project.id, stage_id),
     ]
     if shared_bronze is None:

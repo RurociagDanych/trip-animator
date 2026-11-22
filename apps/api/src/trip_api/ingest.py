@@ -40,6 +40,7 @@ from trip_api.services import (
     stage_chart_cache_key,
     stage_events_cache_key,
     stage_lod_cache_key,
+    stage_timeline_cache_key,
     write_audit_event,
 )
 from trip_api.storage import ObjectStore
@@ -404,6 +405,7 @@ def _delete_stage_and_artifacts(db: Session, store: ObjectStore, stage: Stage) -
         stage.silver_object_key,
         stage_lod_cache_key(stage.project_id, stage.id),
         stage_chart_cache_key(stage.project_id, stage.id),
+        stage_timeline_cache_key(stage.project_id, stage.id),
         stage_events_cache_key(stage.project_id, stage.id),
     ]
     db.delete(stage)

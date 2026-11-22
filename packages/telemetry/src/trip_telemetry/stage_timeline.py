@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -12,8 +13,19 @@ import duckdb
 import numpy as np
 import numpy.typing as npt
 
-# Same budget as the render manifest so the editor and the rendered film select identical points.
-STAGE_TIMELINE_MAX_POINTS = 12_000
+# Per-stage budget for the editor timeline (distance to timestamp samples).
+# The web app interpolates linearly between kept points, so the placement error of a
+# photo is bounded by the spacing between neighbours. 2_500 points keep the mean spacing
+# at 80 m on a 200 km stage (about 100 m at 250 km) and the JSON near 120 KB. Raw steps
+# longer than the gap thresholds below are always kept on both sides so a pause or a
+# recording hole is never interpolated across. The render manifest keeps its own, larger
+# budget and is unaffected.
+STAGE_TIMELINE_MAX_POINTS = 2_500
+
+# A raw step covering more than this distance or time is treated as a gap whose two
+# endpoints must survive downsampling.
+TIMELINE_GAP_DIST_M = 100.0
+TIMELINE_GAP_TIME_S = 300.0
 
 
 @dataclass(frozen=True)
@@ -37,14 +49,10 @@ class StageTelemetryRow:
 
 @dataclass(frozen=True)
 class StageTimelinePoint:
-    """Downsampled stage sample carrying the real UTC timestamp recorded for that point."""
+    """Downsampled stage sample: trim-relative distance and real UTC epoch milliseconds."""
 
-    lat: float
-    lon: float
     cum_dist_m: float
-    elapsed_s: float | None
-    ts_utc: str | None
-    segment_idx: int
+    ts_ms: int
 
 
 def validate_trim(trim_start_s: float | None, trim_end_s: float | None) -> None:
@@ -71,6 +79,13 @@ def format_ts_iso(value: Any) -> str | None:
         utc_dt = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
         return utc_dt.isoformat().replace("+00:00", "Z")
     return None
+
+
+def iso_to_epoch_ms(ts_iso: str) -> int:
+    """Convert an ISO 8601 UTC string produced by `format_ts_iso` to epoch milliseconds."""
+    parsed = datetime.fromisoformat(ts_iso.replace("Z", "+00:00"))
+    delta = parsed - _UNIX_EPOCH_UTC
+    return (delta.days * 86_400 + delta.seconds) * 1000 + delta.microseconds // 1000
 
 
 def fill_stride_indices(
@@ -150,8 +165,12 @@ def vectorized_lttb_indices(
     threshold: int,
     *,
     segment_idx: npt.NDArray[np.int32] | None = None,
+    keep_indices: Iterable[int] | None = None,
 ) -> list[int]:
-    """Vectorized NumPy LTTB downsampling preserving endpoints and segment transitions."""
+    """Vectorized NumPy LTTB downsampling preserving endpoints and segment transitions.
+
+    `keep_indices` are additional indices that must survive selection (budget permitting).
+    """
     n = int(len(xs))
     if threshold <= 0 or n == 0:
         return []
@@ -163,6 +182,8 @@ def vectorized_lttb_indices(
         return [0, n - 1]
 
     must_keep: set[int] = {0, n - 1}
+    if keep_indices is not None:
+        must_keep.update(int(i) for i in keep_indices if 0 <= int(i) < n)
     if segment_idx is not None and len(segment_idx) == n:
         changes = np.flatnonzero(segment_idx[1:] != segment_idx[:-1])
         for idx in changes:
@@ -225,14 +246,43 @@ def vectorized_lttb_indices(
     return sorted(must_keep | chosen_extras)
 
 
+def timeline_gap_indices(
+    cum_dist: npt.NDArray[np.float64],
+    dist_valid: npt.NDArray[np.bool_],
+    ts_us: npt.NDArray[np.int64],
+    ts_valid: npt.NDArray[np.bool_],
+    max_steps: int,
+) -> list[int]:
+    """Return both endpoints of the largest raw steps exceeding the timeline gap thresholds.
+
+    At most `max_steps` steps are kept, ranked by how far they exceed the thresholds.
+    """
+    if len(cum_dist) < 2 or max_steps <= 0:
+        return []
+    both_dist = dist_valid[1:] & dist_valid[:-1]
+    both_ts = ts_valid[1:] & ts_valid[:-1]
+    d_dist = np.where(both_dist, cum_dist[1:] - cum_dist[:-1], 0.0)
+    d_time = np.where(both_ts, (ts_us[1:] - ts_us[:-1]) / 1_000_000.0, 0.0)
+    score = np.maximum(d_dist / TIMELINE_GAP_DIST_M, d_time / TIMELINE_GAP_TIME_S)
+    steps = np.flatnonzero(score > 1.0)
+    if len(steps) > max_steps:
+        steps = steps[np.argsort(score[steps])[-max_steps:]]
+    return sorted({int(i) for i in steps} | {int(i) + 1 for i in steps})
+
+
 def query_stage_telemetry_rows(
     parquet_path: Path,
     *,
     trim_start_s: float | None = None,
     trim_end_s: float | None = None,
     max_points: int = 12_000,
+    keep_gaps: bool = False,
 ) -> tuple[dict[str, Any], list[StageTelemetryRow]]:
-    """Single-pass DuckDB `.fetchnumpy()` + vectorized NumPy KPIs and LTTB downsampling."""
+    """Single-pass DuckDB `.fetchnumpy()` + vectorized NumPy KPIs and LTTB downsampling.
+
+    With `keep_gaps`, both endpoints of long raw steps (see `timeline_gap_indices`) are
+    kept. The default leaves selection identical to the render manifest.
+    """
     validate_trim(trim_start_s, trim_end_s)
 
     con = duckdb.connect(database=":memory:")
@@ -419,8 +469,13 @@ def query_stage_telemetry_rows(
         else:
             lttb_ys = np.where(speed_valid, speed_mps, 0.0)
 
+        gap_indices = (
+            timeline_gap_indices(cum_dist, dist_valid, ts_us, ts_valid, max_points // 4)
+            if keep_gaps
+            else None
+        )
         selected_indices = vectorized_lttb_indices(
-            lttb_xs, lttb_ys, max_points, segment_idx=segment_idx
+            lttb_xs, lttb_ys, max_points, segment_idx=segment_idx, keep_indices=gap_indices
         )
     else:
         selected_indices = list(range(n))
@@ -465,25 +520,25 @@ def query_stage_timeline_points(
     trim_end_s: float | None = None,
     max_points: int = STAGE_TIMELINE_MAX_POINTS,
 ) -> list[StageTimelinePoint]:
-    """Return trim-relative, LTTB-selected points with real UTC timestamps from Silver Parquet.
+    """Return trim-relative points with real UTC epoch milliseconds from Silver Parquet.
 
-    Selection and distance origin match the render manifest. Raises ValueError for an
-    invalid trim or a stage without active telemetry points.
+    Distance origin and trim handling match the render manifest; selection additionally
+    keeps both sides of long raw gaps. Points without a timestamp are dropped, and
+    distances are rounded to 0.1 m. Raises ValueError for an invalid trim or a stage
+    without active telemetry points.
     """
     _, rows = query_stage_telemetry_rows(
         parquet_path,
         trim_start_s=trim_start_s,
         trim_end_s=trim_end_s,
         max_points=max_points,
+        keep_gaps=True,
     )
     return [
         StageTimelinePoint(
-            lat=row.lat,
-            lon=row.lon,
-            cum_dist_m=row.cum_dist_m,
-            elapsed_s=row.elapsed_s,
-            ts_utc=row.ts_utc,
-            segment_idx=row.segment_idx,
+            cum_dist_m=round(row.cum_dist_m, 1),
+            ts_ms=iso_to_epoch_ms(row.ts_utc),
         )
         for row in rows
+        if row.ts_utc is not None
     ]

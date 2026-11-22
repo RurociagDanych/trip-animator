@@ -511,12 +511,9 @@ export interface TelemetryGeometryOut {
 }
 
 export interface TelemetryTimelinePoint {
-  lat: number;
-  lon: number;
   cum_dist_m: number;
-  elapsed_s: number | null;
-  ts_utc: string | null;
-  segment_idx: number;
+  /** UTC epoch milliseconds recorded for this point. */
+  ts_ms: number;
 }
 
 export interface TelemetryTimelineStage {

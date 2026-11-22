@@ -18,8 +18,8 @@ T0 = datetime(2001, 6, 1, 8, 0, 0, tzinfo=UTC)
 def _write_parquet(tmp_path: Path, count: int) -> Path:
     points = [
         TrackPoint(
-            lat=0.1 + (i % 37) * 0.0007,
-            lon=0.2 + i * 0.0009,
+            lat=0.1 + (i % 37) * 0.00002,
+            lon=0.2 + i * 0.00003,
             elev_m=1000.0 + (i * 7 % 23),
             ts_utc=T0 + timedelta(seconds=i * 3),
             segment_idx=0 if i < count // 2 else 1,
@@ -40,6 +40,10 @@ def _write_parquet(tmp_path: Path, count: int) -> Path:
     return path
 
 
+def _iso_to_ms(ts_iso: str) -> int:
+    return round(datetime.fromisoformat(ts_iso.replace("Z", "+00:00")).timestamp() * 1000)
+
+
 def test_timeline_points_match_manifest_extraction_for_same_input(tmp_path: Path) -> None:
     path = _write_parquet(tmp_path, 400)
 
@@ -47,11 +51,22 @@ def test_timeline_points_match_manifest_extraction_for_same_input(tmp_path: Path
         _, manifest_points = query_stage_kpis_and_manifest_points(path, max_points=budget)
         timeline_points = query_stage_timeline_points(path, max_points=budget)
 
+        # The timeline only exposes distance and time; compare that subset. Steps stay
+        # below the gap thresholds, so gap retention adds nothing and selection matches.
         assert len(timeline_points) == len(manifest_points)
         for timeline_pt, manifest_pt in zip(timeline_points, manifest_points, strict=True):
-            assert timeline_pt.lat == manifest_pt.lat
-            assert timeline_pt.lon == manifest_pt.lon
-            assert timeline_pt.cum_dist_m == manifest_pt.cum_dist_m
-            assert timeline_pt.elapsed_s == manifest_pt.elapsed_s
-            assert timeline_pt.ts_utc == manifest_pt.ts_utc
-            assert timeline_pt.segment_idx == manifest_pt.segment_idx
+            assert manifest_pt.ts_utc is not None
+            assert timeline_pt.cum_dist_m == round(manifest_pt.cum_dist_m, 1)
+            assert timeline_pt.ts_ms == _iso_to_ms(manifest_pt.ts_utc)
+
+
+def test_timeline_points_are_a_subset_of_full_manifest_points(
+    tmp_path: Path,
+) -> None:
+    path = _write_parquet(tmp_path, 400)
+    _, full = query_stage_kpis_and_manifest_points(path, max_points=100_000)
+    full_pairs = {(round(p.cum_dist_m, 1), _iso_to_ms(p.ts_utc)) for p in full if p.ts_utc}
+
+    timeline_points = query_stage_timeline_points(path, max_points=60)
+
+    assert {(p.cum_dist_m, p.ts_ms) for p in timeline_points} <= full_pairs

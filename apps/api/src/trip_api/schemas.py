@@ -399,12 +399,8 @@ class TelemetryGeometryOut(BaseModel):
 
 
 class TelemetryTimelinePointOut(BaseModel):
-    lat: float
-    lon: float
     cum_dist_m: float
-    elapsed_s: float | None = None
-    ts_utc: str | None = None
-    segment_idx: int = 0
+    ts_ms: int
 
 
 class TelemetryTimelineStageOut(BaseModel):

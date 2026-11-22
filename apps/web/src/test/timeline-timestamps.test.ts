@@ -78,32 +78,20 @@ function makeRealTimeline(): TelemetryTimelineOut {
   const points: TelemetryTimelineOut["stages"][number]["points"] = [];
   for (let km = 0; km <= 60; km += 1) {
     points.push({
-      lat: 0,
-      lon: lonAtKm(km),
       cum_dist_m: km * 1000,
-      elapsed_s: km * 180,
-      ts_utc: new Date(STAGE_START_MS + km * 180_000).toISOString(),
-      segment_idx: 0,
+      ts_ms: STAGE_START_MS + km * 180_000,
     });
   }
   const stopEndS = 3 * 3600 + 2 * 3600;
   points.push({
-    lat: 0,
-    lon: lonAtKm(60),
     cum_dist_m: 60_000,
-    elapsed_s: stopEndS,
-    ts_utc: new Date(STAGE_START_MS + stopEndS * 1000).toISOString(),
-    segment_idx: 0,
+    ts_ms: STAGE_START_MS + stopEndS * 1000,
   });
   for (let km = 61; km <= 120; km += 1) {
     const elapsedS = stopEndS + (km - 60) * 180;
     points.push({
-      lat: 0,
-      lon: lonAtKm(km),
       cum_dist_m: km * 1000,
-      elapsed_s: elapsedS,
-      ts_utc: new Date(STAGE_START_MS + elapsedS * 1000).toISOString(),
-      segment_idx: 0,
+      ts_ms: STAGE_START_MS + elapsedS * 1000,
     });
   }
   return {

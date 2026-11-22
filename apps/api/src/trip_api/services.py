@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
+import json
 import logging
 import tempfile
 import uuid
@@ -1040,8 +1042,15 @@ def persist_or_delete_stage_chart_cache(
     stage: Stage,
     gz_bytes: bytes,
 ) -> None:
-    """Write precomputed `.chart.json.gz` bytes, deleting any stale cache if write fails."""
+    """Write precomputed `.chart.json.gz` bytes, deleting any stale cache if write fails.
+
+    Also drops the stage timeline cache, which is derived from the same Silver data.
+    """
     chart_key = stage_chart_cache_key(stage.project_id, stage.id)
+    try:
+        store.delete(stage_timeline_cache_key(stage.project_id, stage.id))
+    except Exception:
+        logger.warning("Failed to delete stale timeline cache for stage %s", stage.id)
     try:
         store.put_bytes(chart_key, gz_bytes, content_type="application/gzip")
     except Exception:
@@ -1212,27 +1221,93 @@ def build_project_geometry_collection(
     return TelemetryGeometryOut(project_id=project_id, features=features)
 
 
-def _build_stage_timeline(store: ObjectStore, stage: Stage) -> TelemetryTimelineStageOut:
-    with materialize_silver_parquet(store, stage) as parquet_path:
-        points = query_stage_timeline_points(
-            parquet_path,
+TIMELINE_CACHE_SCHEMA_VERSION = 1
+
+
+def stage_timeline_cache_key(project_id: uuid.UUID, stage_id: uuid.UUID) -> str:
+    """Return the object storage key for a stage's compact timeline cache.
+
+    The schema version is part of the key so a payload change never reads stale entries.
+    """
+    return f"silver/{project_id}/{stage_id}.timeline.v{TIMELINE_CACHE_SCHEMA_VERSION}.json.gz"
+
+
+def build_timeline_cache_payload(
+    points: list[TelemetryTimelinePointOut],
+    *,
+    trim_start_s: float | None,
+    trim_end_s: float | None,
+) -> bytes:
+    """Serialize timeline points as `[cum_dist_m, ts_ms]` pairs into gzip JSON bytes."""
+    envelope = {
+        "v": TIMELINE_CACHE_SCHEMA_VERSION,
+        "trim_start_s": trim_start_s,
+        "trim_end_s": trim_end_s,
+        "points": [[pt.cum_dist_m, pt.ts_ms] for pt in points],
+    }
+    raw_json = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+    return gzip.compress(raw_json, compresslevel=6, mtime=0)
+
+
+def parse_timeline_cache_payload(
+    raw_gz_bytes: bytes,
+    *,
+    trim_start_s: float | None,
+    trim_end_s: float | None,
+) -> list[TelemetryTimelinePointOut] | None:
+    """Decode a timeline cache entry; return None when corrupt, stale or for other trim bounds."""
+    try:
+        data = json.loads(gzip.decompress(raw_gz_bytes).decode("utf-8"))
+        if not isinstance(data, dict) or data.get("v") != TIMELINE_CACHE_SCHEMA_VERSION:
+            return None
+        if data.get("trim_start_s") != trim_start_s or data.get("trim_end_s") != trim_end_s:
+            return None
+        pts = data["points"]
+        if not isinstance(pts, list):
+            return None
+        return [TelemetryTimelinePointOut(cum_dist_m=p[0], ts_ms=p[1]) for p in pts]
+    except Exception:
+        return None
+
+
+def _build_stage_timeline(
+    store: ObjectStore,
+    project_id: uuid.UUID,
+    stage: Stage,
+) -> TelemetryTimelineStageOut:
+    cache_key = stage_timeline_cache_key(project_id, stage.id)
+    points: list[TelemetryTimelinePointOut] | None = None
+    try:
+        points = parse_timeline_cache_payload(
+            store.get_bytes(cache_key),
             trim_start_s=stage.trim_start_s,
             trim_end_s=stage.trim_end_s,
         )
-    return TelemetryTimelineStageOut(
-        stage_id=stage.id,
-        stage_order=stage.stage_order,
-        points=[
-            TelemetryTimelinePointOut(
-                lat=pt.lat,
-                lon=pt.lon,
-                cum_dist_m=pt.cum_dist_m,
-                elapsed_s=pt.elapsed_s,
-                ts_utc=pt.ts_utc,
-                segment_idx=pt.segment_idx,
+    except Exception:
+        points = None
+
+    if points is None:
+        with materialize_silver_parquet(store, stage) as parquet_path:
+            raw_points = query_stage_timeline_points(
+                parquet_path,
+                trim_start_s=stage.trim_start_s,
+                trim_end_s=stage.trim_end_s,
             )
-            for pt in points
-        ],
+        points = [
+            TelemetryTimelinePointOut(cum_dist_m=pt.cum_dist_m, ts_ms=pt.ts_ms) for pt in raw_points
+        ]
+        try:
+            store.put_bytes(
+                cache_key,
+                build_timeline_cache_payload(
+                    points, trim_start_s=stage.trim_start_s, trim_end_s=stage.trim_end_s
+                ),
+                content_type="application/gzip",
+            )
+        except Exception:
+            logger.warning("Could not persist timeline cache %s", cache_key)
+    return TelemetryTimelineStageOut(
+        stage_id=stage.id, stage_order=stage.stage_order, points=points
     )
 
 
@@ -1241,14 +1316,16 @@ def build_project_timeline(
     project_id: uuid.UUID,
     stages: list[Stage],
 ) -> TelemetryTimelineOut:
-    """Return per-stage timeline points with real `ts_utc` values, resolved in parallel."""
+    """Return per-stage compact `cum_dist_m` / `ts_ms` points, resolved in parallel and cached."""
     if not stages:
         return TelemetryTimelineOut(project_id=project_id, stages=[])
     if len(stages) == 1:
-        resolved = [_build_stage_timeline(store, stages[0])]
+        resolved = [_build_stage_timeline(store, project_id, stages[0])]
     else:
         with ThreadPoolExecutor(max_workers=min(8, len(stages))) as pool:
-            resolved = list(pool.map(lambda st: _build_stage_timeline(store, st), stages))
+            resolved = list(
+                pool.map(lambda st: _build_stage_timeline(store, project_id, st), stages)
+            )
     return TelemetryTimelineOut(project_id=project_id, stages=resolved)
 
 
