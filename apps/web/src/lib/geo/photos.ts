@@ -154,6 +154,14 @@ function matchByTimestamp(
   }
   const a = bestStagePts[lo]!;
   const b = bestStagePts[hi]!;
+  if (a.segmentIdx !== b.segmentIdx) {
+    // The marker holds the last point of a segment until it reaches the next one, so a
+    // photo inside a track gap must sit on that same point to appear when the marker does.
+    const metricA = metricValueOf(a, useTimeMetric);
+    const metricSpan = maxMetric - minMetric;
+    const progress = metricSpan > 0 ? clamp01((metricA - minMetric) / metricSpan) : 0;
+    return { position: [a.lonUnwrapped, a.lat], progress };
+  }
   const tsSpan = (b.tsUtcMs ?? 0) - (a.tsUtcMs ?? 0);
   const t = tsSpan > 0 ? clamp01((takenAtMs - (a.tsUtcMs ?? 0)) / tsSpan) : 0;
 
