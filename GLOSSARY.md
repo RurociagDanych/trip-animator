@@ -23,3 +23,12 @@ _Avoid_: Activity Library, training history
 **Project-local Split**:
 A division of an activity's material into segments for one trip or animation project. It does not divide the library activity or change its use in other projects.
 _Avoid_: Splitting the library activity
+
+## Trip Playback
+
+**Cinematic Photo Stop**:
+A moment in a trip film when the route marker stops, the map zooms in and gives way to one or more full-frame photos, and the journey resumes after the return to the map.
+_Avoid_: Cinematic Ken Burns (a photo card style)
+
+**Photo Group**:
+A sequence of route photos shown in a single Cinematic Photo Stop because each consecutive pair is within the chosen marker travel-time threshold.
