@@ -9,6 +9,7 @@ import {
 } from "../lib/api/types";
 import { parseResolutionPreset } from "../lib/geo/format";
 import {
+  computeJourneyDurationS,
   computePhotoStopTotalDurationS,
   evaluateTimelineSchedule,
   matchPhotosToTimeline,
@@ -108,19 +109,24 @@ export function RenderHarnessPage() {
     [manifest.photos, timelineStages, manifest.spec],
   );
 
-  const durationS = useMemo(
+  const filmDurationS = useMemo(
     () =>
-      manifest.spec.photo_card_style === "cinematic_stop" ? computePhotoStopTotalDurationS(
+      computePhotoStopTotalDurationS(
         manifest.spec,
         matchedPhotos,
         timelineStages,
         manifest.is_preview,
-      ) : manifest.duration_s,
-    [manifest.spec, matchedPhotos, timelineStages, manifest.is_preview, manifest.duration_s],
+      ),
+    [manifest.spec, matchedPhotos, timelineStages, manifest.is_preview],
   );
-  const totalFrames = Math.max(1, manifest.spec.photo_card_style === "cinematic_stop"
-    ? Math.round(durationS * manifest.fps)
-    : manifest.total_frames);
+  const hasPhotoStops =
+    manifest.spec.photo_card_style === "cinematic_stop" &&
+    filmDurationS > computeJourneyDurationS(manifest.spec, manifest.is_preview) + 1e-9;
+  const durationS = hasPhotoStops ? filmDurationS : manifest.duration_s;
+  const totalFrames = Math.max(
+    1,
+    hasPhotoStops ? Math.round(durationS * manifest.fps) : manifest.total_frames,
+  );
 
   const currentTimeS = useMemo(() => {
     if (totalFrames <= 1 || durationS <= 0) {

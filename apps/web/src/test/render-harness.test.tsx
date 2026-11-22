@@ -381,7 +381,7 @@ describe("Deterministic Render Harness (/render/$jobId)", () => {
         height: 720,
         fps: 10,
         duration_s: 10,
-        total_frames: 100,
+        total_frames: 101,
         is_preview: false,
         stages: [
           {
@@ -439,7 +439,7 @@ describe("Deterministic Render Harness (/render/$jobId)", () => {
     }
 
     it.each([
-      ["no photos", [] as number[], 100],
+      ["no photos", [] as number[], 101],
       ["one photo", [0.5], 130],
       ["grouped photos", [0.5, 0.52], 153],
     ])("reports the web film frame count for %s", async (_name, progresses, frames) => {

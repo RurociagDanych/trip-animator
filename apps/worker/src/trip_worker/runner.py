@@ -35,11 +35,13 @@ from trip_worker.manifest import (
     StageRecord,
     build_render_manifest,
     chunk_manifest_key,
+    photo_asset_key,
 )
 from trip_worker.renderer import (
     RenderCancelledError,
     RenderError,
     WarmPlaywrightHost,
+    probe_manifest_frame_count,
     render_manifest_to_mp4,
 )
 from trip_worker.storage import ObjectStore, build_object_store
@@ -429,7 +431,8 @@ SELECT
     matched_lat,
     matched_lon,
     matched_progress,
-    match_method
+    match_method,
+    object_key
 FROM project_photos
 WHERE project_id = %(project_id)s
   AND enabled = TRUE
@@ -951,6 +954,7 @@ def load_project_photos(conn: DbConnection, *, project_id: uuid.UUID) -> list[Ph
             matched_lon=float(r[10]) if r[10] is not None else None,
             matched_progress=float(r[11]) if r[11] is not None else None,
             match_method=str(r[12] or "unmatched"),
+            object_key=str(r[13]) if len(r) > 13 and r[13] else "",
         )
         for r in rows
     ]
@@ -1306,6 +1310,35 @@ def _compute_spec_total_frames(spec_json: dict[str, object]) -> int:
     return max(1, round(duration_s * fps))
 
 
+FrameCountCallable = Callable[[RenderManifest, WorkerSettings, WarmPlaywrightHost | None], int]
+
+
+def probe_film_frame_count(
+    manifest: RenderManifest,
+    settings: WorkerSettings,
+    browser_host: WarmPlaywrightHost | None = None,
+) -> int:
+    """Ask the render page for the cinematic film frame count on a warm or fresh browser."""
+    if browser_host is None:
+        return asyncio.run(probe_manifest_frame_count(manifest, settings))
+
+    async def _probe_with_warm_host() -> int:
+        browser = await browser_host.acquire_browser()
+        try:
+            return await probe_manifest_frame_count(manifest, settings, browser=browser)
+        except Exception:
+            await browser_host.reset_browser()
+            raise
+
+    return browser_host.run_coro(_probe_with_warm_host())
+
+
+def _with_film_frame_count(manifest: RenderManifest, total_frames: int) -> RenderManifest:
+    return manifest.model_copy(
+        update={"total_frames": total_frames, "duration_s": total_frames / manifest.fps}
+    )
+
+
 def _load_manifest_and_photo_assets(
     conn: DbConnection,
     *,
@@ -1386,12 +1419,13 @@ def _load_pre_serialized_manifest_and_photo_assets(
             photo_id_str = str(photo.id)
             if photo_id_str not in needed_ids:
                 continue
+            asset_key = photo_asset_key(manifest.spec, photo)
             try:
-                photo_assets[photo_id_str] = store.get_bytes(photo.thumb_object_key)
+                photo_assets[photo_id_str] = store.get_bytes(asset_key)
             except FileNotFoundError:
                 logger.warning(
-                    "Photo thumbnail %s missing for project %s; skipping",
-                    photo.thumb_object_key,
+                    "Photo asset %s missing for project %s; skipping",
+                    asset_key,
                     project_id,
                 )
 
@@ -1867,6 +1901,7 @@ def process_claimed_job(
     *,
     render_fn: RenderCallable = render_manifest_to_mp4,
     browser_host: WarmPlaywrightHost | None = None,
+    frame_count_fn: FrameCountCallable = probe_film_frame_count,
 ) -> str:
     """Execute unchunked or chunked Playwright frame capture, FFmpeg encode, probe, and upload."""
     started_at = datetime.now(UTC)
@@ -1884,7 +1919,28 @@ def process_claimed_job(
         try:
             total_frames_spec = _compute_spec_total_frames(job.spec_json)
             cinematic_stops = job.spec_json.get("photo_card_style") == "cinematic_stop"
-            if not cinematic_stops and total_frames_spec > settings.chunk_threshold_frames:
+            if cinematic_stops:
+
+                def _load_probe_manifest(
+                    conn: DbConnection,
+                ) -> tuple[bool, RenderManifest | None, dict[str, bytes]]:
+                    return _load_manifest_and_photo_assets(
+                        conn,
+                        job_id=job.id,
+                        project_id=job.project_id,
+                        spec_json=job.spec_json,
+                        settings=settings,
+                        store=store,
+                        load_assets=False,
+                    )
+
+                probe_cancelled, probe_manifest, _ = lease.run(_load_probe_manifest)
+                if probe_cancelled or probe_manifest is None:
+                    return "cancelled"
+                if probe_manifest.photos:
+                    total_frames_spec = frame_count_fn(probe_manifest, settings, browser_host)
+
+            if total_frames_spec > settings.chunk_threshold_frames:
 
                 def _prepare_chunked(
                     conn: DbConnection,
@@ -1903,6 +1959,8 @@ def process_claimed_job(
                     )
                     if _cancelled or _manifest is None:
                         return (True, False)
+                    if cinematic_stops:
+                        _manifest = _with_film_frame_count(_manifest, total_frames_spec)
                     manifest_key = chunk_manifest_key(job.id)
                     store.put_bytes(
                         manifest_key,
@@ -1971,6 +2029,8 @@ def process_claimed_job(
             cancelled_at_start, manifest, photo_assets = lease.run(_load_job_inputs)
             if cancelled_at_start or manifest is None:
                 return "cancelled"
+            if cinematic_stops:
+                manifest = _with_film_frame_count(manifest, total_frames_spec)
 
             output_key = f"outputs/{job.id}.mp4"
             thumbnail_key = f"outputs/{job.id}.webp"
@@ -1982,22 +2042,13 @@ def process_claimed_job(
                     mp4_path = tmp_root / f"{job.id}.mp4"
                     thumb_path = tmp_root / f"{job.id}.webp"
 
-                    expected_duration_s = manifest.duration_s
-
-                    def track_render_progress(completed_frames: int, total_frames: int) -> bool:
-                        nonlocal expected_duration_s
-                        expected_duration_s = total_frames / manifest.fps
-                        return lease.on_render_progress(completed_frames, total_frames)
-
                     _execute_render(
                         render_fn,
                         manifest,
                         mp4_path,
                         settings,
                         browser_host=browser_host,
-                        on_progress=(
-                            track_render_progress if cinematic_stops else lease.on_render_progress
-                        ),
+                        on_progress=lease.on_render_progress,
                         is_cancelled=lease.is_cancelled,
                         photo_assets=photo_assets,
                     )
@@ -2011,8 +2062,8 @@ def process_claimed_job(
                         mp4_path,
                         expected_width=manifest.width,
                         expected_height=manifest.height,
-                        expected_duration_s=expected_duration_s,
-                        duration_tolerance_s=max(1.5, expected_duration_s * 0.25),
+                        expected_duration_s=manifest.duration_s,
+                        duration_tolerance_s=max(1.5, manifest.duration_s * 0.25),
                         timeout_seconds=settings.ffprobe_timeout_seconds,
                     )
 
@@ -2198,6 +2249,7 @@ def run_once(
     store: ObjectStore | None = None,
     render_fn: RenderCallable = render_manifest_to_mp4,
     browser_host: WarmPlaywrightHost | None = None,
+    frame_count_fn: FrameCountCallable = probe_film_frame_count,
 ) -> bool:
     """Reap expired leases, claim a ready chunk or render job (or finalize), and process it."""
     cfg = settings or WorkerSettings()
@@ -2252,6 +2304,7 @@ def run_once(
         obj_store,
         render_fn=render_fn,
         browser_host=browser_host,
+        frame_count_fn=frame_count_fn,
     )
     return True
 
