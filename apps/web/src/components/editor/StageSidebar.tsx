@@ -44,7 +44,11 @@ import {
   formatStageCalendarDate,
   formatStageTimeWindow,
 } from "../../lib/geo/format";
-import { evaluateTimelineSchedule, type MatchedPhoto } from "../../lib/geo/photos";
+import {
+  computePhotoStopTotalDurationS,
+  evaluateTimelineSchedule,
+  type MatchedPhoto,
+} from "../../lib/geo/photos";
 import type { TimelineStage } from "../../lib/geo/timeline";
 import { useEditorStore, type SidebarTab } from "../../lib/state/editor-store";
 import { PhotoStopsSection } from "./PhotoStopsSection";
@@ -1263,9 +1267,12 @@ function StageEditorForm({
         hasTimestamps: s.has_timestamps,
         points: [],
       }));
-    const effectiveDurationS = state.previewWatermark
-      ? Math.min(spec.duration_seconds, 5)
-      : spec.duration_seconds;
+    const effectiveDurationS = computePhotoStopTotalDurationS(
+      spec,
+      matchedPhotos,
+      lightweightStages,
+      state.previewWatermark,
+    );
     const { progressRatio } = evaluateTimelineSchedule(
       lightweightStages,
       matchedPhotos,

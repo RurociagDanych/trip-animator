@@ -290,6 +290,7 @@ export function ShareViewPage() {
             stages={timelineStages}
             spec={spec}
             progressRatio={schedule.progressRatio}
+            durationS={durationS}
             travelDurationS={schedule.travelDurationS}
             renderMode="interactive"
             geometryStatus={geometryStatus}
@@ -561,7 +562,8 @@ export function ShareViewPage() {
                   stages={timelineStages}
                   spec={spec}
                   progressRatio={schedule.progressRatio}
-                  travelDurationS={schedule.travelDurationS}
+                  durationS={durationS}
+            travelDurationS={schedule.travelDurationS}
                   renderMode="interactive"
                   geometryStatus={geometryStatus}
                   matchedPhotos={matchedPhotos}

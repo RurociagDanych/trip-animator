@@ -19,6 +19,7 @@ import {
   type StageOut,
 } from "../lib/api/types";
 import { computeStageProgressSpans } from "../lib/geo/camera";
+import { computePhotoStopTotalDurationS, type MatchedPhoto } from "../lib/geo/photos";
 import type { EvaluatedTimelineState } from "../lib/geo/timeline";
 import { useEditorStore } from "../lib/state/editor-store";
 
@@ -332,6 +333,63 @@ describe("Component tests: InspectorPanel, StageSidebar, ExportPanel, Statistics
         speed_multiplier: 2,
         transition_margin: 0.02,
       });
+    });
+
+    it("maps the playhead onto journey progress using the cinematic_stop film total", async () => {
+      useEditorStore.getState().resetEditor();
+      const stage1 = makeStage({ id: "stage-1", name: "Alpine Pass", stage_order: 0, distance_m: 20_000, point_count: 120 });
+      const stage2 = makeStage({ id: "stage-2", name: "Valley Roll", stage_order: 1, distance_m: 20_000, point_count: 100 });
+      const spec = createDefaultRenderSpecV2();
+      spec.duration_seconds = 20;
+      spec.intro_hold_seconds = 0;
+      spec.outro_hold_seconds = 0;
+      spec.photo_card_style = "cinematic_stop";
+      spec.photo_display_seconds = 2;
+      const photo: MatchedPhoto = {
+        id: "photo-1",
+        caption: "Fictional checkpoint",
+        width: 640,
+        height: 480,
+        takenAtUtc: null,
+        takenAtMs: null,
+        lat: null,
+        lon: null,
+        matchedPosition: [0.1, 0.1],
+        pinPosition: [0.1, 0.1],
+        matchedProgress: 0.5,
+        matchMethod: "manual",
+        src: "/photo.jpg",
+      };
+      expect(computePhotoStopTotalDurationS(spec, [photo], [])).toBe(23);
+
+      const rootRoute = createRootRoute({
+        component: () => (
+          <StageSidebar
+            projectId="proj-1"
+            stages={[stage1, stage2]}
+            selectedStageId={stage1.id}
+            spec={spec}
+            matchedPhotos={[photo]}
+            stravaConnected={false}
+            onSelectStage={vi.fn()}
+            onStageColorChange={vi.fn()}
+            onStageTransitionChange={vi.fn()}
+            onStagesMutated={vi.fn(async () => {})}
+            onOpenStravaModal={vi.fn()}
+          />
+        ),
+      });
+      const router = createRouter({
+        routeTree: rootRoute,
+        history: createMemoryHistory({ initialEntries: ["/"] }),
+      });
+      render(<RouterProvider router={router} />);
+      await screen.findByTestId("stage-split-section");
+
+      // 4.6 s of a 23 s film is 4.6 s of journey, which is progress 0.23 and 9.2 km of stage 1.
+      useEditorStore.getState().setCurrentTimeRatio(0.2);
+      fireEvent.click(screen.getByTestId("stage-split-use-playhead"));
+      expect((screen.getByTestId("stage-split-slider") as HTMLInputElement).value).toBe("9200");
     });
 
     it("splits a stage with slider readout, playhead snapping, other-stage notice, custom names, and Part 2 selection", async () => {

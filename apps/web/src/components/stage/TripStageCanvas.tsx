@@ -59,7 +59,9 @@ import {
   sanitizeMapStyle,
 } from "../../lib/geo/map-config";
 import {
+  computeJourneyDurationS,
   progressRatioToTimeRatio,
+  progressToJourneyTimeS,
   type ActivePhotoDisplay,
   type MatchedPhoto,
 } from "../../lib/geo/photos";
@@ -776,9 +778,18 @@ export function TripStageCanvas({
     return () => observer.disconnect();
   }, [renderMode, exactSize]);
 
+  const isCinematicStop = spec.photo_card_style === "cinematic_stop";
+  const journeyDurationS = useMemo(
+    () =>
+      isCinematicStop
+        ? computeJourneyDurationS(spec, isPreview || spec.is_preview)
+        : durationS,
+    [isCinematicStop, spec, isPreview, durationS],
+  );
+
   const evaluated = useMemo(
-    () => evaluateTimeline(stages, spec, progressRatio, { durationS, isPreview }),
-    [stages, spec, progressRatio, durationS, isPreview],
+    () => evaluateTimeline(stages, spec, progressRatio, { durationS: journeyDurationS, isPreview }),
+    [stages, spec, progressRatio, journeyDurationS, isPreview],
   );
 
   const mappedClimbs = useMemo(
@@ -815,6 +826,9 @@ export function TripStageCanvas({
     const effectivePreview = isPreview || spec.is_preview;
     const toActiveTimeS = (p: number) => {
       const clampedP = Math.min(1 - 1e-6, Math.max(1e-6, Number.isFinite(p) ? p : 0));
+      if (isCinematicStop) {
+        return progressToJourneyTimeS(spec, stages, clampedP, effectivePreview);
+      }
       return (
         progressRatioToTimeRatio(
           matchedPhotos,
@@ -859,6 +873,7 @@ export function TripStageCanvas({
     reachedClimbs,
     durationS,
     isPreview,
+    isCinematicStop,
     matchedPhotos,
     stages,
     evaluated.progressRatio,
@@ -883,7 +898,7 @@ export function TripStageCanvas({
         ? computeAdaptiveFollowCamera(stages, spec, evaluated.progressRatio, {
             viewportWidth: viewportSize.width,
             viewportHeight: viewportSize.height,
-            durationS,
+            durationS: journeyDurationS,
             travelDurationS,
             isPreview,
             bounds: evaluated.bounds,
@@ -898,7 +913,7 @@ export function TripStageCanvas({
       stageFocus.targetZoom,
       viewportSize.width,
       viewportSize.height,
-      durationS,
+      journeyDurationS,
       travelDurationS,
       isPreview,
     ],
@@ -2249,7 +2264,7 @@ export function TripStageCanvas({
       {spec.photo_card_style === "cinematic_stop" && activePhoto && (activePhoto.opacity > 0 || activePhoto.outgoingPhoto) ? (
         <div data-testid="cinematic-photo-stop" className="pointer-events-none absolute inset-0 z-50 overflow-hidden">
           {(activePhoto.outgoingPhoto ? [activePhoto.outgoingPhoto, activePhoto.photo] : [activePhoto.photo]).map((photo) => (
-            <div key={photo.id} className="absolute inset-0 overflow-hidden bg-black" style={{
+            <div key={`${photo.id}:${matchedPhotos.indexOf(photo)}`} className="absolute inset-0 overflow-hidden bg-black" style={{
               opacity: photo === activePhoto.photo ? activePhoto.opacity : 1,
             }}>
               <img aria-hidden="true" alt="" src={photo.src} className="absolute inset-0 h-full w-full scale-110 object-cover blur-2xl" />

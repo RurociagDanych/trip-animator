@@ -247,7 +247,7 @@ export const EditorPlaybackDock = memo(function EditorPlaybackDock({
               </span>
             ) : null}
             <span className="tabular-telemetry shrink-0 text-xs text-ink-muted">
-              {(currentTimeRatio * effectiveDurationS).toFixed(1)}s / {effectiveDurationS}s
+              {(currentTimeRatio * effectiveDurationS).toFixed(1)}s / {Number(effectiveDurationS.toFixed(2))}s
             </span>
             {spec.photo_card_style === "cinematic_stop" && estimatedMovieDurationS !== undefined ? (
               <span className="text-xs text-ink-muted">Estimated movie: {estimatedMovieDurationS.toFixed(2)}s</span>
