@@ -1883,7 +1883,8 @@ def process_claimed_job(
     ) as lease:
         try:
             total_frames_spec = _compute_spec_total_frames(job.spec_json)
-            if total_frames_spec > settings.chunk_threshold_frames:
+            cinematic_stops = job.spec_json.get("photo_card_style") == "cinematic_stop"
+            if not cinematic_stops and total_frames_spec > settings.chunk_threshold_frames:
 
                 def _prepare_chunked(
                     conn: DbConnection,
@@ -1981,13 +1982,22 @@ def process_claimed_job(
                     mp4_path = tmp_root / f"{job.id}.mp4"
                     thumb_path = tmp_root / f"{job.id}.webp"
 
+                    expected_duration_s = manifest.duration_s
+
+                    def track_render_progress(completed_frames: int, total_frames: int) -> bool:
+                        nonlocal expected_duration_s
+                        expected_duration_s = total_frames / manifest.fps
+                        return lease.on_render_progress(completed_frames, total_frames)
+
                     _execute_render(
                         render_fn,
                         manifest,
                         mp4_path,
                         settings,
                         browser_host=browser_host,
-                        on_progress=lease.on_render_progress,
+                        on_progress=(
+                            track_render_progress if cinematic_stops else lease.on_render_progress
+                        ),
                         is_cancelled=lease.is_cancelled,
                         photo_assets=photo_assets,
                     )
@@ -2001,8 +2011,8 @@ def process_claimed_job(
                         mp4_path,
                         expected_width=manifest.width,
                         expected_height=manifest.height,
-                        expected_duration_s=manifest.duration_s,
-                        duration_tolerance_s=max(1.5, manifest.duration_s * 0.25),
+                        expected_duration_s=expected_duration_s,
+                        duration_tolerance_s=max(1.5, expected_duration_s * 0.25),
                         timeout_seconds=settings.ffprobe_timeout_seconds,
                     )
 

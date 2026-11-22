@@ -514,6 +514,7 @@ export function InspectorPanel({
                       <option value="corner">Corner card</option>
                       <option value="polaroid">Polaroid + pin leader</option>
                       <option value="cinematic">Cinematic Ken Burns</option>
+                      <option value="cinematic_stop">Cinematic Photo Stop</option>
                     </select>
                   </label>
 
@@ -535,7 +536,23 @@ export function InspectorPanel({
                     />
                   </label>
 
-                  <label className="flex items-center justify-between cursor-pointer">
+                  {spec.photo_card_style === "cinematic_stop" ? (
+                    <label className="flex items-center justify-between gap-2">
+                      <span className="text-ink">Group photos within (seconds)</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={180}
+                        step="any"
+                        value={spec.photo_group_gap_seconds}
+                        onChange={(e) => {
+                          const gap = e.currentTarget.valueAsNumber;
+                          if (Number.isFinite(gap)) onUpdateSpec({ photo_group_gap_seconds: Math.min(180, Math.max(0, gap)) });
+                        }}
+                        className="w-20 rounded-md border border-border bg-elevated px-2 py-1 text-ink"
+                      />
+                    </label>
+                  ) : <label className="flex items-center justify-between cursor-pointer">
                     <span className="text-ink">Pause timeline on photos</span>
                     <input
                       type="checkbox"
@@ -543,7 +560,7 @@ export function InspectorPanel({
                       onChange={(e) => onUpdateSpec({ pause_on_photo: e.currentTarget.checked })}
                       className="accent-sky-accent"
                     />
-                  </label>
+                  </label>}
                 </div>
               ) : null}
             </div>

@@ -112,6 +112,7 @@ export interface TripStageCanvasProps {
   geometryStatus?: CanvasGeometryStatus;
   matchedPhotos?: readonly MatchedPhoto[];
   activePhoto?: ActivePhotoDisplay | null;
+  cinematicMapZoom?: number;
   climbs?: readonly (ClimbHighlightOut | ManifestClimb)[];
   pinModeActive?: boolean;
   onMapPinClick?: (lngLat: [number, number]) => void;
@@ -717,6 +718,7 @@ export function TripStageCanvas({
   geometryStatus,
   matchedPhotos = EMPTY_MATCHED_PHOTOS,
   activePhoto = null,
+  cinematicMapZoom = 0,
   climbs = EMPTY_CLIMBS,
   pinModeActive = false,
   onMapPinClick,
@@ -1043,7 +1045,7 @@ export function TripStageCanvas({
         viewportH: viewportSize.height,
         compact: renderMode === "interactive",
         isPreview: isPreview || spec.is_preview,
-        hasActivePhoto: Boolean(activePhoto && activePhoto.photo.src),
+        hasActivePhoto: spec.photo_card_style !== "cinematic_stop" && Boolean(activePhoto?.photo.src),
         hasActiveChapterCard,
         hasActiveFinalePoster,
         climbMarkers: activeClimbs,
@@ -1761,6 +1763,13 @@ export function TripStageCanvas({
       className={wrapperClass}
       style={wrapperStyle}
     >
+      <div
+        className={cinematicMapZoom > 0 ? "absolute inset-0" : "contents"}
+        style={cinematicMapZoom > 0 ? {
+          transform: `scale(${1 + 0.65 * cinematicMapZoom})`,
+          transformOrigin: projectedMarker ? `${projectedMarker.x}px ${projectedMarker.y}px` : "center",
+        } : undefined}
+      >
       {webglAvailable ? (
         <div
           ref={mapContainerRef}
@@ -2063,7 +2072,7 @@ export function TripStageCanvas({
         </div>
       ) : null}
 
-      {activePhoto && layout.photoCard && activePhoto.opacity > 0.01 && activePhoto.photo.src ? (() => {
+      {spec.photo_card_style !== "cinematic_stop" && activePhoto && layout.photoCard && activePhoto.opacity > 0.01 && activePhoto.photo.src ? (() => {
         const cardStyle = spec.photo_card_style ?? "corner";
         const cardRect = layout.photoCard.rect;
         const activePinProj = projectedPhotos.find((p) => p.photo.id === activePhoto.photo.id);
@@ -2236,10 +2245,23 @@ export function TripStageCanvas({
         );
       })() : null}
 
+      </div>
+      {spec.photo_card_style === "cinematic_stop" && activePhoto && (activePhoto.opacity > 0 || activePhoto.outgoingPhoto) ? (
+        <div data-testid="cinematic-photo-stop" className="pointer-events-none absolute inset-0 z-50 overflow-hidden">
+          {(activePhoto.outgoingPhoto ? [activePhoto.outgoingPhoto, activePhoto.photo] : [activePhoto.photo]).map((photo) => (
+            <div key={photo.id} className="absolute inset-0 overflow-hidden bg-black" style={{
+              opacity: photo === activePhoto.photo ? activePhoto.opacity : 1,
+            }}>
+              <img aria-hidden="true" alt="" src={photo.src} className="absolute inset-0 h-full w-full scale-110 object-cover blur-2xl" />
+              <img src={photo.src} alt={photo.caption ?? "Trip photo stop"} className="absolute inset-0 h-full w-full object-contain" />
+            </div>
+          ))}
+        </div>
+      ) : null}
       {isPreview || spec.is_preview ? (
         <div
           data-testid="preview-watermark"
-          className="pointer-events-none absolute right-3 bottom-3 z-30 rounded border border-amber-accent/40 bg-canvas/75 px-2.5 py-1 text-[11px] font-semibold tracking-wider text-amber-accent backdrop-blur-sm"
+          className="pointer-events-none absolute right-3 bottom-3 z-[60] rounded border border-amber-accent/40 bg-canvas/75 px-2.5 py-1 text-[11px] font-semibold tracking-wider text-amber-accent backdrop-blur-sm"
         >
           PREVIEW • TRIP ANIMATOR
         </div>

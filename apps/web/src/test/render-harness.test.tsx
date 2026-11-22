@@ -112,7 +112,7 @@ describe("Deterministic Render Harness (/render/$jobId)", () => {
     expect(screen.getByTestId("canvas-elevation-overlay")).toHaveTextContent("2000 m");
   });
 
-  it("renders ManifestPhoto data_uri card and photo pin deterministically with pause_on_photo and adaptive multi-day zoom", async () => {
+  it.each(["corner", "cinematic_stop"] as const)("renders a %s manifest photo deterministically with adaptive zoom", async (style) => {
     const spec = createDefaultRenderSpecV2();
     spec.resolution = "1920x1080";
     spec.duration_seconds = 60;
@@ -121,6 +121,7 @@ describe("Deterministic Render Harness (/render/$jobId)", () => {
     spec.camera_mode = "follow-marker";
     spec.follow_zoom_mode = "adaptive";
     spec.show_photos = true;
+    spec.photo_card_style = style;
     spec.photo_display_seconds = 10;
     spec.pause_on_photo = true;
     spec.elevation_chart_overlay = true;
@@ -206,12 +207,20 @@ describe("Deterministic Render Harness (/render/$jobId)", () => {
     expect(renderer).toBeDefined();
     await renderer!.ready;
 
+    const cinematic = style === "cinematic_stop";
+    expect(renderer!.getFrameCount()).toBe(cinematic ? 710 : manifest.total_frames);
+    expect(screen.getByTestId("render-harness-root")).toHaveAttribute(
+      "data-total-frames",
+      String(renderer!.getFrameCount()),
+    );
+
     await act(async () => {
-      await renderer!.setFrame(300);
+      await renderer!.setFrame(cinematic ? 355 : 300);
     });
 
-    const card = screen.getByTestId("photo-stop-card");
-    expect(card).toHaveTextContent("Fictional Midpoint");
+    const card = screen.getByTestId(cinematic ? "cinematic-photo-stop" : "photo-stop-card");
+    if (cinematic) expect(screen.getByAltText("Fictional Midpoint")).toHaveClass("object-contain");
+    else expect(card).toHaveTextContent("Fictional Midpoint");
     expect(card.querySelector("img")).toHaveAttribute("src", svgDataUri);
     expect(screen.getByTestId("svg-photo-pin-photo-mid")).toBeInTheDocument();
 

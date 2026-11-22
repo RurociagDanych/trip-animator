@@ -725,6 +725,9 @@ def compute_frame_render_spans(
         return []
 
     spec = manifest.spec
+    if spec.photo_card_style == "cinematic_stop":
+        # Legacy plateau windows cannot describe the browser cinematic schedule.
+        return [FrameSpan(frame_idx=index, repeat_count=1) for index in range(eff_start, eff_end)]
     duration_s = float(manifest.duration_s)
     hold_scale = (
         min(1.0, duration_s / spec.duration_seconds)

@@ -33,6 +33,7 @@ export interface EditorPlaybackDockProps {
   pinModeActive: boolean;
   previewWatermark: boolean;
   effectiveDurationS: number;
+  estimatedMovieDurationS?: number;
   geometryStatus: CanvasGeometryStatus;
   projectTitle: string;
   onMapPinClick: (lngLat: [number, number]) => void;
@@ -54,6 +55,7 @@ export const EditorPlaybackDock = memo(function EditorPlaybackDock({
   pinModeActive,
   previewWatermark,
   effectiveDurationS,
+  estimatedMovieDurationS,
   geometryStatus,
   projectTitle,
   onMapPinClick,
@@ -110,7 +112,7 @@ export const EditorPlaybackDock = memo(function EditorPlaybackDock({
     [timelineStages, matchedPhotos, spec, currentTimeRatio, effectiveDurationS, previewWatermark],
   );
 
-  const isPausedAtPhoto = Boolean(spec.pause_on_photo && schedule.activePhoto);
+  const isPausedAtPhoto = Boolean((spec.pause_on_photo || spec.photo_card_style === "cinematic_stop") && schedule.activePhoto);
 
   const totalStats = useMemo(
     () =>
@@ -167,6 +169,7 @@ export const EditorPlaybackDock = memo(function EditorPlaybackDock({
           geometryStatus={geometryStatus}
           matchedPhotos={matchedPhotos}
           activePhoto={schedule.activePhoto}
+          cinematicMapZoom={schedule.cinematicMapZoom}
           climbs={climbs}
           pinModeActive={pinModeActive}
           onMapPinClick={onMapPinClick}
@@ -246,6 +249,9 @@ export const EditorPlaybackDock = memo(function EditorPlaybackDock({
             <span className="tabular-telemetry shrink-0 text-xs text-ink-muted">
               {(currentTimeRatio * effectiveDurationS).toFixed(1)}s / {effectiveDurationS}s
             </span>
+            {spec.photo_card_style === "cinematic_stop" && estimatedMovieDurationS !== undefined ? (
+              <span className="text-xs text-ink-muted">Estimated movie: {estimatedMovieDurationS.toFixed(2)}s</span>
+            ) : null}
           </div>
 
           {kpis ? (

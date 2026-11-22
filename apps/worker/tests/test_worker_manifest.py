@@ -674,6 +674,75 @@ def test_build_render_manifest_embeds_photo_data_uris_and_respects_show_photos(
     assert hidden_manifest.photos == []
 
 
+def test_cinematic_photo_stops_capture_every_frame_in_browser_timeline(tmp_path: Path) -> None:
+    store = LocalObjectStore(tmp_path)
+    project_id = uuid.uuid4()
+    stage_id = uuid.uuid4()
+    t0 = datetime(2001, 6, 5, 8, 0, 0, tzinfo=UTC)
+    key, dist, gain = _write_stage_parquet(
+        store,
+        project_id=project_id,
+        stage_id=stage_id,
+        points=[
+            TrackPoint(lat=0.10, lon=0.20, elev_m=1000.0, ts_utc=t0, segment_idx=0),
+            TrackPoint(
+                lat=0.11, lon=0.21, elev_m=1020.0, ts_utc=t0 + timedelta(seconds=30), segment_idx=0
+            ),
+        ],
+    )
+    stage = StageRecord(
+        id=stage_id,
+        project_id=project_id,
+        name="Cinematic Stop",
+        stage_order=0,
+        day_index=1,
+        trim_start_s=None,
+        trim_end_s=None,
+        silver_object_key=key,
+        distance_m=dist,
+        elevation_gain_m=gain,
+        moving_seconds=30.0,
+        elapsed_seconds=30.0,
+        has_timestamps=True,
+    )
+    photo_id = uuid.uuid4()
+    thumb_key = f"photos/{project_id}/{photo_id}_thumb.webp"
+    store.put_bytes(thumb_key, b"RIFFwebp", content_type="image/webp")
+    photo = PhotoRecord(
+        id=photo_id,
+        project_id=project_id,
+        thumb_object_key=thumb_key,
+        width=640,
+        height=480,
+        matched_progress=0.5,
+        match_method="gps",
+    )
+
+    manifest = build_render_manifest(
+        job_id=uuid.uuid4(),
+        project_id=project_id,
+        project_title="Cinematic Photo Stop",
+        spec_json={
+            "version": 2,
+            "resolution": "1280x720",
+            "fps": 30,
+            "duration_seconds": 10.0,
+            "show_photos": True,
+            "photo_card_style": "cinematic_stop",
+            "photo_display_seconds": 3.0,
+        },
+        stages=[stage],
+        store=store,
+        photos=[photo],
+    )
+
+    assert len(manifest.photos) == 1
+    assert manifest.duration_s == 10.0
+    spans = compute_frame_render_spans(manifest, total_frames_override=420)
+    assert [span.frame_idx for span in spans] == list(range(420))
+    assert all(span.repeat_count == 1 for span in spans)
+
+
 def test_single_pass_fetchnumpy_kpis_virtual_photo_urls_and_color_segments(
     tmp_path: Path,
 ) -> None:
