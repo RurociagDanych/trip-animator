@@ -10,7 +10,7 @@
 - Existing-system observations
 - Glossary
 
-Status: Discovery draft - not approved for implementation. Delivery step 1 (quota 100) is shipped on main; the playback modes are not started.
+Status: Implemented for cinematic_stop playback (editor, shared view, render worker). Quota step is on main; grouped photos use the defaults in Open decisions. Verified with unit, worker and PostgreSQL tests and a rendered one-photo MP4. Editor browser check is open.
 
 ## Confirmed requirements
 
@@ -26,13 +26,13 @@ Status: Discovery draft - not approved for implementation. Delivery step 1 (quot
 ## Delivery sequence
 
 1. Raise the photo quota to 100 per trip. (Done: photos.py MAX_PHOTOS_PER_PROJECT = 100.)
-2. First working slice: verify the entire one-photo sequence in the editor and an actual exported MP4.
-3. Complete the release with grouped photos and shared web playback. The one-photo slice does not fulfill the full release scope.
+2. First working slice: verify the entire one-photo sequence in the editor and an actual exported MP4. (Done for the MP4: one photo at progress 0.5 rendered to 8 s, 240 frames, photo visible about frames 90-145.)
+3. Complete the release with grouped photos and shared web playback. (Implemented in the same change; the shared view uses the same schedule. Editor UI check in a browser is still open.)
 
 ## Open decisions
 
-- Q9 — Grouping control defaults. Recommendation: default to 1 second; 0 seconds groups only photos at the same route position. Include adjacent photos whose travel-time gap is exactly the configured threshold.
-- Q10 — Return to the route. Recommendation: start the stop when the marker reaches the first photo in the group, then return to that exact point and show the remaining route without jumps or repeated photo stops for photos the group already displayed.
+- Q9 — Grouping control defaults (applied: default 1 second, range 0-180). Recommendation: default to 1 second; 0 seconds groups only photos at the same route position. Include adjacent photos whose travel-time gap is exactly the configured threshold.
+- Q10 — Return to the route (applied). Recommendation: start the stop when the marker reaches the first photo in the group, then return to that exact point and show the remaining route without jumps or repeated photo stops for photos the group already displayed.
 
 ## Existing-system observations
 
