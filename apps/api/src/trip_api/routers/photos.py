@@ -10,21 +10,25 @@ import math
 import re
 import uuid
 import warnings
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, Response, UploadFile
 from PIL import ExifTags, Image, ImageOps, UnidentifiedImageError
 from sqlalchemy import func, select
 from trip_telemetry import (
+    ClockSkewTrack,
     PhotoAlignmentInput,
     StageTrackInput,
+    load_clock_skew_track,
     snap_photo_pin,
     solve_camera_clock_skew,
 )
 
-from trip_api.db import Project, ProjectPhoto
+from trip_api.db import Project, ProjectPhoto, Stage
 from trip_api.deps import AppSettings, CsrfAuth, CurrentAuth, DbSession, StoreDep, ensure_utc
 from trip_api.rate_limit import check_rate_limit
 from trip_api.schemas import (
@@ -359,6 +363,7 @@ def _solve_clock_offset_seconds(
     stage_parquets: list[tuple[Any, Any]],
     *,
     camera_make_model: str | None = None,
+    track: ClockSkewTrack | None = None,
 ) -> int:
     if not photos or not stage_parquets:
         return 0
@@ -388,6 +393,7 @@ def _solve_clock_offset_seconds(
         photo_inputs,
         stage_inputs,
         camera_make_model=camera_make_model,
+        track=track,
     )
     return int(res.offset_seconds)
 
@@ -619,11 +625,26 @@ def shift_photo_clocks(
 
     matched_before = sum(1 for p in all_photos if p.match_method != "unmatched")
 
-    if body.offset_seconds is not None:
-        applied_offset = body.offset_seconds
-        offsets_by_id = {p.id: applied_offset for p in target_photos}
-    else:
-        with materialize_silver_parquets(store, stages) as pairs:
+    # Auto-detect materializes the Silver parquets once and reuses them for the align step.
+    with ExitStack() as stack:
+        pairs: list[tuple[Stage, Path]] | None = None
+        if body.offset_seconds is not None:
+            applied_offset = body.offset_seconds
+            offsets_by_id = {p.id: applied_offset for p in target_photos}
+        else:
+            pairs = stack.enter_context(materialize_silver_parquets(store, stages))
+            track = load_clock_skew_track(
+                [
+                    StageTrackInput(
+                        stage_id=str(st.id),
+                        stage_order=st.stage_order,
+                        parquet_path=pp,
+                        trim_start_s=st.trim_start_s,
+                        trim_end_s=st.trim_end_s,
+                    )
+                    for st, pp in pairs
+                ]
+            )
             if body.camera_make_model is None:
                 grouped: dict[str | None, list[ProjectPhoto]] = {}
                 for p in target_photos:
@@ -631,28 +652,29 @@ def shift_photo_clocks(
                 offsets_by_id = {}
                 solved_values: list[int] = []
                 for _cam, cam_photos in grouped.items():
-                    cam_off = _solve_clock_offset_seconds(cam_photos, pairs)
+                    cam_off = _solve_clock_offset_seconds(cam_photos, pairs, track=track)
                     solved_values.append(cam_off)
                     for cp in cam_photos:
                         offsets_by_id[cp.id] = cam_off
                 applied_offset = solved_values[0] if solved_values else 0
             else:
-                applied_offset = _solve_clock_offset_seconds(target_photos, pairs)
+                applied_offset = _solve_clock_offset_seconds(target_photos, pairs, track=track)
                 offsets_by_id = {p.id: applied_offset for p in target_photos}
 
-    target_ids = {p.id for p in target_photos}
-    if not body.dry_run:
-        for p in target_photos:
-            p.exif_offset_s = offsets_by_id.get(p.id, applied_offset)
+        target_ids = {p.id for p in target_photos}
+        if not body.dry_run:
+            for p in target_photos:
+                p.exif_offset_s = offsets_by_id.get(p.id, applied_offset)
 
-    align_project_photos(
-        db,
-        store,
-        project.id,
-        photo_ids=target_ids,
-        override_offsets=offsets_by_id,
-        persist=False,
-    )
+        align_project_photos(
+            db,
+            store,
+            project.id,
+            photo_ids=target_ids,
+            override_offsets=offsets_by_id,
+            persist=False,
+            materialized=pairs,
+        )
 
     matched_after = sum(1 for p in all_photos if p.match_method != "unmatched")
     newly_matched = max(0, matched_after - matched_before)
