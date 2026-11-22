@@ -12,7 +12,7 @@ from alembic.config import Config as AlembicConfig
 from PIL import ExifTags, Image, TiffImagePlugin
 from sqlalchemy import inspect, update
 from trip_api.db import ProjectPhoto, create_db_engine
-from trip_api.routers.photos import MAX_PHOTO_BYTES, MAX_PHOTOS_PER_PROJECT
+from trip_api.routers.photos import MAX_PHOTO_BYTES
 
 if TYPE_CHECKING:
     from conftest import HarnessFactory
@@ -491,7 +491,9 @@ def test_photo_project_limit_and_rate_limit(
     )
     assert cap_resp.status_code == 422
 
-    monkeypatch.setattr("trip_api.routers.photos.MAX_PHOTOS_PER_PROJECT", 50)
+    assert cap_resp.json()["detail"] == "Maximum of 2 photos per project reached"
+
+    monkeypatch.undo()
     rate_jpgs = [_make_jpeg_with_exif(size=(40 + i, 32)) for i in range(3)]
     for i in range(2):
         r = alice.post(
@@ -507,5 +509,25 @@ def test_photo_project_limit_and_rate_limit(
         headers={"X-CSRF-Token": csrf},
     )
     assert rl_resp.status_code == 429
-    assert MAX_PHOTOS_PER_PROJECT == 50
     assert uuid.UUID(proj_id)
+
+
+def test_project_accepts_100_photos_and_rejects_the_next(make_harness: HarnessFactory) -> None:
+    h = make_harness(rate_limit_photo_max=120)
+    h.create_user("alice@example.com")
+    alice, csrf = h.login_client("alice@example.com")
+    headers = {"X-CSRF-Token": csrf}
+    project = alice.post("/api/v1/projects", json={"title": "Photo Trip"}, headers=headers)
+    assert project.status_code == 201
+    url = f"/api/v1/projects/{project.json()['id']}/photos"
+
+    for i in range(101):
+        jpg = _make_jpeg_with_exif(size=(32 + i, 32))
+        response = alice.post(
+            url, files={"file": (f"p{i}.jpg", jpg, "image/jpeg")}, headers=headers
+        )
+        if i < 100:
+            assert response.status_code == 201, response.text
+        else:
+            assert response.status_code == 422
+            assert response.json()["detail"] == "Maximum of 100 photos per project reached"

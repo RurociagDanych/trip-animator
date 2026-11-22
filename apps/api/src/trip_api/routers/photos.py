@@ -45,7 +45,7 @@ from trip_api.services import (
 )
 
 MAX_PHOTO_BYTES = 15 * 1024 * 1024  # 15 MiB (safely under Caddy 25 MiB cap)
-MAX_PHOTOS_PER_PROJECT = 50
+MAX_PHOTOS_PER_PROJECT = 100
 MAX_PHOTO_PIXELS = 40_000_000
 FULL_MAX_DIM = 1400
 THUMB_MAX_DIM = 640
