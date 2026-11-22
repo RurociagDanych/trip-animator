@@ -42,6 +42,7 @@ from trip_telemetry import (
     parse_chart_cache_payload,
     parse_stage_events_parquet_bytes,
     query_stage_kpis,
+    query_stage_timeline_points,
     query_telemetry_profile,
     serialize_stage_events_parquet_bytes,
     split_silver_dataframe,
@@ -80,6 +81,9 @@ from trip_api.schemas import (
     TelemetryChartOut,
     TelemetryChartPoint,
     TelemetryGeometryOut,
+    TelemetryTimelineOut,
+    TelemetryTimelinePointOut,
+    TelemetryTimelineStageOut,
     UserOut,
 )
 from trip_api.storage import InvalidRangeError, LocalObjectStore, ObjectStore
@@ -1206,6 +1210,46 @@ def build_project_geometry_collection(
                 pool.map(lambda st: build_stage_geometry_feature(store, st, lod), stages)
             )
     return TelemetryGeometryOut(project_id=project_id, features=features)
+
+
+def _build_stage_timeline(store: ObjectStore, stage: Stage) -> TelemetryTimelineStageOut:
+    with materialize_silver_parquet(store, stage) as parquet_path:
+        points = query_stage_timeline_points(
+            parquet_path,
+            trim_start_s=stage.trim_start_s,
+            trim_end_s=stage.trim_end_s,
+        )
+    return TelemetryTimelineStageOut(
+        stage_id=stage.id,
+        stage_order=stage.stage_order,
+        points=[
+            TelemetryTimelinePointOut(
+                lat=pt.lat,
+                lon=pt.lon,
+                cum_dist_m=pt.cum_dist_m,
+                elapsed_s=pt.elapsed_s,
+                ts_utc=pt.ts_utc,
+                segment_idx=pt.segment_idx,
+            )
+            for pt in points
+        ],
+    )
+
+
+def build_project_timeline(
+    store: ObjectStore,
+    project_id: uuid.UUID,
+    stages: list[Stage],
+) -> TelemetryTimelineOut:
+    """Return per-stage timeline points with real `ts_utc` values, resolved in parallel."""
+    if not stages:
+        return TelemetryTimelineOut(project_id=project_id, stages=[])
+    if len(stages) == 1:
+        resolved = [_build_stage_timeline(store, stages[0])]
+    else:
+        with ThreadPoolExecutor(max_workers=min(8, len(stages))) as pool:
+            resolved = list(pool.map(lambda st: _build_stage_timeline(store, st), stages))
+    return TelemetryTimelineOut(project_id=project_id, stages=resolved)
 
 
 def _downsample_chart_profile(

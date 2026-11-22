@@ -13,6 +13,8 @@ import type {
   TelemetryChartPoint,
   TelemetryGeometryFeature,
   TelemetryGeometryOut,
+  TelemetryTimelineOut,
+  TelemetryTimelinePoint,
   TransitionIcon,
 } from "../api/types";
 import { circularMeanBearingDeg, computeBearingDeg } from "./camera";
@@ -326,11 +328,57 @@ function isValidCoordTuple(coord: unknown): coord is readonly [number, number] {
   );
 }
 
+interface RealTimestampIndex {
+  distM: number[];
+  tsMs: number[];
+}
+
+function indexRealTimestamps(points: readonly TelemetryTimelinePoint[]): RealTimestampIndex | null {
+  const distM: number[] = [];
+  const tsMs: number[] = [];
+  for (const pt of points) {
+    if (!pt.ts_utc || !Number.isFinite(pt.cum_dist_m)) continue;
+    const ms = Date.parse(pt.ts_utc);
+    if (!Number.isFinite(ms)) continue;
+    distM.push(pt.cum_dist_m);
+    tsMs.push(ms);
+  }
+  return distM.length >= 2 ? { distM, tsMs } : null;
+}
+
+// Lower-bound search so repeated distances (a stop) resolve to the first timestamp
+// at that distance and the division below never sees a zero-length span.
+function interpolateRealTimestampMs(index: RealTimestampIndex, distM: number): number {
+  const { distM: dists, tsMs } = index;
+  const last = dists.length - 1;
+  if (distM <= dists[0]!) return tsMs[0]!;
+  if (distM >= dists[last]!) return tsMs[last]!;
+  let lo = 0;
+  let hi = last;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (dists[mid]! < distM) lo = mid + 1;
+    else hi = mid;
+  }
+  if (dists[lo] === distM) return tsMs[lo]!;
+  const d0 = dists[lo - 1]!;
+  const d1 = dists[lo]!;
+  const t0 = tsMs[lo - 1]!;
+  const t1 = tsMs[lo]!;
+  return t0 + ((distM - d0) / (d1 - d0)) * (t1 - t0);
+}
+
+/**
+ * Builds timeline stages from geometry and chart data. When `timeline` carries real
+ * `ts_utc` samples for a stage, point timestamps are interpolated from them; otherwise
+ * they fall back to the constant-speed estimate over the stage duration.
+ */
 export function buildTimelineFromProject(
   stages: readonly (StageOut | PublicStageOut)[],
   geometry: TelemetryGeometryOut | readonly TelemetryGeometryFeature[] | undefined,
   chart: TelemetryChartOut | undefined,
   spec: RenderSpecV2,
+  timeline?: TelemetryTimelineOut | null,
 ): TimelineStage[] {
   const orderedStages = [...stages].sort((a, b) => a.stage_order - b.stage_order);
   const rawFeatures: readonly TelemetryGeometryFeature[] = Array.isArray(geometry)
@@ -339,6 +387,18 @@ export function buildTimelineFromProject(
   const featuresByStageId = new Map<string, TelemetryGeometryFeature>(
     rawFeatures.map((f) => [f.properties?.stage_id ?? f.id, f]),
   );
+
+  const realTimestampsByStageId = new Map<string, RealTimestampIndex>();
+  const timelineStages: readonly TelemetryTimelineOut["stages"][number][] = Array.isArray(
+    timeline?.stages,
+  )
+    ? timeline.stages
+    : [];
+  for (const timelineStage of timelineStages) {
+    if (!Array.isArray(timelineStage?.points)) continue;
+    const index = indexRealTimestamps(timelineStage.points);
+    if (index) realTimestampsByStageId.set(timelineStage.stage_id, index);
+  }
 
   let globalDistOffset = 0;
   let globalElapsedOffset = 0;
@@ -385,6 +445,7 @@ export function buildTimelineFromProject(
     const distScale = runningRawDist > 0 ? targetStageDist / runningRawDist : 1;
     const stageDurationS = Math.max(stage.elapsed_seconds || stage.moving_seconds || targetStageDist / 4, 1);
     const startMs = stage.started_at ? Date.parse(stage.started_at) : null;
+    const realTimestamps = realTimestampsByStageId.get(stage.id) ?? null;
 
     const points: TimelinePoint[] = rawCoords.map((rc) => {
       const cumDistM = rc.rawDistM * distScale;
@@ -405,7 +466,13 @@ export function buildTimelineFromProject(
         watts: sampled.watts,
         elapsedS,
         globalElapsedS: globalElapsedOffset + elapsedS,
-        tsUtcMs: startMs !== null && Number.isFinite(startMs) ? startMs + elapsedS * 1000 : null,
+        // Photo matching needs the recorded clock: a constant-speed estimate misplaces
+        // points after breaks by kilometres, so real timestamps take precedence.
+        tsUtcMs: realTimestamps
+          ? interpolateRealTimestampMs(realTimestamps, cumDistM)
+          : startMs !== null && Number.isFinite(startMs)
+            ? startMs + elapsedS * 1000
+            : null,
         segmentIdx: rc.segmentIdx,
       };
     });

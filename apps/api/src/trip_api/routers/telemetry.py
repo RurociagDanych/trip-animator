@@ -12,10 +12,11 @@ from trip_telemetry import LodLevel, query_stage_kpis
 
 from trip_api.db import Stage
 from trip_api.deps import CurrentAuth, DbSession, StoreDep
-from trip_api.schemas import TelemetryChartOut, TelemetryGeometryOut
+from trip_api.schemas import TelemetryChartOut, TelemetryGeometryOut, TelemetryTimelineOut
 from trip_api.services import (
     build_project_geometry_collection,
     build_project_telemetry_chart,
+    build_project_timeline,
     build_stage_geometry_feature,
     get_owned_project,
     get_project_stages,
@@ -69,6 +70,22 @@ def get_telemetry_geometry(
     stages = _select_stages(db, project.id, stage_id)
     try:
         return build_project_geometry_collection(store, project.id, stages, lod)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/telemetry/timeline", response_model=TelemetryTimelineOut)
+def get_telemetry_timeline(
+    project_id: uuid.UUID,
+    auth: CurrentAuth,
+    db: DbSession,
+    store: StoreDep,
+    stage_id: uuid.UUID | None = None,
+) -> TelemetryTimelineOut:
+    project = get_owned_project(db, project_id, auth.user.id)
+    stages = _select_stages(db, project.id, stage_id)
+    try:
+        return build_project_timeline(store, project.id, stages)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

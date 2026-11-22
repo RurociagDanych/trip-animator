@@ -119,6 +119,13 @@ from trip_telemetry.schemas import (
     is_activity_type,
     normalize_activity_type,
 )
+from trip_telemetry.stage_timeline import (
+    STAGE_TIMELINE_MAX_POINTS,
+    StageTelemetryRow,
+    StageTimelinePoint,
+    query_stage_telemetry_rows,
+    query_stage_timeline_points,
+)
 from trip_telemetry.tiles import (
     DEFAULT_EXPLORER_ZOOM,
     MAX_MERCATOR_LAT,
@@ -148,7 +155,10 @@ from trip_telemetry.tiles import (
 )
 
 __all__ = [
+    "STAGE_TIMELINE_MAX_POINTS",
     "ActivityType",
+    "StageTelemetryRow",
+    "StageTimelinePoint",
     "CHART_CACHE_SCHEMA_VERSION",
     "CURRENT_ETL_VERSION",
     "CameraKeyframe",
@@ -257,6 +267,8 @@ __all__ = [
     "query_stage_export_points",
     "query_stage_kpis",
     "query_stage_kpis_and_manifest_points",
+    "query_stage_telemetry_rows",
+    "query_stage_timeline_points",
     "query_telemetry_profile",
     "rasterize_polyline_tiles",
     "rasterize_segment_dda",

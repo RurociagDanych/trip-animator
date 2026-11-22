@@ -1,5 +1,7 @@
 """Trip Animator deterministic Playwright + FFmpeg video render worker."""
 
+from trip_telemetry.stage_timeline import vectorized_lttb_indices
+
 from trip_worker.config import WorkerSettings
 from trip_worker.encoder import (
     EncoderError,
@@ -31,7 +33,6 @@ from trip_worker.manifest import (
     compute_frame_render_spans,
     query_stage_kpis_and_manifest_points,
     query_stage_manifest_points,
-    vectorized_lttb_indices,
 )
 from trip_worker.renderer import (
     RenderCancelledError,

@@ -510,6 +510,26 @@ export interface TelemetryGeometryOut {
   features: TelemetryGeometryFeature[];
 }
 
+export interface TelemetryTimelinePoint {
+  lat: number;
+  lon: number;
+  cum_dist_m: number;
+  elapsed_s: number | null;
+  ts_utc: string | null;
+  segment_idx: number;
+}
+
+export interface TelemetryTimelineStage {
+  stage_id: string;
+  stage_order: number;
+  points: TelemetryTimelinePoint[];
+}
+
+export interface TelemetryTimelineOut {
+  project_id: string;
+  stages: TelemetryTimelineStage[];
+}
+
 export interface StageKpiOut {
   stage_id: string;
   name: string;
