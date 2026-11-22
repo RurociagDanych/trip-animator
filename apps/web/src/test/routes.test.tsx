@@ -800,6 +800,102 @@ describe("Route tests: DashboardPage, LoginPage, ForgotPasswordPage, ResetPasswo
       expect(mapTab).toHaveAttribute("aria-pressed", "true");
     });
 
+    it("shows the cinematic_stop film total, not the base duration", async () => {
+      const spec = {
+        ...createDefaultRenderSpecV2(),
+        photo_card_style: "cinematic_stop" as const,
+        duration_seconds: 10,
+        intro_hold_seconds: 0,
+        outro_hold_seconds: 0,
+        photo_display_seconds: 2,
+        photo_group_gap_seconds: 1,
+      };
+      const photo = (id: string, progress: number) => ({
+        id,
+        project_id: "p-1",
+        stage_id: null,
+        source_type: "upload",
+        width: 640,
+        height: 480,
+        byte_size: 1000,
+        caption: id,
+        taken_at_utc: null,
+        lat: null,
+        lon: null,
+        matched_lat: 0.22,
+        matched_lon: 0.48,
+        matched_progress: progress,
+        match_method: "manual",
+        enabled: true,
+        created_at: "2001-06-14T09:00:00Z",
+      });
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
+        if (url.includes("/api/v1/share/film-slug/chart")) {
+          return jsonResponse({ project_id: "p-1", total_distance_m: 1000, points: [] });
+        }
+        if (url.includes("/api/v1/share/film-slug/stages/")) {
+          return jsonResponse({
+            type: "Feature",
+            id: "s-1",
+            geometry: { type: "MultiLineString", coordinates: [[[0.4512, 0.2173], [0.5325, 0.2537]]] },
+            properties: {
+              lod: "medium",
+              point_count: 2,
+              original_point_count: 2,
+              segment_count: 1,
+              bbox: [0.4512, 0.2173, 0.5325, 0.2537],
+              crosses_antimeridian: false,
+              stage_id: "s-1",
+              name: "Day 1",
+              day_index: 1,
+              stage_order: 0,
+              source_type: "gpx",
+              activity_type: "cycling",
+              distance_m: 1000,
+              elevation_gain_m: 50,
+            },
+          });
+        }
+        if (url.includes("/api/v1/share/film-slug")) {
+          return jsonResponse({
+            id: "p-1",
+            title: "Shared Film Route",
+            stage_count: 1,
+            total_distance_m: 1000,
+            settings: spec,
+            has_rendered_video: false,
+            photos: [photo("a", 0.3), photo("b", 0.9)],
+            stages: [
+              {
+                id: "s-1",
+                name: "Day 1",
+                day_index: 1,
+                stage_order: 0,
+                source_type: "gpx",
+                activity_type: "cycling",
+                distance_m: 1000,
+                elevation_gain_m: 50,
+                moving_seconds: 120,
+                elapsed_seconds: 120,
+                has_timestamps: true,
+                started_at: "2001-06-14T08:00:00Z",
+                trim_start_s: null,
+                trim_end_s: null,
+                point_count: 2,
+              },
+            ],
+          });
+        }
+        return jsonResponse({});
+      });
+
+      renderAtRoute("/share/film-slug");
+      expect(await screen.findByText("Shared Film Route")).toBeInTheDocument();
+      // 10 s journey plus two separate stops of 1 s transitions and 2 s hold, as in the editor.
+      await waitFor(() => expect(screen.getAllByText(/0\.0s \/ 16s/).length).toBeGreaterThan(0));
+    });
+
     it("renders hero KPIs, climb highlights, Copy embed button, and ?embed=1 chromeless shell", async () => {
       vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
         const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";

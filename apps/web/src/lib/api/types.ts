@@ -74,7 +74,7 @@ export type PhotoMatchMethod = "timestamp" | "gps" | "manual" | "unmatched";
 export type StageFormat = "gpx" | "fit" | "tcx" | "strava";
 export type ColorByMode = "stage" | "grade" | "speed" | "hr" | "watts";
 export type DirectorPreset = "none" | "expedition-doc" | "climb-spotlight" | "social-reel";
-export type PhotoCardStyle = "corner" | "polaroid" | "cinematic";
+export type PhotoCardStyle = "corner" | "polaroid" | "cinematic" | "cinematic_stop";
 export type PalettePreset = "alpine-dawn" | "topo-emerald" | "stage-by-stage";
 export type ClimbCategory = "HC" | "Cat 1" | "Cat 2" | "Cat 3" | "Cat 4";
 export type StageFocusMode = "auto" | "close" | "street" | "custom";
@@ -247,6 +247,7 @@ export interface RenderSpecV2 {
   elevation_chart_overlay: boolean;
   show_photos: boolean;
   photo_display_seconds: number;
+  photo_group_gap_seconds: number;
   pause_on_photo: boolean;
   stage_colors: Record<string, string>;
   stage_transitions: Record<string, TransitionIcon>;
@@ -952,6 +953,7 @@ export function createDefaultRenderSpecV2(): RenderSpecV2 {
     elevation_chart_overlay: false,
     show_photos: true,
     photo_display_seconds: 3.0,
+    photo_group_gap_seconds: 1,
     pause_on_photo: false,
     stage_colors: {},
     stage_transitions: {},
@@ -989,7 +991,7 @@ const VALID_DIRECTOR_PRESET_SET = new Set<DirectorPreset>([
   "climb-spotlight",
   "social-reel",
 ]);
-const VALID_PHOTO_CARD_STYLE_SET = new Set<PhotoCardStyle>(["corner", "polaroid", "cinematic"]);
+const VALID_PHOTO_CARD_STYLE_SET = new Set<PhotoCardStyle>(["corner", "polaroid", "cinematic", "cinematic_stop"]);
 const VALID_STATISTIC_METRIC_SET = new Set<StatisticMetric>(ALL_STATISTIC_METRICS);
 const VALID_STAGE_FOCUS_MODE_SET = new Set<StageFocusMode>(["auto", "close", "street", "custom"]);
 
@@ -1165,6 +1167,7 @@ export function normalizeRenderSpecV2(raw?: Partial<RenderSpecV2> | null): Rende
     target_screen_px_per_sec: targetScreenPxPerSec,
     show_photos: typeof raw.show_photos === "boolean" ? raw.show_photos : defaults.show_photos,
     photo_display_seconds: photoDisplaySeconds,
+    photo_group_gap_seconds: clampFinite(raw.photo_group_gap_seconds, 0, 180, defaults.photo_group_gap_seconds),
     pause_on_photo:
       typeof raw.pause_on_photo === "boolean" ? raw.pause_on_photo : defaults.pause_on_photo,
     color_by: colorBy,

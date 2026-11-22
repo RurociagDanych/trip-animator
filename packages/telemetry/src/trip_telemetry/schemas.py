@@ -37,7 +37,7 @@ TransitionIcon = Literal["none", "bed", "meal", "coffee", "tent", "transport"]
 LodLevel = Literal["full", "medium", "low"]
 ColorByMode = Literal["stage", "grade", "speed", "hr", "watts"]
 DirectorPreset = Literal["none", "expedition-doc", "climb-spotlight", "social-reel"]
-PhotoCardStyle = Literal["corner", "polaroid", "cinematic"]
+PhotoCardStyle = Literal["corner", "polaroid", "cinematic", "cinematic_stop"]
 ClimbCategory = Literal["HC", "Cat 1", "Cat 2", "Cat 3", "Cat 4"]
 ActivityType = Literal[
     "cycling",
@@ -755,6 +755,7 @@ class RenderSpecV2(BaseModel):
     show_overnight_stops: bool = True
     show_photos: bool = True
     photo_display_seconds: float = Field(default=3.0, ge=0.5, le=10.0)
+    photo_group_gap_seconds: float = Field(default=1.0, ge=0.0, le=180.0, allow_inf_nan=False)
     pause_on_photo: bool = False
     elevation_chart_overlay: bool = False
     stage_colors: dict[str, str] = Field(default_factory=dict)

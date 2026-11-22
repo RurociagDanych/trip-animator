@@ -29,6 +29,7 @@ import {
 } from "../lib/api/types";
 import { formatDistance, formatElapsedTime, formatElevation } from "../lib/geo/format";
 import {
+  computePhotoStopTotalDurationS,
   evaluateTimelineSchedule,
   matchPhotosToTimeline,
   progressRatioToTimeRatio,
@@ -122,32 +123,6 @@ export function ShareViewPage() {
     };
   }, [stageGeometryQueries]);
 
-  useEffect(() => {
-    if (!isPlaying) {
-      return;
-    }
-    let rafId = 0;
-    let lastTs = performance.now();
-    const durationMs = Math.max(1000, spec.duration_seconds * 1000);
-
-    const tick = (now: number) => {
-      const dt = now - lastTs;
-      lastTs = now;
-      setProgressRatio((prev) => {
-        const next = prev + (dt * playbackSpeed) / durationMs;
-        if (next >= 1) {
-          setIsPlaying(false);
-          return 1;
-        }
-        return next;
-      });
-      rafId = window.requestAnimationFrame(tick);
-    };
-
-    rafId = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(rafId);
-  }, [isPlaying, playbackSpeed, spec.duration_seconds]);
-
   const timelineStages = useMemo(
     () =>
       buildTimelineFromProject(
@@ -169,6 +144,36 @@ export function ShareViewPage() {
       ),
     [project?.photos, timelineStages, spec, slug],
   );
+  const durationS = useMemo(
+    () => computePhotoStopTotalDurationS(spec, matchedPhotos, timelineStages),
+    [spec, matchedPhotos, timelineStages],
+  );
+
+  useEffect(() => {
+    if (!isPlaying) {
+      return;
+    }
+    let rafId = 0;
+    let lastTs = performance.now();
+    const durationMs = Math.max(1000, durationS * 1000);
+
+    const tick = (now: number) => {
+      const dt = now - lastTs;
+      lastTs = now;
+      setProgressRatio((prev) => {
+        const next = prev + (dt * playbackSpeed) / durationMs;
+        if (next >= 1) {
+          setIsPlaying(false);
+          return 1;
+        }
+        return next;
+      });
+      rafId = window.requestAnimationFrame(tick);
+    };
+
+    rafId = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(rafId);
+  }, [isPlaying, playbackSpeed, durationS]);
 
   const schedule = useMemo(
     () =>
@@ -176,11 +181,11 @@ export function ShareViewPage() {
         timelineStages,
         matchedPhotos,
         spec,
-        progressRatio * spec.duration_seconds,
-        spec.duration_seconds,
+        progressRatio * durationS,
+        durationS,
         false,
       ),
-    [timelineStages, matchedPhotos, spec, progressRatio],
+    [timelineStages, matchedPhotos, spec, progressRatio, durationS],
   );
 
   const stageStartProgressMap = useMemo(() => {
@@ -219,7 +224,7 @@ export function ShareViewPage() {
         matchedPhotos,
         spec,
         Math.min(1, Math.max(0, targetProgress)),
-        spec.duration_seconds,
+        durationS,
         false,
         timelineStages,
       ),
@@ -285,10 +290,12 @@ export function ShareViewPage() {
             stages={timelineStages}
             spec={spec}
             progressRatio={schedule.progressRatio}
+            durationS={durationS}
             travelDurationS={schedule.travelDurationS}
             renderMode="interactive"
             geometryStatus={geometryStatus}
             matchedPhotos={matchedPhotos}
+            cinematicMapZoom={schedule.cinematicMapZoom}
             activePhoto={schedule.activePhoto}
             climbs={climbs}
             projectTitle={project.title}
@@ -555,10 +562,12 @@ export function ShareViewPage() {
                   stages={timelineStages}
                   spec={spec}
                   progressRatio={schedule.progressRatio}
-                  travelDurationS={schedule.travelDurationS}
+                  durationS={durationS}
+            travelDurationS={schedule.travelDurationS}
                   renderMode="interactive"
                   geometryStatus={geometryStatus}
                   matchedPhotos={matchedPhotos}
+                  cinematicMapZoom={schedule.cinematicMapZoom}
                   activePhoto={schedule.activePhoto}
                   climbs={climbs}
                   projectTitle={project.title}
@@ -665,7 +674,7 @@ export function ShareViewPage() {
                       onChange={(e) => seekToTargetProgress(Number(e.currentTarget.value) / 1000)}
                       className="w-full accent-sky-accent"
                     />
-                    {spec.pause_on_photo && schedule.activePhoto ? (
+                    {(spec.pause_on_photo || spec.photo_card_style === "cinematic_stop") && schedule.activePhoto ? (
                       <span
                         data-testid="photo-pause-indicator"
                         className="shrink-0 rounded border border-amber-accent/50 bg-amber-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-accent"
@@ -674,8 +683,8 @@ export function ShareViewPage() {
                       </span>
                     ) : null}
                     <span className="tabular-telemetry shrink-0 text-xs text-ink-muted">
-                      {(progressRatio * spec.duration_seconds).toFixed(1)}s /{" "}
-                      {spec.duration_seconds}s
+                      {(progressRatio * durationS).toFixed(1)}s /{" "}
+                      {Number(durationS.toFixed(1))}s
                     </span>
                   </div>
                 </div>

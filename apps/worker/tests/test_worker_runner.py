@@ -521,6 +521,7 @@ class InMemoryRenderDatabase:
                                 ph.get("matched_lon"),
                                 ph.get("matched_progress"),
                                 ph.get("match_method", "unmatched"),
+                                ph.get("object_key"),
                             )
                             for ph in photo_rows
                         ]
@@ -1738,3 +1739,189 @@ def test_chunked_job_uses_pre_serialized_manifest_without_rebuilding(
     assert db.jobs[cancel_job_id]["status"] == "cancelled"
     with pytest.raises(FileNotFoundError):
         store.resolve_existing_path(chunk_manifest_key(cancel_job_id))
+
+
+def _run_cinematic_job(
+    tmp_path: Path,
+    monkeypatch: Any,
+    *,
+    duration_seconds: float,
+    photo_count: int,
+    probed_frames: int,
+    settings: WorkerSettings,
+) -> tuple[InMemoryRenderDatabase, uuid.UUID, dict[str, Any]]:
+    store = LocalObjectStore(tmp_path)
+    db = InMemoryRenderDatabase()
+    owner_id, project_id, _ = _seed_project_and_stage(db, store)
+    db.photos[project_id] = []
+    for index in range(photo_count):
+        photo_id = uuid.uuid4()
+        thumb_key = f"photos/{project_id}/{photo_id}_thumb.webp"
+        full_key = f"photos/{project_id}/{photo_id}.webp"
+        store.put_bytes(thumb_key, b"THUMB", content_type="image/webp")
+        store.put_bytes(full_key, b"FULL", content_type="image/webp")
+        db.photos[project_id].append(
+            {
+                "id": photo_id,
+                "project_id": project_id,
+                "thumb_object_key": thumb_key,
+                "object_key": full_key,
+                "width": 4000,
+                "height": 3000,
+                "caption": f"Photo {index}",
+                "matched_progress": 0.4 + index * 0.001,
+                "match_method": "gps",
+                "enabled": True,
+            }
+        )
+
+    job_id = uuid.uuid4()
+    db.jobs[job_id] = {
+        "id": job_id,
+        "project_id": project_id,
+        "owner_user_id": owner_id,
+        "spec_json": {
+            "version": 2,
+            "resolution": "1280x720",
+            "fps": 30,
+            "duration_seconds": duration_seconds,
+            "photo_card_style": "cinematic_stop",
+        },
+        "status": "queued",
+        "progress_pct": 0,
+        "attempt_count": 0,
+        "lease_expires_at": None,
+        "output_object_key": None,
+        "thumbnail_key": None,
+        "expires_at": None,
+        "error_message": None,
+        "is_chunked": False,
+        "total_frames": None,
+        "created_at": datetime.now(UTC),
+        "updated_at": datetime.now(UTC),
+    }
+
+    seen: dict[str, Any] = {"probes": [], "verify": [], "ranges": [], "assets": []}
+
+    def fake_probe(manifest: RenderManifest, _settings: WorkerSettings, _host: Any) -> int:
+        seen["probes"].append(len(manifest.photos))
+        return probed_frames
+
+    async def fake_render(
+        manifest: RenderManifest,
+        output_mp4_path: Path,
+        _settings: WorkerSettings,
+        *,
+        frame_start: int = 0,
+        frame_end: int | None = None,
+        photo_assets: dict[str, bytes] | None = None,
+        **_kw: Any,
+    ) -> Path:
+        seen["ranges"].append((frame_start, frame_end))
+        seen["assets"].append(dict(photo_assets or {}))
+        seen["manifest_frames"] = manifest.total_frames
+        await asyncio.to_thread(output_mp4_path.write_bytes, b"MP4")
+        return output_mp4_path
+
+    def fake_verify(_path: Path, **kwargs: Any) -> Any:
+        seen["verify"].append(kwargs)
+        return type("Probe", (), {"width": 1280, "height": 720, "duration_s": 1.0})()
+
+    monkeypatch.setattr("trip_worker.runner.verify_mp4_output", fake_verify)
+    monkeypatch.setattr(
+        "trip_worker.runner.concat_mp4_chunks",
+        lambda paths, out, **_kw: out.write_bytes(b"+".join(p.read_bytes() for p in paths)) or out,
+    )
+    monkeypatch.setattr(
+        "trip_worker.runner.extract_thumbnail",
+        lambda _mp4, thumb_p, **_kw: thumb_p.write_bytes(b"RIFFwebp") or thumb_p,
+    )
+
+    assert (
+        run_once(
+            settings,
+            conn_factory=db.conn_factory(),
+            store=store,
+            render_fn=fake_render,
+            frame_count_fn=fake_probe,
+        )
+        is True
+    )
+    assert db.jobs[job_id]["status"] == "succeeded"
+    return db, job_id, seen
+
+
+def test_cinematic_job_without_photos_skips_probe_and_keeps_base_duration(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    settings = WorkerSettings(chunk_threshold_frames=1800, chunk_size_frames=300)
+    db, job_id, seen = _run_cinematic_job(
+        tmp_path,
+        monkeypatch,
+        duration_seconds=10.0,
+        photo_count=0,
+        probed_frames=9999,
+        settings=settings,
+    )
+    assert seen["probes"] == []
+    assert db.jobs[job_id]["is_chunked"] is False
+    assert seen["verify"][0]["expected_duration_s"] == 10.0
+
+
+def test_cinematic_job_without_photos_still_chunks_long_base_duration(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    settings = WorkerSettings(chunk_threshold_frames=1800, chunk_size_frames=300)
+    db, job_id, seen = _run_cinematic_job(
+        tmp_path,
+        monkeypatch,
+        duration_seconds=100.0,
+        photo_count=0,
+        probed_frames=9999,
+        settings=settings,
+    )
+    assert seen["probes"] == []
+    assert db.jobs[job_id]["is_chunked"] is True
+    assert db.jobs[job_id]["total_frames"] == 3000
+    assert seen["ranges"][0] == (0, 300)
+    assert seen["ranges"][-1] == (2700, 3000)
+
+
+def test_cinematic_job_with_one_photo_uses_browser_total_and_full_variant(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    settings = WorkerSettings(chunk_threshold_frames=1800, chunk_size_frames=300)
+    db, job_id, seen = _run_cinematic_job(
+        tmp_path,
+        monkeypatch,
+        duration_seconds=10.0,
+        photo_count=1,
+        probed_frames=390,
+        settings=settings,
+    )
+    assert seen["probes"] == [1]
+    assert db.jobs[job_id]["is_chunked"] is False
+    assert seen["manifest_frames"] == 390
+    assert seen["verify"][0]["expected_duration_s"] == 13.0
+    assert seen["verify"][0]["duration_tolerance_s"] == max(1.5, 13.0 * 0.25)
+    assert list(seen["assets"][0].values()) == [b"FULL"]
+
+
+def test_cinematic_job_with_grouped_photos_chunks_on_the_browser_total(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    settings = WorkerSettings(chunk_threshold_frames=1800, chunk_size_frames=300)
+    db, job_id, seen = _run_cinematic_job(
+        tmp_path,
+        monkeypatch,
+        duration_seconds=30.0,
+        photo_count=3,
+        probed_frames=2400,
+        settings=settings,
+    )
+    assert seen["probes"] == [3]
+    assert db.jobs[job_id]["is_chunked"] is True
+    assert db.jobs[job_id]["total_frames"] == 2400
+    assert seen["ranges"] == [(start, start + 300) for start in range(0, 2400, 300)]
+    assert all(list(assets.values()) == [b"FULL"] * 3 for assets in seen["assets"])
+    assert seen["verify"][0]["expected_duration_s"] == 80.0

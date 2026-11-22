@@ -53,6 +53,7 @@ class PhotoRecord:
     matched_lon: float | None = None
     matched_progress: float | None = None
     match_method: str = "unmatched"
+    object_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -725,6 +726,9 @@ def compute_frame_render_spans(
         return []
 
     spec = manifest.spec
+    if spec.photo_card_style == "cinematic_stop":
+        # Legacy plateau windows cannot describe the browser cinematic schedule.
+        return [FrameSpan(frame_idx=index, repeat_count=1) for index in range(eff_start, eff_end)]
     duration_s = float(manifest.duration_s)
     hold_scale = (
         min(1.0, duration_s / spec.duration_seconds)
@@ -835,6 +839,13 @@ def compute_frame_render_spans(
 def chunk_manifest_key(job_id: uuid.UUID | str) -> str:
     """Return the deterministic object key for a chunked job's pre-serialized RenderManifest."""
     return f"outputs/manifests/{job_id}.json"
+
+
+def photo_asset_key(spec: RenderSpecV2, photo: PhotoRecord) -> str:
+    """Return the object key to render: full variant for cinematic_stop, else the thumbnail."""
+    if spec.photo_card_style == "cinematic_stop" and photo.object_key:
+        return photo.object_key
+    return photo.thumb_object_key
 
 
 def build_render_manifest(
@@ -1006,12 +1017,13 @@ def build_render_manifest(
         for photo in photos:
             photo_id_str = str(photo.id)
             if load_assets:
+                asset_key = photo_asset_key(spec, photo)
                 try:
-                    thumb_bytes = store.get_bytes(photo.thumb_object_key)
+                    thumb_bytes = store.get_bytes(asset_key)
                 except FileNotFoundError:
                     logger.warning(
-                        "Photo thumbnail %s missing for project %s; skipping",
-                        photo.thumb_object_key,
+                        "Photo asset %s missing for project %s; skipping",
+                        asset_key,
                         project_id,
                     )
                     continue

@@ -15,7 +15,7 @@ from typing import Annotated, cast
 import psycopg
 from fastapi import APIRouter, Header, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from trip_telemetry.schemas import RenderSpecV2
@@ -148,13 +148,23 @@ def _try_copy_cached_render_artifacts(
     return new_out_key, new_thumb_key
 
 
-def _sse_deadline_seconds(spec_json: dict[str, object] | None) -> float:
+def _cinematic_extra_seconds(raw: dict[str, object], photo_count: int) -> float:
+    """Upper bound of film time added by cinematic photo stops, assuming one stop per photo."""
+    if raw.get("photo_card_style") != "cinematic_stop" or raw.get("show_photos") is False:
+        return 0.0
+    raw_display = raw.get("photo_display_seconds", 3.0)
+    display_s = float(raw_display) if isinstance(raw_display, (int, float)) else 3.0
+    return max(0, photo_count) * (1.0 + max(0.0, display_s))
+
+
+def _sse_deadline_seconds(spec_json: dict[str, object] | None, photo_count: int = 0) -> float:
     raw = spec_json or {}
     raw_dur = raw.get("duration_seconds", 30.0)
     raw_fps = raw.get("fps", 30)
     duration_s = float(raw_dur) if isinstance(raw_dur, (int, float)) else 30.0
     fps = int(raw_fps) if isinstance(raw_fps, (int, float)) else 30
-    return max(300.0, duration_s * (20.0 if fps == 60 else 12.0) + 120.0)
+    film_s = duration_s + _cinematic_extra_seconds(raw, photo_count)
+    return max(300.0, film_s * (20.0 if fps == 60 else 12.0) + 120.0)
 
 
 @router.post("/api/v1/projects/{project_id}/renders", response_model=RenderJobOut, status_code=202)
@@ -358,7 +368,18 @@ async def stream_render_events(
         auth = authenticate_request(request, db, settings)
         initial_job = _get_owned_job(db, job_id, auth.user.id)
         user_id = auth.user.id
-        deadline_s = _sse_deadline_seconds(initial_job.spec_json)
+        photo_count = (
+            db.scalar(
+                select(func.count())
+                .select_from(ProjectPhoto)
+                .where(
+                    ProjectPhoto.project_id == initial_job.project_id,
+                    ProjectPhoto.enabled.is_(True),
+                )
+            )
+            or 0
+        )
+        deadline_s = _sse_deadline_seconds(initial_job.spec_json, photo_count)
 
     has_test_poll_cap = hasattr(request.app.state, "sse_max_polls")
     use_pg_listen = settings.database_url.startswith("postgresql") and not has_test_poll_cap

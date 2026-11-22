@@ -45,6 +45,7 @@ import type {
 } from "../lib/api/types";
 import { generateDirectorKeyframes } from "../lib/geo/director";
 import {
+  computePhotoStopTotalDurationS,
   evaluateTimelineSchedule,
   matchPhotosToTimeline,
 } from "../lib/geo/photos";
@@ -379,10 +380,6 @@ export function EditorPage() {
     ]);
   }, [queryClient, projectId]);
 
-  const effectiveDurationS = previewWatermark
-    ? Math.min(spec.duration_seconds, 5)
-    : spec.duration_seconds;
-
   const resolvedFeatures = useMemo(() => {
     const features: TelemetryGeometryFeature[] = [];
     for (const q of stageGeometryQueries) {
@@ -431,6 +428,15 @@ export function EditorPage() {
         photosApi.imageUrl(projectId, photoId, variant),
       ),
     [projectPhotos, timelineStages, spec, projectId],
+  );
+
+  const effectiveDurationS = useMemo(
+    () => computePhotoStopTotalDurationS(spec, matchedPhotos, timelineStages, previewWatermark),
+    [spec, matchedPhotos, timelineStages, previewWatermark],
+  );
+  const estimatedMovieDurationS = useMemo(
+    () => computePhotoStopTotalDurationS(spec, matchedPhotos, timelineStages),
+    [spec, matchedPhotos, timelineStages],
   );
 
   const getCurrentProgress = useCallback(() => {
@@ -808,6 +814,7 @@ export function EditorPage() {
           pinModeActive={Boolean(pinModePhotoId)}
           previewWatermark={previewWatermark}
           effectiveDurationS={effectiveDurationS}
+          estimatedMovieDurationS={estimatedMovieDurationS}
           geometryStatus={geometryStatus}
           projectTitle={title}
           onMapPinClick={(lngLat) => void handleMapPinClick(lngLat)}

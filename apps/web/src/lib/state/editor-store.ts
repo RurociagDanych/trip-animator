@@ -151,6 +151,7 @@ function inferSpecCoalesceKey(patch: Partial<RenderSpecV2>): string | null {
       key === "follow_zoom_offset" ||
       key === "target_screen_px_per_sec" ||
       key === "photo_display_seconds" ||
+      key === "photo_group_gap_seconds" ||
       key === "track_color" ||
       key === "marker_color" ||
       key === "terrain_exaggeration" ||

@@ -13,9 +13,12 @@ import {
   sampleKeyframeSpeedMultiplier,
 } from "../lib/geo/camera";
 import {
+  computeCinematicPhotoGroups,
+  computePhotoStopTotalDurationS,
   evaluateTimelineSchedule,
   matchPhotosToTimeline,
   progressRatioToTimeRatio,
+  progressToJourneyTimeS,
   resolvePhotoSrc,
 } from "../lib/geo/photos";
 import type { TimelinePoint, TimelineStage } from "../lib/geo/timeline";
@@ -88,6 +91,170 @@ function makePhoto(overrides: Partial<ProjectPhotoOut>): ProjectPhotoOut {
 }
 
 describe("Photo matching and pause scheduler (photos.ts)", () => {
+  describe("normalizeRenderSpecV2 photo_group_gap_seconds", () => {
+    it.each([
+      [undefined, 1],
+      [Number.NaN, 1],
+      [-3, 0],
+      [181, 180],
+      [0, 0],
+      [2.5, 2.5],
+      [180, 180],
+    ])("maps %s to %s", (raw, expected) => {
+      const spec = normalizeRenderSpecV2({ photo_group_gap_seconds: raw as number | undefined });
+      expect(spec.photo_group_gap_seconds).toBe(expected);
+    });
+
+    it("defaults when the field is missing from a stored spec", () => {
+      const legacy: Partial<ReturnType<typeof createDefaultRenderSpecV2>> = createDefaultRenderSpecV2();
+      delete legacy.photo_group_gap_seconds;
+      expect(normalizeRenderSpecV2(legacy).photo_group_gap_seconds).toBe(1);
+    });
+  });
+
+  describe("cinematic_stop preview and export parity", () => {
+    const manual = { match_method: "manual" as const, matched_lat: 0.1, matched_lon: 0.2 };
+    const cinematicSpec = (overrides: Partial<ReturnType<typeof createDefaultRenderSpecV2>> = {}) => ({
+      ...createDefaultRenderSpecV2(),
+      photo_card_style: "cinematic_stop" as const,
+      duration_seconds: 30,
+      intro_hold_seconds: 0,
+      outro_hold_seconds: 0,
+      photo_display_seconds: 2,
+      photo_group_gap_seconds: 1,
+      ...overrides,
+    });
+    const photosAt = (spec: ReturnType<typeof cinematicSpec>, stages: TimelineStage[], progresses: number[]) =>
+      matchPhotosToTimeline(
+        progresses.map((p, i) => makePhoto({ ...manual, id: `p${i}`, matched_progress: p })),
+        stages,
+        spec,
+        () => "/photo.jpg",
+      );
+
+    it("forms identical groups in preview and export for the same fixture", () => {
+      const spec = cinematicSpec();
+      const stages = [makeStage()];
+      // 0.04 of a 30 s journey is 1.2 s of export travel, which a 5 s preview would squeeze to 0.2 s.
+      const photos = photosAt(spec, stages, [0.1, 0.14, 0.16, 0.5, 0.52, 0.9]);
+      const exportGroups = computeCinematicPhotoGroups(spec, photos, stages, false);
+      const previewGroups = computeCinematicPhotoGroups(spec, photos, stages, true);
+      expect(exportGroups).toEqual([["p0"], ["p1", "p2"], ["p3", "p4"], ["p5"]]);
+      expect(previewGroups).toEqual(exportGroups);
+    });
+
+    it("keeps full photo holds in preview and only shortens the journey to 5 seconds", () => {
+      const spec = cinematicSpec();
+      const stages = [makeStage()];
+      const photos = photosAt(spec, stages, [0.1, 0.14, 0.16, 0.5, 0.52, 0.9]);
+      const exportTotal = computePhotoStopTotalDurationS(spec, photos, stages, false);
+      const previewTotal = computePhotoStopTotalDurationS(spec, photos, stages, true);
+      expect(exportTotal - spec.duration_seconds).toBeCloseTo(previewTotal - 5, 9);
+    });
+
+    it("scales preview travel position but not grouping when a speed curve is active", () => {
+      const spec = cinematicSpec({
+        camera_keyframes: [0, 1].map(
+          (progress): CameraKeyframe => ({
+            progress,
+            camera_mode: "follow-marker",
+            camera_preset: "flat",
+            pitch_deg: 0,
+            bearing_offset_deg: 0,
+            zoom_offset: 0,
+            speed_multiplier: progress === 0 ? 3 : 0.5,
+            label: `kf-${progress}`,
+          }),
+        ),
+      });
+      const stages = [makeStage()];
+      const photos = photosAt(spec, stages, [0.1, 0.12, 0.8, 0.82]);
+      expect(computeCinematicPhotoGroups(spec, photos, stages, true)).toEqual(
+        computeCinematicPhotoGroups(spec, photos, stages, false),
+      );
+    });
+
+    it("keeps reached photos without a source so their map pins stay visible", () => {
+      const spec = cinematicSpec();
+      const stages = [makeStage()];
+      const [first, second] = photosAt(spec, stages, [0.2, 0.4]);
+      const photos = [first!, { ...second!, src: "" }];
+      const schedule = evaluateTimelineSchedule(stages, photos, spec, 30, 30, false);
+      expect(schedule.reachedPhotos.map((p) => p.id)).toEqual(["p0", "p1"]);
+    });
+
+    it("requests the full variant for cinematic_stop and the thumbnail otherwise", () => {
+      const stages = [makeStage()];
+      const variants: Array<string | undefined> = [];
+      const resolver = (id: string, variant?: "full" | "thumb") => {
+        variants.push(variant);
+        return `/${id}?variant=${variant}`;
+      };
+      const photo = makePhoto({ ...manual, matched_progress: 0.5 });
+      const [stop] = matchPhotosToTimeline([photo], stages, cinematicSpec(), resolver);
+      expect(stop!.src).toBe("/photo-1?variant=full");
+      const legacySpec = { ...cinematicSpec(), photo_card_style: "corner" as const };
+      const [legacy] = matchPhotosToTimeline([photo], stages, legacySpec, resolver);
+      expect(legacy!.src).toBe("/photo-1?variant=thumb");
+      expect(variants).toEqual(["full", "thumb"]);
+    });
+
+    it("journey time at a progress excludes photo stops", () => {
+      const spec = cinematicSpec({ intro_hold_seconds: 2, outro_hold_seconds: 2 });
+      const stages = [makeStage()];
+      expect(progressToJourneyTimeS(spec, stages, 0.5, false)).toBeCloseTo(15, 9);
+      expect(progressToJourneyTimeS(spec, stages, 0.5, true)).toBeCloseTo(2.5, 9);
+    });
+  });
+
+  it("groups adjacent stops inclusively and resumes from the first photo without replay", () => {
+    const spec = {
+      ...createDefaultRenderSpecV2(),
+      photo_card_style: "cinematic_stop" as const,
+      intro_hold_seconds: 0,
+      outro_hold_seconds: 0,
+      photo_display_seconds: 2,
+    };
+    const stages = [makeStage()];
+    const manual = { match_method: "manual" as const, matched_lat: 0.1, matched_lon: 0.2 };
+    const photos = matchPhotosToTimeline([
+      makePhoto({ ...manual, id: "c", matched_progress: 0.29 }),
+      makePhoto({ ...manual, id: "a", matched_progress: 0.2 }),
+      makePhoto({ ...manual, id: "b", matched_progress: 0.25 }),
+      makePhoto({ ...manual, id: "disabled", enabled: false, matched_progress: 0.7 }),
+      makePhoto({ id: "unmatched" }),
+    ], stages, spec, () => "/photo.jpg");
+    const duration = computePhotoStopTotalDurationS(spec, photos, stages);
+    expect(duration).toBe(27.5);
+    const at = (seconds: number) => evaluateTimelineSchedule(stages, photos, spec, seconds, duration, false);
+    expect(at(4.6).activePhoto?.photo.id).toBe("a");
+    expect(at(6.6).activePhoto?.outgoingPhoto?.id).toBe("a");
+    expect(at(6.8).activePhoto?.photo.id).toBe("b");
+    expect(at(9.1).activePhoto?.photo.id).toBe("c");
+    expect(at(11.49).progressRatio).toBe(0.2);
+    expect(at(11.52).progressRatio).toBeCloseTo(0.201);
+    expect(at(13.3).activePhoto).toBeNull();
+    expect(computePhotoStopTotalDurationS({ ...spec, photo_group_gap_seconds: 0 }, photos, stages)).toBe(29);
+  });
+
+  it("adds the full photo hold and transitions to cinematic-stop runtime", () => {
+    const spec = createDefaultRenderSpecV2();
+    spec.photo_card_style = "cinematic_stop";
+    spec.photo_display_seconds = 4;
+    const stages = [makeStage()];
+    const [photo] = matchPhotosToTimeline([makePhoto({ lat: 0, lon: 0 })], stages, spec, () => "/photo.jpg");
+    const photos = [{ ...photo!, matchedProgress: 0.5 }];
+    expect(computePhotoStopTotalDurationS(spec, photos, stages)).toBe(25);
+
+    const start = spec.intro_hold_seconds + (20 - spec.intro_hold_seconds - spec.outro_hold_seconds) / 2;
+    const at = (offset: number) => evaluateTimelineSchedule(stages, photos, spec, start + offset, 25, false);
+    for (const offset of [0.1, 0.5, 4.49, 4.9]) expect(at(offset).progressRatio).toBe(0.5);
+    expect(at(0.5).activePhoto?.opacity).toBe(1);
+    expect(at(4.49).activePhoto?.opacity).toBe(1);
+    expect(at(5.01).activePhoto).toBeNull();
+    expect(at(5.01).progressRatio).toBeGreaterThan(0.5);
+  });
+
   it("matches photos by timestamp interpolation and falls back to GPS when timezone offset > 50km", () => {
     const spec = createDefaultRenderSpecV2();
     const stage = makeStage();

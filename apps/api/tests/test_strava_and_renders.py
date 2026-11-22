@@ -2185,3 +2185,40 @@ def test_strava_import_rejects_duplicate_activity_in_single_and_batch(
         headers={"X-CSRF-Token": csrf},
     )
     assert other_proj.status_code == 201, other_proj.text
+
+
+@pytest.mark.parametrize(
+    ("spec", "photo_count", "expected"),
+    [
+        ({"duration_seconds": 30.0, "fps": 30}, 0, 480.0),
+        ({"duration_seconds": 30.0, "fps": 30}, 50, 480.0),
+        ({"duration_seconds": 30.0, "fps": 30, "photo_card_style": "cinematic_stop"}, 0, 480.0),
+        (
+            {
+                "duration_seconds": 30.0,
+                "fps": 30,
+                "photo_card_style": "cinematic_stop",
+                "photo_display_seconds": 4.0,
+            },
+            100,
+            (30.0 + 100 * 5.0) * 12.0 + 120.0,
+        ),
+        (
+            {
+                "duration_seconds": 30.0,
+                "fps": 60,
+                "photo_card_style": "cinematic_stop",
+                "photo_display_seconds": 4.0,
+                "show_photos": False,
+            },
+            100,
+            30.0 * 20.0 + 120.0,
+        ),
+    ],
+)
+def test_sse_deadline_covers_cinematic_film_total(
+    spec: dict[str, object], photo_count: int, expected: float
+) -> None:
+    from trip_api.routers.renders import _sse_deadline_seconds
+
+    assert _sse_deadline_seconds(spec, photo_count) == pytest.approx(max(300.0, expected))

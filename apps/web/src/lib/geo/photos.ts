@@ -29,6 +29,7 @@ export interface MatchedPhoto {
 
 export interface ActivePhotoDisplay {
   photo: MatchedPhoto;
+  outgoingPhoto?: MatchedPhoto;
   opacity: number;
   scale: number;
   kenBurnsScale: number;
@@ -41,6 +42,7 @@ export interface TimelineScheduleResult {
   travelDurationS: number;
   activePhoto: ActivePhotoDisplay | null;
   reachedPhotos: MatchedPhoto[];
+  cinematicMapZoom?: number;
 }
 
 const TIMESTAMP_TOLERANCE_MS = 120_000;
@@ -49,6 +51,7 @@ const MAX_GPS_MATCH_DISTANCE_M = 50_000;
 export function resolvePhotoSrc(
   photo: PhotoInput,
   srcResolver?: (photoId: string, variant?: "full" | "thumb") => string,
+  variant: "full" | "thumb" = "thumb",
 ): string {
   if ("asset_url" in photo && typeof photo.asset_url === "string" && photo.asset_url.length > 0) {
     return photo.asset_url;
@@ -57,7 +60,7 @@ export function resolvePhotoSrc(
     return photo.data_uri;
   }
   if (srcResolver) {
-    return srcResolver(photo.id, "thumb");
+    return srcResolver(photo.id, variant);
   }
   return "";
 }
@@ -264,7 +267,11 @@ export function matchPhotosToTimeline(
       continue;
     }
 
-    const src = resolvePhotoSrc(photo, srcResolver);
+    const src = resolvePhotoSrc(
+      photo,
+      srcResolver,
+      spec.photo_card_style === "cinematic_stop" ? "full" : "thumb",
+    );
     const takenAtMsRaw = photo.taken_at_utc ? Date.parse(photo.taken_at_utc) : Number.NaN;
     const takenAtMs = Number.isFinite(takenAtMsRaw) ? takenAtMsRaw : null;
     const hasValidGps =
@@ -552,6 +559,168 @@ function travelFractionToProgress(lut: SpeedCurveLut | null, tau: number): numbe
   return clamp01((lo + frac) * lut.dp);
 }
 
+const MAP_TRANSITION_S = 0.5;
+const PHOTO_TRANSITION_S = 0.25;
+
+interface CinematicGroup {
+  progress: number;
+  startS: number;
+  durationS: number;
+  photos: MatchedPhoto[];
+}
+
+function buildCinematicSchedule(
+  spec: RenderSpecV2,
+  photos: readonly MatchedPhoto[],
+  stages: readonly TimelineStage[],
+  isPreview: boolean,
+) {
+  const base = computeJourneyDurationS(spec, isPreview);
+  const scale = base / spec.duration_seconds;
+  const intro = Math.min(spec.intro_hold_seconds * scale, base * 0.35);
+  const outro = Math.min(spec.outro_hold_seconds * scale, base * 0.35);
+  const travel = Math.max(0.05, base - intro - outro);
+  // Grouping uses export travel seconds so preview and export form identical groups.
+  const exportTravel = Math.max(
+    0.05,
+    spec.duration_seconds -
+      Math.min(spec.intro_hold_seconds, spec.duration_seconds * 0.35) -
+      Math.min(spec.outro_hold_seconds, spec.duration_seconds * 0.35),
+  );
+  const lut = getSpeedCurveLut(stages, spec);
+  const groups: CinematicGroup[] = [];
+  const stops = spec.show_photos && spec.photo_card_style === "cinematic_stop"
+    ? photos.filter((photo): photo is MatchedPhoto & { matchedProgress: number } =>
+        photo.matchedProgress !== null && Boolean(photo.src))
+      .sort((a, b) => a.matchedProgress - b.matchedProgress || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    : [];
+  let added = 0;
+  let previousExportTravelS = -Infinity;
+  let previousProgress = -Infinity;
+  for (const photo of stops) {
+    const progress = clamp01(photo.matchedProgress);
+    const travelFraction = progressToTravelFraction(lut, progress);
+    const exportTravelS = travelFraction * exportTravel;
+    const previous = groups[groups.length - 1];
+    const gap = spec.photo_group_gap_seconds ?? 1;
+    const joins = gap === 0 ? progress === previousProgress : exportTravelS - previousExportTravelS <= gap + 1e-9;
+    if (previous && joins) {
+      const extra = PHOTO_TRANSITION_S + spec.photo_display_seconds;
+      previous.photos.push(photo);
+      previous.durationS += extra;
+      added += extra;
+    } else {
+      const durationS = 2 * MAP_TRANSITION_S + spec.photo_display_seconds;
+      groups.push({ progress, startS: intro + travelFraction * travel + added, durationS, photos: [photo] });
+      added += durationS;
+    }
+    previousExportTravelS = exportTravelS;
+    previousProgress = progress;
+  }
+  return { groups, total: base + added, travel, intro, lut, stops };
+}
+
+/** Journey seconds before photo stops are added; previews cap it at 5 seconds. */
+export function computeJourneyDurationS(spec: RenderSpecV2, isPreview: boolean): number {
+  return isPreview ? Math.min(spec.duration_seconds, 5) : spec.duration_seconds;
+}
+
+/** Journey seconds elapsed when the marker reaches `progress`, excluding photo stops. */
+export function progressToJourneyTimeS(
+  spec: RenderSpecV2,
+  stages: readonly TimelineStage[],
+  progress: number,
+  isPreview: boolean,
+): number {
+  const base = computeJourneyDurationS(spec, isPreview);
+  const scale = base / spec.duration_seconds;
+  const intro = Math.min(spec.intro_hold_seconds * scale, base * 0.35);
+  const outro = Math.min(spec.outro_hold_seconds * scale, base * 0.35);
+  const travel = Math.max(0.05, base - intro - outro);
+  return intro + progressToTravelFraction(getSpeedCurveLut(stages, spec), progress) * travel;
+}
+
+/** Return journey time plus full cinematic photo holds and transitions. */
+export function computePhotoStopTotalDurationS(
+  spec: RenderSpecV2,
+  photos: readonly MatchedPhoto[],
+  stages: readonly TimelineStage[],
+  isPreview = false,
+): number {
+  if (spec.photo_card_style !== "cinematic_stop" || !spec.show_photos) {
+    return computeJourneyDurationS(spec, isPreview);
+  }
+  return buildCinematicSchedule(spec, photos, stages, isPreview).total;
+}
+
+/** Photo ids per cinematic stop in route order; grouping ignores the preview time scale. */
+export function computeCinematicPhotoGroups(
+  spec: RenderSpecV2,
+  photos: readonly MatchedPhoto[],
+  stages: readonly TimelineStage[],
+  isPreview = false,
+): string[][] {
+  return buildCinematicSchedule(spec, photos, stages, isPreview).groups.map((group) =>
+    group.photos.map((photo) => photo.id),
+  );
+}
+
+function evaluateCinematicStop(
+  stages: readonly TimelineStage[],
+  photos: readonly MatchedPhoto[],
+  spec: RenderSpecV2,
+  timeS: number,
+  isPreview: boolean,
+): TimelineScheduleResult {
+  const { groups, total, travel, intro, lut } = buildCinematicSchedule(spec, photos, stages, isPreview);
+  const time = Math.min(total, Math.max(0, Number.isFinite(timeS) ? timeS : 0));
+  let added = 0;
+  let progressRatio: number | undefined;
+  let activePhoto: ActivePhotoDisplay | null = null;
+  let cinematicMapZoom = 0;
+  for (const group of groups) {
+    if (time < group.startS) break;
+    const elapsed = time - group.startS;
+    if (elapsed >= group.durationS) {
+      added += group.durationS;
+      continue;
+    }
+    progressRatio = group.progress;
+    const ease = (t: number) => t * t * (3 - 2 * t);
+    const edge = clamp01(Math.min(elapsed, group.durationS - elapsed) / MAP_TRANSITION_S);
+    cinematicMapZoom = ease(clamp01(edge * 2));
+    const hold = spec.photo_display_seconds;
+    const stride = hold + PHOTO_TRANSITION_S;
+    const inPhotos = Math.max(0, elapsed - MAP_TRANSITION_S);
+    const index = Math.min(group.photos.length - 1, Math.floor((inPhotos + PHOTO_TRANSITION_S) / stride));
+    const photoElapsed = inPhotos - index * stride;
+    const crossfade = index > 0 && photoElapsed < 0;
+    activePhoto = {
+      photo: group.photos[index]!,
+      outgoingPhoto: crossfade ? group.photos[index - 1] : undefined,
+      opacity: crossfade ? ease(clamp01(1 + photoElapsed / PHOTO_TRANSITION_S)) : ease(clamp01(edge * 2 - 1)),
+      scale: 1,
+      kenBurnsScale: 1,
+      elapsedInDisplayS: Math.max(0, Math.min(hold, photoElapsed)),
+      displayDurationS: hold,
+    };
+    break;
+  }
+  progressRatio ??= travelFractionToProgress(lut, clamp01((time - added - intro) / travel));
+  return {
+    progressRatio,
+    travelDurationS: travel,
+    activePhoto,
+    cinematicMapZoom,
+    reachedPhotos: photos.filter(
+      (photo) =>
+        spec.show_photos &&
+        photo.matchedProgress !== null &&
+        (spec.visibility_mode === "full" || photo.matchedProgress <= progressRatio + 1e-6),
+    ),
+  };
+}
+
 /**
  * Deterministic timeline scheduler shared by editor playback, share playback,
  * and /render/$jobId MP4 frames. Handles intro/outro holds, photo_display_seconds,
@@ -565,6 +734,9 @@ export function evaluateTimelineSchedule(
   durationS: number,
   isPreview: boolean,
 ): TimelineScheduleResult {
+  if (spec.photo_card_style === "cinematic_stop") {
+    return evaluateCinematicStop(stages, matchedPhotos, spec, currentTimeS, isPreview);
+  }
   const safeDurationS = Number.isFinite(durationS) && durationS > 0 ? durationS : 1;
   const clampedTimeS = Math.min(Math.max(0, Number.isFinite(currentTimeS) ? currentTimeS : 0), safeDurationS);
 
@@ -722,6 +894,12 @@ export function progressRatioToTimeRatio(
   const target = clamp01(targetProgressRatio);
   if (target <= 0) return 0;
   if (target >= 1) return 1;
+
+  if (spec.photo_card_style === "cinematic_stop") {
+    const { groups, intro, travel, total, lut } = buildCinematicSchedule(spec, matchedPhotos, stages, isPreview);
+    const added = groups.reduce((sum, group) => sum + (group.progress < target ? group.durationS : 0), 0);
+    return clamp01((intro + progressToTravelFraction(lut, target) * travel + added) / total);
+  }
 
   const safeDurationS = Number.isFinite(durationS) && durationS > 0 ? durationS : 1;
   const holdScale =

@@ -117,6 +117,15 @@ describe("editor-store.ts", () => {
     expect(useEditorStore.getState().undoStack).toHaveLength(3);
   });
 
+  it("coalesces rapid photo_group_gap_seconds edits into one undo step", () => {
+    useEditorStore.getState().hydrateProject(makeProject());
+
+    useEditorStore.getState().updateSpec({ photo_group_gap_seconds: 2 });
+    vi.advanceTimersByTime(200);
+    useEditorStore.getState().updateSpec({ photo_group_gap_seconds: 3 });
+    expect(useEditorStore.getState().undoStack).toHaveLength(1);
+  });
+
   it("tracks dirty state, saving lifecycle, conflict errors, and project hydration", () => {
     const store = useEditorStore.getState();
     store.hydrateProject(makeProject());

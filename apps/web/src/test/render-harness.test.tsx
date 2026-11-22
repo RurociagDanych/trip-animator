@@ -112,7 +112,7 @@ describe("Deterministic Render Harness (/render/$jobId)", () => {
     expect(screen.getByTestId("canvas-elevation-overlay")).toHaveTextContent("2000 m");
   });
 
-  it("renders ManifestPhoto data_uri card and photo pin deterministically with pause_on_photo and adaptive multi-day zoom", async () => {
+  it.each(["corner", "cinematic_stop"] as const)("renders a %s manifest photo deterministically with adaptive zoom", async (style) => {
     const spec = createDefaultRenderSpecV2();
     spec.resolution = "1920x1080";
     spec.duration_seconds = 60;
@@ -121,6 +121,7 @@ describe("Deterministic Render Harness (/render/$jobId)", () => {
     spec.camera_mode = "follow-marker";
     spec.follow_zoom_mode = "adaptive";
     spec.show_photos = true;
+    spec.photo_card_style = style;
     spec.photo_display_seconds = 10;
     spec.pause_on_photo = true;
     spec.elevation_chart_overlay = true;
@@ -206,12 +207,20 @@ describe("Deterministic Render Harness (/render/$jobId)", () => {
     expect(renderer).toBeDefined();
     await renderer!.ready;
 
+    const cinematic = style === "cinematic_stop";
+    expect(renderer!.getFrameCount()).toBe(cinematic ? 710 : manifest.total_frames);
+    expect(screen.getByTestId("render-harness-root")).toHaveAttribute(
+      "data-total-frames",
+      String(renderer!.getFrameCount()),
+    );
+
     await act(async () => {
-      await renderer!.setFrame(300);
+      await renderer!.setFrame(cinematic ? 355 : 300);
     });
 
-    const card = screen.getByTestId("photo-stop-card");
-    expect(card).toHaveTextContent("Fictional Midpoint");
+    const card = screen.getByTestId(cinematic ? "cinematic-photo-stop" : "photo-stop-card");
+    if (cinematic) expect(screen.getByAltText("Fictional Midpoint")).toHaveClass("object-contain");
+    else expect(card).toHaveTextContent("Fictional Midpoint");
     expect(card.querySelector("img")).toHaveAttribute("src", svgDataUri);
     expect(screen.getByTestId("svg-photo-pin-photo-mid")).toBeInTheDocument();
 
@@ -349,5 +358,108 @@ describe("Deterministic Render Harness (/render/$jobId)", () => {
     });
     expect(screen.getByTestId("finale-poster-card")).toHaveTextContent("Fictional Meridian Epic");
     expect(screen.getByTestId("svg-climb-pin-climb-1")).toBeInTheDocument();
+  });
+  describe("cinematic_stop film total and grouped crossfade", () => {
+    const svgDataUri =
+      "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4IiBoZWlnaHQ9IjgiPjxyZWN0IHdpZHRoPSI4IiBoZWlnaHQ9IjgiIGZpbGw9IiMzOGJkZjgiLz48L3N2Zz4=";
+
+    function buildManifest(jobId: string, progresses: number[]): RenderManifest {
+      const spec = createDefaultRenderSpecV2();
+      spec.resolution = "1280x720";
+      spec.duration_seconds = 10;
+      spec.intro_hold_seconds = 0;
+      spec.outro_hold_seconds = 0;
+      spec.photo_card_style = "cinematic_stop";
+      spec.photo_display_seconds = 2;
+      spec.photo_group_gap_seconds = 1;
+      return {
+        job_id: jobId,
+        project_id: "proj-film",
+        project_title: "Fictional Film Route",
+        spec,
+        width: 1280,
+        height: 720,
+        fps: 10,
+        duration_s: 10,
+        total_frames: 101,
+        is_preview: false,
+        stages: [
+          {
+            id: "s-film",
+            name: "Fictional Film Stage",
+            day_index: 1,
+            stage_order: 0,
+            activity_type: "cycling",
+            color: "#38bdf8",
+            transition: "none",
+            distance_m: 10_000,
+            elevation_gain_m: 100,
+            moving_seconds: 1000,
+            elapsed_seconds: 1000,
+            has_timestamps: false,
+            points: [0, 1].map((i) => ({
+              lat: 0.1,
+              lon: 0.2 + i * 0.1,
+              lon_unwrapped: 0.2 + i * 0.1,
+              elev_m: 100,
+              cum_dist_m: i * 10_000,
+              speed_mps: 5,
+              grade_pct: 0,
+              elapsed_s: i * 1000,
+              ts_utc: null,
+              segment_idx: 0,
+            })),
+          },
+        ],
+        photos: progresses.map((progress, i) => ({
+          id: `photo-${i}`,
+          caption: `Fictional Photo ${i}`,
+          width: 640,
+          height: 480,
+          taken_at_utc: null,
+          lat: null,
+          lon: null,
+          matched_lat: 0.1,
+          matched_lon: 0.25,
+          matched_progress: progress,
+          match_method: "manual" as const,
+          data_uri: svgDataUri,
+        })),
+      };
+    }
+
+    async function mountHarness(manifest: RenderManifest) {
+      window.__TRIP_RENDER_MANIFEST__ = manifest;
+      const router = createAppRouter(createMemoryHistory({ initialEntries: [`/render/${manifest.job_id}`] }));
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      render(<App router={router} queryClient={queryClient} />);
+      await screen.findByTestId("render-harness-root");
+      await window.__TRIP_RENDERER__!.ready;
+      return window.__TRIP_RENDERER__!;
+    }
+
+    it.each([
+      ["no photos", [] as number[], 101],
+      ["one photo", [0.5], 130],
+      ["grouped photos", [0.5, 0.52], 153],
+    ])("reports the web film frame count for %s", async (_name, progresses, frames) => {
+      const renderer = await mountHarness(buildManifest("job-film-count", progresses));
+      expect(renderer.getFrameCount()).toBe(frames);
+    });
+
+    it("shows both photos of a group while crossfading between them", async () => {
+      const renderer = await mountHarness(buildManifest("job-film-fade", [0.5, 0.52]));
+      await act(async () => {
+        await renderer.setFrame(76);
+      });
+      expect(screen.getByAltText("Fictional Photo 0")).toBeInTheDocument();
+      expect(screen.getByAltText("Fictional Photo 1")).toBeInTheDocument();
+
+      await act(async () => {
+        await renderer.setFrame(90);
+      });
+      expect(screen.queryByAltText("Fictional Photo 0")).not.toBeInTheDocument();
+      expect(screen.getByAltText("Fictional Photo 1")).toBeInTheDocument();
+    });
   });
 });

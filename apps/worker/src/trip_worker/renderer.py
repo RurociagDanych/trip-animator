@@ -283,6 +283,91 @@ def make_ssrf_route_handler(
     return _handle_route
 
 
+async def _open_render_page(
+    page: Page,
+    manifest: RenderManifest,
+    settings: WorkerSettings,
+    route_handler: AsyncRouteHandler,
+) -> int:
+    """Load the render harness and return the frame count reported by the browser."""
+    await page.route("**/*", route_handler)
+    await page.add_init_script(build_manifest_init_script(manifest))
+
+    target_url = f"{settings.render_base_url.rstrip('/')}/render/{manifest.job_id}"
+    await page.goto(
+        target_url,
+        wait_until="domcontentloaded",
+        timeout=settings.render_ready_timeout_ms,
+    )
+
+    await page.wait_for_function(
+        "() => Boolean(window.__TRIP_RENDERER__ && window.__TRIP_RENDERER__.ready)",
+        timeout=settings.render_ready_timeout_ms,
+    )
+
+    js_frame_count = await page.evaluate(
+        """async () => {
+            const renderer = window.__TRIP_RENDERER__;
+            if (!renderer) {
+                throw new Error("window.__TRIP_RENDERER__ missing");
+            }
+            await renderer.ready;
+            return typeof renderer.getFrameCount === "function"
+                ? renderer.getFrameCount()
+                : null;
+        }"""
+    )
+    if isinstance(js_frame_count, (int, float)) and int(js_frame_count) > 0:
+        return int(js_frame_count)
+    return manifest.total_frames
+
+
+async def probe_manifest_frame_count(
+    manifest: RenderManifest,
+    settings: WorkerSettings,
+    *,
+    browser: Browser | None = None,
+    resolve_dns: bool = True,
+) -> int:
+    """Return the total frame count the browser schedule reports, without capturing frames.
+
+    Cinematic photo stops add time that only the shared web schedule can compute, so the
+    worker asks the same code that renders the frames instead of re-implementing it.
+    """
+
+    async def _probe(target: Browser) -> int:
+        context = await target.new_context(
+            viewport={"width": manifest.width, "height": manifest.height},
+            device_scale_factor=1,
+        )
+        try:
+            page = await context.new_page()
+            page.set_default_timeout(settings.render_frame_timeout_ms)
+            async with build_pinned_external_http_client(resolve_dns=resolve_dns) as http_client:
+                route_handler = make_ssrf_route_handler(
+                    render_origin=settings.render_base_url,
+                    allowed_external_hosts=settings.allowed_external_hosts,
+                    resolve_dns=resolve_dns,
+                    photo_assets={},
+                    http_client=http_client,
+                )
+                return await _open_render_page(page, manifest, settings, route_handler)
+        finally:
+            await context.close()
+
+    if browser is not None:
+        return await _probe(browser)
+    async with async_playwright() as pw:
+        launched = await pw.chromium.launch(
+            headless=True,
+            args=build_chromium_launch_args(settings),
+        )
+        try:
+            return await _probe(launched)
+        finally:
+            await launched.close()
+
+
 async def render_manifest_with_page(
     page: Page,
     manifest: RenderManifest,
@@ -321,38 +406,7 @@ async def render_manifest_with_page(
             tile_cache=resolved_cache,
             http_client=http_client,
         )
-        await page.route("**/*", route_handler)
-        await page.add_init_script(build_manifest_init_script(manifest))
-
-        target_url = f"{settings.render_base_url.rstrip('/')}/render/{manifest.job_id}"
-        await page.goto(
-            target_url,
-            wait_until="domcontentloaded",
-            timeout=settings.render_ready_timeout_ms,
-        )
-
-        await page.wait_for_function(
-            "() => Boolean(window.__TRIP_RENDERER__ && window.__TRIP_RENDERER__.ready)",
-            timeout=settings.render_ready_timeout_ms,
-        )
-
-        js_frame_count = await page.evaluate(
-            """async () => {
-                const renderer = window.__TRIP_RENDERER__;
-                if (!renderer) {
-                    throw new Error("window.__TRIP_RENDERER__ missing");
-                }
-                await renderer.ready;
-                return typeof renderer.getFrameCount === "function"
-                    ? renderer.getFrameCount()
-                    : null;
-            }"""
-        )
-        total_frames = (
-            int(js_frame_count)
-            if isinstance(js_frame_count, (int, float)) and int(js_frame_count) > 0
-            else manifest.total_frames
-        )
+        total_frames = await _open_render_page(page, manifest, settings, route_handler)
 
         eff_start = max(0, frame_start)
         eff_end = total_frames if frame_end is None else min(total_frames, frame_end)

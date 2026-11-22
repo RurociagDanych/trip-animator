@@ -8,7 +8,12 @@ import {
   type RenderManifest,
 } from "../lib/api/types";
 import { parseResolutionPreset } from "../lib/geo/format";
-import { evaluateTimelineSchedule, matchPhotosToTimeline } from "../lib/geo/photos";
+import {
+  computeJourneyDurationS,
+  computePhotoStopTotalDurationS,
+  evaluateTimelineSchedule,
+  matchPhotosToTimeline,
+} from "../lib/geo/photos";
 import { buildTimelineFromManifest } from "../lib/geo/timeline";
 
 function createFallbackManifest(jobId: string): RenderManifest {
@@ -98,20 +103,38 @@ export function RenderHarnessPage() {
     return createFallbackManifest(jobId);
   }, [jobId]);
 
-  const totalFrames = Math.max(1, manifest.total_frames);
   const timelineStages = useMemo(() => buildTimelineFromManifest(manifest), [manifest]);
   const matchedPhotos = useMemo(
     () => matchPhotosToTimeline(manifest.photos ?? [], timelineStages, manifest.spec),
     [manifest.photos, timelineStages, manifest.spec],
   );
 
+  const filmDurationS = useMemo(
+    () =>
+      computePhotoStopTotalDurationS(
+        manifest.spec,
+        matchedPhotos,
+        timelineStages,
+        manifest.is_preview,
+      ),
+    [manifest.spec, matchedPhotos, timelineStages, manifest.is_preview],
+  );
+  const hasPhotoStops =
+    manifest.spec.photo_card_style === "cinematic_stop" &&
+    filmDurationS > computeJourneyDurationS(manifest.spec, manifest.is_preview) + 1e-9;
+  const durationS = hasPhotoStops ? filmDurationS : manifest.duration_s;
+  const totalFrames = Math.max(
+    1,
+    hasPhotoStops ? Math.round(durationS * manifest.fps) : manifest.total_frames,
+  );
+
   const currentTimeS = useMemo(() => {
-    if (totalFrames <= 1 || manifest.duration_s <= 0) {
+    if (totalFrames <= 1 || durationS <= 0) {
       return 0;
     }
     const clampedFrame = Math.min(Math.max(0, frameIndex), totalFrames - 1);
-    return (clampedFrame / (totalFrames - 1)) * manifest.duration_s;
-  }, [frameIndex, totalFrames, manifest.duration_s]);
+    return (clampedFrame / (totalFrames - 1)) * durationS;
+  }, [frameIndex, totalFrames, durationS]);
 
   const schedule = useMemo(
     () =>
@@ -120,7 +143,7 @@ export function RenderHarnessPage() {
         matchedPhotos,
         manifest.spec,
         currentTimeS,
-        manifest.duration_s,
+        durationS,
         manifest.is_preview,
       ),
     [
@@ -128,7 +151,7 @@ export function RenderHarnessPage() {
       matchedPhotos,
       manifest.spec,
       currentTimeS,
-      manifest.duration_s,
+      durationS,
       manifest.is_preview,
     ],
   );
@@ -214,7 +237,7 @@ export function RenderHarnessPage() {
         stages={timelineStages}
         spec={manifest.spec}
         progressRatio={schedule.progressRatio}
-        durationS={manifest.duration_s}
+        durationS={durationS}
         travelDurationS={schedule.travelDurationS}
         isPreview={manifest.is_preview}
         renderMode="deterministic"
@@ -223,6 +246,7 @@ export function RenderHarnessPage() {
         controllerRef={canvasControllerRef}
         matchedPhotos={matchedPhotos}
         activePhoto={schedule.activePhoto}
+        cinematicMapZoom={schedule.cinematicMapZoom}
         climbs={manifest.climbs}
         projectTitle={manifest.project_title}
         totalStats={totalStats}
