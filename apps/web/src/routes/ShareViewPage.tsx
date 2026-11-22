@@ -26,6 +26,7 @@ import {
   type PublicProjectOut,
   type TelemetryChartOut,
   type TelemetryGeometryFeature,
+  type TelemetryTimelineOut,
 } from "../lib/api/types";
 import { formatDistance, formatElapsedTime, formatElevation } from "../lib/geo/format";
 import {
@@ -90,6 +91,19 @@ export function ShareViewPage() {
     retry: false,
   });
 
+  const timelineQuery = useQuery<TelemetryTimelineOut>({
+    queryKey: [
+      "share",
+      slug,
+      "timeline",
+      (project?.stages ?? []).map((s) => [s.id, s.point_count, s.trim_start_s, s.trim_end_s]),
+    ],
+    queryFn: ({ signal }) => shareApi.timeline(slug, { signal }),
+    enabled: Boolean(project),
+    staleTime: Infinity,
+    retry: false,
+  });
+
   const highlightsQuery = useQuery<ProjectHighlightsOut>({
     queryKey: ["share", slug, "highlights"],
     queryFn: ({ signal }) => shareApi.highlights(slug, signal),
@@ -130,8 +144,9 @@ export function ShareViewPage() {
         resolvedFeatures,
         chartQuery.data,
         spec,
+        timelineQuery.data,
       ),
-    [project?.stages, resolvedFeatures, chartQuery.data, spec],
+    [project?.stages, resolvedFeatures, chartQuery.data, spec, timelineQuery.data],
   );
 
   const matchedPhotos = useMemo(

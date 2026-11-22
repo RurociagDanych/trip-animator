@@ -398,6 +398,22 @@ class TelemetryGeometryOut(BaseModel):
     features: list[dict[str, object]]
 
 
+class TelemetryTimelinePointOut(BaseModel):
+    cum_dist_m: float
+    ts_ms: int
+
+
+class TelemetryTimelineStageOut(BaseModel):
+    stage_id: uuid.UUID
+    stage_order: int
+    points: list[TelemetryTimelinePointOut]
+
+
+class TelemetryTimelineOut(BaseModel):
+    project_id: uuid.UUID
+    stages: list[TelemetryTimelineStageOut]
+
+
 class StravaConnectOut(BaseModel):
     authorize_url: str
     state: str

@@ -42,6 +42,7 @@ import type {
   TelemetryChartOut,
   TelemetryChartPoint,
   TelemetryGeometryFeature,
+  TelemetryTimelineOut,
 } from "../lib/api/types";
 import { generateDirectorKeyframes } from "../lib/geo/director";
 import {
@@ -170,6 +171,19 @@ export function EditorPage() {
     queryKey: ["projects", projectId, "chart"],
     queryFn: ({ signal }) => telemetryApi.chart(projectId, { maxPoints: 1200, signal }),
     enabled: Boolean(projectQuery.data),
+    retry: false,
+  });
+
+  const timelineQuery = useQuery<TelemetryTimelineOut>({
+    queryKey: [
+      "projects",
+      projectId,
+      "timeline",
+      stages.map((s) => [s.id, s.point_count, s.trim_start_s, s.trim_end_s]),
+    ],
+    queryFn: ({ signal }) => telemetryApi.timeline(projectId, { signal }),
+    enabled: Boolean(projectQuery.data),
+    staleTime: Infinity,
     retry: false,
   });
 
@@ -366,6 +380,7 @@ export function EditorPage() {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["projects", projectId], exact: true }),
       queryClient.invalidateQueries({ queryKey: ["projects", projectId, "chart"] }),
+      queryClient.invalidateQueries({ queryKey: ["projects", projectId, "timeline"] }),
       queryClient.invalidateQueries({ queryKey: ["projects", projectId, "kpis"] }),
       queryClient.invalidateQueries({ queryKey: ["projects", projectId, "highlights"] }),
       queryClient.invalidateQueries({ queryKey: ["projects", projectId, "photos"] }),
@@ -413,8 +428,9 @@ export function EditorPage() {
         resolvedFeatures,
         chartQuery.data,
         spec,
+        timelineQuery.data,
       ),
-    [stages, resolvedFeatures, chartQuery.data, spec],
+    [stages, resolvedFeatures, chartQuery.data, spec, timelineQuery.data],
   );
 
   const projectPhotos = useMemo(

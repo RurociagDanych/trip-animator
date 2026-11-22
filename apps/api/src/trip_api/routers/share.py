@@ -19,11 +19,13 @@ from trip_api.schemas import (
     PublicProjectOut,
     TelemetryChartOut,
     TelemetryGeometryOut,
+    TelemetryTimelineOut,
 )
 from trip_api.services import (
     build_project_geometry_collection,
     build_project_highlights,
     build_project_telemetry_chart,
+    build_project_timeline,
     build_stage_geometry_feature,
     get_project_photos,
     get_project_stages,
@@ -157,6 +159,24 @@ def get_public_shared_chart(
     stages = _select_shared_stages(db, project.id, stage_id)
     try:
         return build_project_telemetry_chart(store, project.id, stages, max_points)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/timeline", response_model=TelemetryTimelineOut)
+def get_public_shared_timeline(
+    slug: str,
+    request: Request,
+    db: DbSession,
+    settings: AppSettings,
+    store: StoreDep,
+    stage_id: uuid.UUID | None = None,
+) -> TelemetryTimelineOut:
+    _rate_limit_share(request, db, settings)
+    project = _get_shared_project(db, slug)
+    stages = _select_shared_stages(db, project.id, stage_id)
+    try:
+        return build_project_timeline(store, project.id, stages)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

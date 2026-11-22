@@ -53,6 +53,7 @@ import type {
   TelemetryChartOut,
   TelemetryGeometryFeature,
   TelemetryGeometryOut,
+  TelemetryTimelineOut,
   VaultActivityDetailOut,
   VaultActivityListOut,
   VaultActivityMapOut,
@@ -251,6 +252,20 @@ export const stagesApi = {
 };
 
 export const telemetryApi = {
+  timeline(
+    projectId: string,
+    options?: { stageId?: string; signal?: AbortSignal },
+  ): Promise<TelemetryTimelineOut> {
+    const params = new URLSearchParams();
+    if (options?.stageId) {
+      params.set("stage_id", options.stageId);
+    }
+    const qs = params.toString();
+    return apiClient.get<TelemetryTimelineOut>(
+      `/api/v1/projects/${projectId}/telemetry/timeline${qs ? `?${qs}` : ""}`,
+      options?.signal,
+    );
+  },
   chart(
     projectId: string,
     options?: { stageId?: string; maxPoints?: number; signal?: AbortSignal },
@@ -397,6 +412,15 @@ export const shareApi = {
     const maxPoints = options?.maxPoints ?? 1200;
     return apiClient.get<TelemetryChartOut>(
       `/api/v1/share/${encodeURIComponent(slug)}/chart?max_points=${encodeURIComponent(String(maxPoints))}`,
+      options?.signal,
+    );
+  },
+  timeline(
+    slug: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<TelemetryTimelineOut> {
+    return apiClient.get<TelemetryTimelineOut>(
+      `/api/v1/share/${encodeURIComponent(slug)}/timeline`,
       options?.signal,
     );
   },
