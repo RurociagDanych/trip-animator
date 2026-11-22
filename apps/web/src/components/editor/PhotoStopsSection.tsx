@@ -18,6 +18,9 @@ export interface PhotoStopsSectionProps {
 
 type UploadStatus = "queued" | "uploading" | "success" | "duplicate" | "error";
 
+// Mirrors MAX_PHOTOS_PER_PROJECT in apps/api/src/trip_api/routers/photos.py; the API does not expose it.
+export const MAX_PHOTOS_PER_PROJECT = 100;
+
 interface PendingPhoto {
   id: string;
   file: File;
@@ -323,7 +326,7 @@ export function PhotoStopsSection({
           <span>Photo stops</span>
         </div>
         <span className="tabular-telemetry rounded bg-elevated px-1.5 py-0.5 text-[10px] text-ink-muted">
-          {photos.length} / 50
+          {photos.length} / {MAX_PHOTOS_PER_PROJECT}
         </span>
       </div>
 
