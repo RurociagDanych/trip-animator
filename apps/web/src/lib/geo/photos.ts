@@ -47,6 +47,11 @@ export interface TimelineScheduleResult {
 
 const TIMESTAMP_TOLERANCE_MS = 120_000;
 const MAX_GPS_MATCH_DISTANCE_M = 50_000;
+// A timestamp match is trusted only while it agrees with the photo GPS. The budget covers
+// phone GPS noise (tens of metres) plus riding up to TIMESTAMP_TOLERANCE_MS past a track
+// end at 60 km/h (2 km). A camera clock off by a whole hour puts the route point 10 to 30 km
+// away at cycling speed, so anything beyond the budget is a clock error and GPS decides.
+const MAX_TIMESTAMP_GPS_DISAGREEMENT_M = 2_000;
 
 export function resolvePhotoSrc(
   photo: PhotoInput,
@@ -261,7 +266,9 @@ function matchByGps(
  * Deterministically matches project photos onto the evaluated route timeline
  * via timestamp interpolation (with timezone-mismatch GPS fallback) or GPS nearest-segment projection.
  *
- * pinPosition always equals matchedPosition.
+ * A timestamp match is rejected when its route point is more than
+ * MAX_TIMESTAMP_GPS_DISAGREEMENT_M from the photo GPS; the photo then falls back to GPS
+ * projection or stays unmatched. pinPosition always equals matchedPosition.
  */
 export function matchPhotosToTimeline(
   photos: readonly PhotoInput[],
@@ -329,7 +336,6 @@ export function matchPhotosToTimeline(
           }
         }
       } else {
-        // Timestamp match with timezone-mismatch fallback (>50km from GPS)
         let tsCandidate: { position: [number, number]; progress: number } | null = null;
         if (takenAtMs !== null) {
           tsCandidate = matchByTimestamp(takenAtMs, stages, useTimeMetric, minMetric, maxMetric);
@@ -340,7 +346,7 @@ export function matchPhotosToTimeline(
               tsCandidate.position[0],
               tsCandidate.position[1],
             );
-            if (distFromGps > MAX_GPS_MATCH_DISTANCE_M) {
+            if (distFromGps > MAX_TIMESTAMP_GPS_DISAGREEMENT_M) {
               tsCandidate = null;
             }
           }

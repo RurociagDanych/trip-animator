@@ -115,3 +115,33 @@ describe("photo pin position", () => {
     expect(result.matchedProgress).toBeCloseTo(0.7, 6);
   });
 });
+
+describe("timestamp to GPS sanity threshold", () => {
+  it("rejects a timestamp match whose route point is 5 km from the photo GPS", () => {
+    const gpsLon = 0.05 + 5000 / METERS_PER_DEGREE;
+    const result = match(photo({ taken_at_utc: MIDWAY_ISO, lat: 0, lon: gpsLon }));
+
+    expect(result.matchMethod).not.toBe("timestamp");
+    expect(result.matchMethod).toBe("gps");
+    expect(result.matchedPosition![0]).toBeCloseTo(gpsLon, 6);
+    expect(result.pinPosition).toEqual(result.matchedPosition);
+  });
+
+  it("accepts a timestamp match whose route point is 1.5 km from the photo GPS", () => {
+    const gpsLon = 0.05 + 1500 / METERS_PER_DEGREE;
+    const result = match(photo({ taken_at_utc: MIDWAY_ISO, lat: 0, lon: gpsLon }));
+
+    expect(result.matchMethod).toBe("timestamp");
+    expect(result.matchedPosition![0]).toBeCloseTo(0.05, 6);
+    expect(result.matchedProgress).toBeCloseTo(0.5, 6);
+  });
+
+  it("leaves the photo unmatched when the timestamp match is rejected and GPS is too far from the route", () => {
+    const result = match(photo({ taken_at_utc: MIDWAY_ISO, lat: 1, lon: 0.05 }));
+
+    expect(result.matchMethod).toBe("unmatched");
+    expect(result.matchedPosition).toBeNull();
+    expect(result.pinPosition).toBeNull();
+    expect(result.matchedProgress).toBeNull();
+  });
+});

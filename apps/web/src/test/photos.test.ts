@@ -260,7 +260,7 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
     expect(at(5.01).progressRatio).toBeGreaterThan(0.5);
   });
 
-  it("matches photos by timestamp interpolation and falls back to GPS when timezone offset > 50km", () => {
+  it("matches photos by timestamp interpolation and falls back to GPS when the timestamp point is > 2 km from GPS", () => {
     const spec = createDefaultRenderSpecV2();
     const stage = makeStage();
 
@@ -269,7 +269,7 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
       taken_at_utc: "2040-04-12T08:08:20Z",
     });
 
-    // Timestamp points to the start; GPS is 0.9 degrees away (>50km at the equator).
+    // Timestamp points to the start; GPS is 0.03 degrees away (about 3.3 km at the equator).
     const wideStage: TimelineStage = {
       ...stage,
       distanceM: 111_000,
@@ -283,7 +283,7 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
       id: "p-tz",
       taken_at_utc: "2040-04-12T08:00:00Z",
       lat: 0.001,
-      lon: 0.9, // >50km away from 0.0 -> triggers GPS fallback
+      lon: 0.03, // over 2 km from 0.0 -> triggers GPS fallback
     });
 
     const farPhoto = makePhoto({
@@ -302,7 +302,7 @@ describe("Photo matching and pause scheduler (photos.ts)", () => {
     const tzRes = matchedTz.find((p) => p.id === "p-tz");
     const farRes = matchedTz.find((p) => p.id === "p-far");
     expect(tzRes?.matchMethod).toBe("gps");
-    expect(tzRes?.matchedProgress).toBeCloseTo(0.9, 2);
+    expect(tzRes?.matchedProgress).toBeCloseTo(0.03, 2);
     expect(farRes?.matchMethod).toBe("unmatched");
     expect(farRes?.matchedProgress).toBeNull();
   });
