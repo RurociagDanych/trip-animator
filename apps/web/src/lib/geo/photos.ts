@@ -304,6 +304,22 @@ export function matchPhotosToTimeline(
         matchedPosition = [photo.matched_lon, photo.matched_lat];
         pinPosition = hasValidGps ? [photo.lon!, photo.lat!] : matchedPosition;
         matchMethod = "manual";
+        // The backend progress is a fraction of the raw track length, while the timeline
+        // distance can be stretched to stage distance_m. Re-project the pin so the photo
+        // triggers exactly when the marker reaches its position on the timeline.
+        if (bounds) {
+          const projected = matchByGps(
+            photo.matched_lon,
+            photo.matched_lat,
+            stages,
+            useTimeMetric,
+            minMetric,
+            maxMetric,
+          );
+          if (projected) {
+            matchedProgress = projected.progress;
+          }
+        }
       } else {
         // Timestamp match with timezone-mismatch fallback (>50km from GPS)
         let tsCandidate: { position: [number, number]; progress: number } | null = null;
