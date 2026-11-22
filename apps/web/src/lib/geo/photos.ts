@@ -260,6 +260,8 @@ function matchByGps(
 /**
  * Deterministically matches project photos onto the evaluated route timeline
  * via timestamp interpolation (with timezone-mismatch GPS fallback) or GPS nearest-segment projection.
+ *
+ * pinPosition always equals matchedPosition.
  */
 export function matchPhotosToTimeline(
   photos: readonly PhotoInput[],
@@ -290,7 +292,6 @@ export function matchPhotosToTimeline(
       Math.abs(photo.lat) <= 90;
 
     let matchedPosition: [number, number] | null = null;
-    let pinPosition: [number, number] | null = null;
     let matchedProgress: number | null = null;
     let matchMethod: PhotoMatchMethod = "unmatched";
 
@@ -310,7 +311,6 @@ export function matchPhotosToTimeline(
       ) {
         matchedProgress = clamp01(photo.matched_progress);
         matchedPosition = [photo.matched_lon, photo.matched_lat];
-        pinPosition = hasValidGps ? [photo.lon!, photo.lat!] : matchedPosition;
         matchMethod = "manual";
         // The backend progress is a fraction of the raw track length, while the timeline
         // distance can be stretched to stage distance_m. Re-project the pin so the photo
@@ -348,7 +348,6 @@ export function matchPhotosToTimeline(
 
         if (tsCandidate) {
           matchedPosition = tsCandidate.position;
-          pinPosition = hasValidGps ? [photo.lon!, photo.lat!] : tsCandidate.position;
           matchedProgress = tsCandidate.progress;
           matchMethod = "timestamp";
         } else if (hasValidGps) {
@@ -362,7 +361,6 @@ export function matchPhotosToTimeline(
           );
           if (gpsCandidate) {
             matchedPosition = gpsCandidate.position;
-            pinPosition = [photo.lon!, photo.lat!];
             matchedProgress = gpsCandidate.progress;
             matchMethod = "gps";
           }
@@ -380,7 +378,6 @@ export function matchPhotosToTimeline(
     ) {
       matchedProgress = clamp01(photo.matched_progress);
       matchedPosition = [photo.matched_lon, photo.matched_lat];
-      pinPosition = hasValidGps ? [photo.lon!, photo.lat!] : matchedPosition;
       matchMethod = photo.match_method ?? "gps";
     }
 
@@ -394,7 +391,8 @@ export function matchPhotosToTimeline(
       lat: photo.lat,
       lon: photo.lon,
       matchedPosition,
-      pinPosition,
+      // The pin sits where the photo triggers so pin and stop agree; raw GPS stays in lat and lon.
+      pinPosition: matchedPosition,
       matchedProgress,
       matchMethod,
       src,
