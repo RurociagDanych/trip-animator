@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.orm import Session
 from trip_telemetry import (
     CURRENT_ETL_VERSION,
@@ -27,7 +27,7 @@ from trip_telemetry import (
 )
 
 from trip_api.config import Settings
-from trip_api.db import IngestJob, OAuthConnection, Project, Stage, User
+from trip_api.db import IngestJob, OAuthConnection, Project, Stage, User, VaultActivity
 from trip_api.deps import ensure_utc
 from trip_api.security import decrypt_secret, encrypt_secret, validate_outbound_url
 from trip_api.services import (
@@ -36,6 +36,7 @@ from trip_api.services import (
     ingest_parsed_track,
     persist_or_delete_stage_chart_cache,
     persist_or_delete_stage_lod_cache,
+    prepare_stage_artifacts,
     stage_chart_cache_key,
     stage_events_cache_key,
     stage_lod_cache_key,
@@ -43,6 +44,8 @@ from trip_api.services import (
 )
 from trip_api.storage import ObjectStore
 from trip_api.vault_sync import (
+    PreparedStageVaultGeometry,
+    apply_strava_track_geometry,
     bump_user_vault_version,
     delete_strava_vault_activity,
     mirror_stage_to_vault,
@@ -350,7 +353,10 @@ def count_pending_ingest_jobs(
             _eligible_ingest_condition(current_time),
             IngestJob.attempt_count < max_attempts,
         )
-        .order_by(IngestJob.created_at.asc())
+        .order_by(
+            case((IngestJob.payload_json["kind"].as_string() == "library_enrichment", 1), else_=0),
+            IngestJob.created_at.asc(),
+        )
         .limit(batch_size)
     )
     return len(list(db.scalars(stmt).all()))
@@ -372,7 +378,10 @@ def _claim_ingest_jobs(
             _eligible_ingest_condition(now),
             IngestJob.attempt_count < max_attempts,
         )
-        .order_by(IngestJob.created_at.asc())
+        .order_by(
+            case((IngestJob.payload_json["kind"].as_string() == "library_enrichment", 1), else_=0),
+            IngestJob.created_at.asc(),
+        )
         .limit(batch_size)
     )
     dialect = db.bind.dialect.name if db.bind is not None else ""
@@ -409,6 +418,43 @@ def _delete_stage_and_artifacts(db: Session, store: ObjectStore, stage: Stage) -
             store.delete(key)
         except Exception:
             logger.warning("Failed deleting stage artifact %s", key)
+
+
+def _catalog_target_is_current(
+    db: Session,
+    *,
+    connection_id: uuid.UUID,
+    owner_id: uuid.UUID,
+    external_object_id: int,
+    expected_id: uuid.UUID | None,
+) -> bool:
+    connection = db.scalar(
+        select(OAuthConnection)
+        .join(User, OAuthConnection.user_id == User.id)
+        .where(
+            OAuthConnection.id == connection_id,
+            OAuthConnection.user_id == owner_id,
+            OAuthConnection.provider == "strava",
+            User.is_active.is_(True),
+        )
+        .execution_options(populate_existing=True)
+        .with_for_update(of=OAuthConnection)
+    )
+    if connection is None:
+        return False
+    activity = db.scalar(
+        select(VaultActivity)
+        .where(
+            VaultActivity.user_id == owner_id,
+            VaultActivity.source_provider == "strava",
+            VaultActivity.strava_activity_id == external_object_id,
+        )
+        .execution_options(populate_existing=True)
+        .with_for_update()
+    )
+    if expected_id is not None and (activity is None or activity.id != expected_id):
+        return False
+    return activity is None or activity.disconnected_at is None
 
 
 def process_pending_ingest_jobs(
@@ -487,6 +533,30 @@ def process_pending_ingest_jobs(
             succeeded += 1
             continue
 
+        is_library_enrichment = job.payload_json.get("kind") == "library_enrichment"
+        original = db.scalar(
+            select(VaultActivity).where(
+                VaultActivity.user_id == conn.user_id,
+                VaultActivity.source_provider == "strava",
+                VaultActivity.strava_activity_id == job.external_object_id,
+            )
+        )
+        expected_catalog_id = original.id if original is not None else None
+        if (original is not None and original.disconnected_at is not None) or (
+            is_library_enrichment
+            and (
+                job.payload_json.get("owner_user_id") != str(conn.user_id)
+                or expected_catalog_id is None
+                or job.payload_json.get("catalog_activity_id") != str(expected_catalog_id)
+            )
+        ):
+            job.status = "ignored"
+            job.lease_expires_at = None
+            job.error_message = "Catalog activity no longer eligible for enrichment"
+            db.commit()
+            ignored += 1
+            continue
+        owner_id, connection_id = conn.user_id, conn.id
         is_bulk_import = (
             isinstance(job.payload_json, dict)
             and job.payload_json.get("source") == "strava_bulk_import"
@@ -526,6 +596,7 @@ def process_pending_ingest_jobs(
                 ignored += 1
                 continue
 
+            db.commit()
             auth_headers = {"Authorization": f"Bearer {access_token}"}
             act_resp = _strava_sync_request(
                 client_factory,
@@ -559,50 +630,69 @@ def process_pending_ingest_jobs(
             activity_json = act_resp.json()
             if not isinstance(activity_json, dict):
                 raise ValueError("Malformed Strava activity JSON")
+            if activity_json.get("id") != job.external_object_id:
+                raise ValueError("Provider activity identity differs from the queued target")
 
-            existing_stage = db.scalar(
-                select(Stage)
-                .join(Project, Stage.project_id == Project.id)
-                .where(
-                    Project.owner_user_id == conn.user_id,
-                    Stage.strava_activity_id == job.external_object_id,
+            existing_stage = (
+                None
+                if not is_bulk_import
+                else db.scalar(
+                    select(Stage)
+                    .join(Project, Stage.project_id == Project.id)
+                    .where(
+                        Project.owner_user_id == conn.user_id,
+                        Stage.strava_activity_id == job.external_object_id,
+                    )
                 )
             )
 
-            # Webhook create/update upserts into the Activity Vault only,
-            # hydrating streams ONLY when a Stage for this activity already exists.
             if not is_bulk_import and existing_stage is None:
-                upsert_res = upsert_strava_activity_to_vault(
+                if not _catalog_target_is_current(
                     db,
-                    user_id=conn.user_id,
-                    item=activity_json,
-                    now=current_time,
-                )
-                recompute_user_chronological_new_tiles(db, conn.user_id)
-                bump_user_vault_version(db, conn.user_id)
-                write_audit_event(
-                    db,
-                    user_id=conn.user_id,
-                    event_type="vault.strava_webhook_upserted",
-                    metadata={
-                        "vault_activity_id": str(upsert_res.vault_activity.id),
-                        "strava_activity_id": job.external_object_id,
-                        "event_type": job.event_type,
-                    },
-                )
-                job.status = "succeeded"
-                job.error_message = None
-                job.lease_expires_at = None
-                db.commit()
-                succeeded += 1
-                continue
+                    connection_id=connection_id,
+                    owner_id=owner_id,
+                    external_object_id=job.external_object_id,
+                    expected_id=expected_catalog_id,
+                ):
+                    job.status = "ignored"
+                    job.lease_expires_at = None
+                    db.commit()
+                    ignored += 1
+                    continue
+                expected_catalog_id = upsert_strava_activity_to_vault(
+                    db, user_id=owner_id, item=activity_json, now=current_time
+                ).vault_activity.id
+            db.commit()
 
             if not activity_json.get("start_latlng"):
                 if not is_bulk_import:
+                    if not _catalog_target_is_current(
+                        db,
+                        connection_id=connection_id,
+                        owner_id=owner_id,
+                        external_object_id=job.external_object_id,
+                        expected_id=expected_catalog_id,
+                    ):
+                        job.status = "ignored"
+                        job.lease_expires_at = None
+                        db.commit()
+                        ignored += 1
+                        continue
                     upsert_res = upsert_strava_activity_to_vault(
                         db,
                         user_id=conn.user_id,
                         item=activity_json,
+                        now=current_time,
+                    )
+                    activity = upsert_res.vault_activity
+                    activity.bronze_object_key = None
+                    activity.silver_object_key = None
+                    activity.source_sha256 = None
+                    activity.source_stage_id = None
+                    apply_strava_track_geometry(
+                        db,
+                        activity,
+                        PreparedStageVaultGeometry(summary_polyline=None, tiles_z14=frozenset()),
                         now=current_time,
                     )
                     recompute_user_chronological_new_tiles(db, conn.user_id)
@@ -671,6 +761,65 @@ def process_pending_ingest_jobs(
                 str(raw_sport) if raw_sport is not None else None,
                 parsed.name,
             )
+
+            if not is_bulk_import and existing_stage is None:
+                assert expected_catalog_id is not None
+                artifacts = prepare_stage_artifacts(
+                    store=store,
+                    project_id=expected_catalog_id,
+                    parsed=parsed,
+                    raw_bronze_bytes=raw_bronze,
+                    bronze_ext="json",
+                    bronze_content_type="application/json",
+                )
+                if not _catalog_target_is_current(
+                    db,
+                    connection_id=connection_id,
+                    owner_id=owner_id,
+                    external_object_id=job.external_object_id,
+                    expected_id=expected_catalog_id,
+                ):
+                    job.status = "ignored"
+                    job.lease_expires_at = None
+                    job.error_message = "Catalog lifecycle changed during enrichment"
+                    db.commit()
+                    for key in (
+                        artifacts.bronze_key,
+                        artifacts.silver_key,
+                        artifacts.lod_key,
+                        artifacts.chart_key,
+                        artifacts.events_key,
+                    ):
+                        store.delete(key)
+                    ignored += 1
+                    continue
+                upsert_res = upsert_strava_activity_to_vault(
+                    db, user_id=owner_id, item=activity_json, now=current_time
+                )
+                vault_activity = upsert_res.vault_activity
+                vault_activity.bronze_object_key = artifacts.bronze_key
+                vault_activity.silver_object_key = artifacts.silver_key
+                vault_activity.source_sha256 = artifacts.full_sha256
+                vault_activity.source_stage_id = None
+                apply_strava_track_geometry(db, vault_activity, vault_geom, now=current_time)
+                recompute_user_chronological_new_tiles(db, conn.user_id)
+                bump_user_vault_version(db, conn.user_id)
+                write_audit_event(
+                    db,
+                    user_id=conn.user_id,
+                    event_type="vault.strava_webhook_upserted",
+                    metadata={
+                        "vault_activity_id": str(vault_activity.id),
+                        "strava_activity_id": job.external_object_id,
+                        "event_type": job.event_type,
+                    },
+                )
+                job.status = "succeeded"
+                job.error_message = None
+                job.lease_expires_at = None
+                db.commit()
+                succeeded += 1
+                continue
 
             if existing_stage is not None:
                 # Refresh the canonical Strava record, never the project stage:

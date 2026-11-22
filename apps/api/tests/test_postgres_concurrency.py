@@ -1,12 +1,16 @@
+"""Exercise migrations and transactional boundaries against isolated PostgreSQL databases."""
+
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 import socket
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 from threading import Barrier, Event, Lock
 from typing import Any
@@ -26,6 +30,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from trip_api.config import Settings
 from trip_api.db import (
     AuditEvent,
+    IngestJob,
     OAuthConnection,
     OAuthState,
     Project,
@@ -40,10 +45,13 @@ from trip_api.db import (
     create_db_engine,
     create_session_factory,
 )
+from trip_api.ingest import process_pending_ingest_jobs
 from trip_api.main import create_app
 from trip_api.rate_limit import check_rate_limit
 from trip_api.security import encrypt_secret, hash_password
 from trip_api.storage import LocalObjectStore
+from trip_api.vault_sync import upsert_strava_activity_to_vault
+from trip_telemetry import build_silver_dataframe, parse_track_bytes
 
 pytestmark = pytest.mark.postgres
 
@@ -280,7 +288,7 @@ def test_postgres_alembic_upgrade_downgrade_upgrade_roundtrip(pg_temp_db_url: st
         assert expected_tables <= set(inspect(engine_reup).get_table_names())
         with engine_reup.connect() as conn:
             ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-            assert ver == "0011_vault_activity_search_name"
+            assert ver == "0012_vault_original_artifacts"
     finally:
         engine_reup.dispose()
 
@@ -948,10 +956,23 @@ def test_postgres_library_reuse_does_not_lock_source_during_artifact_copy(
     activity_id = uuid.uuid4()
     source_project_id = uuid.uuid4()
     source_stage_id = uuid.uuid4()
-    bronze_key = f"source/{activity_id}.gpx"
-    silver_key = f"source/{activity_id}.parquet"
-    original_bronze = b"canonical bronze bytes"
-    original_silver = b"canonical silver bytes"
+    bronze_key = f"bronze/{source_project_id}/{source_stage_id}/original.gpx"
+    silver_key = f"silver/{source_project_id}/{source_stage_id}.parquet"
+    original_bronze = (
+        b'<gpx version="1.1" creator="local-test"><trk><trkseg>'
+        b'<trkpt lat="52.0" lon="21.0"><time>2026-01-01T10:00:00Z</time></trkpt>'
+        b'<trkpt lat="52.01" lon="21.01"><time>2026-01-01T10:01:00Z</time></trkpt>'
+        b'<trkpt lat="52.02" lon="21.02"><time>2026-01-01T10:02:00Z</time></trkpt>'
+        b"</trkseg></trk></gpx>"
+    )
+    frame, _ = build_silver_dataframe(
+        parse_track_bytes(original_bronze, format_hint="gpx"),
+        trip_id=str(source_project_id),
+        stage_id=str(source_stage_id),
+    )
+    buffer = BytesIO()
+    frame.write_parquet(buffer)
+    original_silver = buffer.getvalue()
     store.put_bytes(bronze_key, original_bronze)
     store.put_bytes(silver_key, original_silver)
     with sf() as db:
@@ -983,6 +1004,7 @@ def test_postgres_library_reuse_does_not_lock_source_during_artifact_copy(
             day_index=1,
             bronze_object_key=bronze_key,
             silver_object_key=silver_key,
+            bronze_sha256=hashlib.sha256(original_bronze).hexdigest(),
             point_count=3,
             distance_m=1234.0,
             elevation_gain_m=20.0,
@@ -1087,3 +1109,152 @@ def test_postgres_library_reuse_does_not_lock_source_during_artifact_copy(
         assert after_counts == before_counts
         activity = db.get(VaultActivity, activity_id)
         assert activity is not None and activity.disconnected_at is not None
+
+
+@pytest.mark.parametrize("invalidation", [None, "disconnect", "delete", "oauth", "deactivate"])
+def test_postgres_enrichment_revalidates_after_stream_io_and_preserves_project_edits(
+    pg_app_factory: Any, monkeypatch: pytest.MonkeyPatch, invalidation: str | None
+) -> None:
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_public_getaddrinfo)
+    _, settings, _, sf, store = pg_app_factory()
+    user = _create_pg_user(sf, "enrichment-race@example.com")
+    now = datetime.now(UTC)
+    summary = {
+        "id": 8801,
+        "name": "Original ride",
+        "sport_type": "Ride",
+        "start_date": "2026-06-01T08:00:00Z",
+        "start_latlng": [46.5, 11.8],
+        "end_latlng": [46.52, 11.82],
+        "map": {"summary_polyline": ""},
+        "distance": 4200,
+        "moving_time": 120,
+        "elapsed_time": 120,
+    }
+    with sf() as db:
+        db.add(
+            OAuthConnection(
+                user_id=user.id,
+                provider="strava",
+                external_athlete_id="777888",
+                access_token_enc=encrypt_secret(
+                    "synthetic-access",
+                    settings.decoded_encryption_key,
+                    aad=f"oauth:{user.id}:strava".encode(),
+                ),
+                refresh_token_enc=encrypt_secret(
+                    "synthetic-refresh",
+                    settings.decoded_encryption_key,
+                    aad=f"oauth:{user.id}:strava".encode(),
+                ),
+                expires_at=now + timedelta(hours=1),
+                scope="read,activity:read_all",
+            )
+        )
+        activity = upsert_strava_activity_to_vault(
+            db, user_id=user.id, item=summary, now=now
+        ).vault_activity
+        activity_id = activity.id
+        project = Project(owner_user_id=user.id, title="QA — Edited project", settings_json={})
+        db.add(project)
+        db.flush()
+        stage = Stage(
+            project_id=project.id,
+            source_type="strava",
+            source_format="strava",
+            activity_type="cycling",
+            strava_activity_id=8801,
+            vault_activity_id=activity_id,
+            name="Edited project geometry",
+            stage_order=0,
+            day_index=1,
+            bronze_object_key="bronze/edited.json",
+            silver_object_key="silver/edited.parquet",
+            point_count=2,
+            distance_m=90,
+            trim_start_s=30,
+            trim_end_s=60,
+        )
+        db.add(stage)
+        db.flush()
+        stage_id = stage.id
+        activity.source_stage_id = stage_id
+        db.add(
+            IngestJob(
+                provider="strava",
+                event_type="update",
+                external_owner_id="777888",
+                external_object_id=8801,
+                status="queued",
+                payload_json={
+                    "kind": "library_enrichment",
+                    "object_type": "activity",
+                    "owner_user_id": str(user.id),
+                    "catalog_activity_id": str(activity_id),
+                },
+            )
+        )
+        db.commit()
+    store.put_bytes("bronze/edited.json", b"preserved project source")
+    store.put_bytes("silver/edited.parquet", b"preserved project edits")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if not request.url.path.endswith("/streams"):
+            return httpx.Response(200, json=summary)
+        if invalidation is not None:
+            with sf() as concurrent:
+                concurrent.execute(text("SET LOCAL lock_timeout = '1s'"))
+                row = concurrent.get(VaultActivity, activity_id)
+                assert row is not None
+                if invalidation == "disconnect":
+                    row.disconnected_at = now
+                elif invalidation == "delete":
+                    concurrent.delete(row)
+                elif invalidation == "deactivate":
+                    concurrent.get(User, user.id).is_active = False
+                else:
+                    concurrent.delete(concurrent.scalar(select(OAuthConnection)))
+                concurrent.commit()
+        return httpx.Response(
+            200,
+            json={
+                "latlng": {"data": [[46.5, 11.8], [46.51, 11.81], [46.52, 11.82]]},
+                "time": {"data": [0, 60, 120]},
+                "altitude": {"data": [1000, 1010, 1020]},
+            },
+        )
+
+    with sf() as db:
+        result = process_pending_ingest_jobs(
+            db,
+            store,
+            settings,
+            http_client_factory=lambda: httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+        assert result["failed"] == 0
+        assert result["succeeded" if invalidation is None else "ignored"] == 1
+        assert db.scalar(select(func.count()).select_from(Project)) == 1
+        assert db.scalar(select(func.count()).select_from(Stage)) == 1
+        edited = db.get(Stage, stage_id)
+        assert edited is not None and edited.distance_m == 90
+        assert (edited.trim_start_s, edited.trim_end_s) == (30, 60)
+        original = db.get(VaultActivity, activity_id)
+        if invalidation is None:
+            assert original is not None and original.source_stage_id is None
+            assert original.silver_object_key != edited.silver_object_key
+            assert original.tile_precision == "full_stream"
+            assert store.get_bytes(original.bronze_object_key)
+            assert store.get_bytes(original.silver_object_key)
+        elif invalidation == "delete":
+            assert original is None
+            assert db.scalar(select(VaultActivity.id)) is None
+        else:
+            assert original is not None and original.silver_object_key is None
+    assert store.get_bytes("bronze/edited.json") == b"preserved project source"
+    assert store.get_bytes("silver/edited.parquet") == b"preserved project edits"
+    if invalidation is not None:
+        assert {
+            str(path.relative_to(store.root_dir))
+            for path in Path(store.root_dir).rglob("*")
+            if path.is_file()
+        } == {"bronze/edited.json", "silver/edited.parquet"}

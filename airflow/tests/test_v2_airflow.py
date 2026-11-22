@@ -255,7 +255,7 @@ def test_ingest_worker_webhook_queue_and_silver_replay(
                 },
                 headers={"X-RateLimit-Usage": "5,50", "X-RateLimit-Limit": "100,1000"},
             )
-        if request.url.path.endswith("/activities/555001/streams"):
+        if request.url.path.endswith(("/activities/555001/streams", "/activities/555003/streams")):
             return httpx.Response(
                 200,
                 json={
@@ -291,6 +291,10 @@ def test_ingest_worker_webhook_queue_and_silver_replay(
             select(VaultActivity).where(VaultActivity.strava_activity_id == 555003)
         )
         assert webhook_activity is not None
+        assert webhook_activity.bronze_object_key is not None
+        assert webhook_activity.silver_object_key is not None
+        assert webhook_activity.source_sha256 is not None
+        assert airflow_harness.store.get_bytes(webhook_activity.silver_object_key)
         assert db.scalar(select(Stage).where(Stage.strava_activity_id == 555003)) is None
         assert db.scalar(select(Project).where(Project.title == "Strava Auto-Sync")) is None
 

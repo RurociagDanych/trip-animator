@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -26,6 +27,7 @@ from trip_api.db import (
     RenderJob,
     SessionRecord,
     Stage,
+    VaultActivity,
 )
 from trip_api.services import stage_lod_cache_key
 
@@ -375,6 +377,52 @@ def test_reconciliation_orphaned_blobs_grace_period_and_active_deletion(
     assert rec_active_0h["deleted_orphans_count"] == 2
     assert not object_exists(airflow_harness.store, recent_silver_orphan)
     assert not object_exists(airflow_harness.store, recent_output_orphan)
+
+
+def test_reconciliation_preserves_standalone_library_originals(
+    airflow_harness: AirflowTaskHarness,
+) -> None:
+    user = airflow_harness.create_user("library-originals@example.com")
+    activity_id = uuid.uuid4()
+    now = datetime.now(UTC)
+    bronze = f"bronze/{activity_id}/original.json"
+    silver = f"silver/{activity_id}/original.parquet"
+    orphan_bronze = f"bronze/{activity_id}/orphan.json"
+    orphan_silver = f"silver/{activity_id}/orphan.parquet"
+    with airflow_harness.session_factory() as db:
+        db.add(
+            VaultActivity(
+                id=activity_id,
+                user_id=user.id,
+                source_provider="strava",
+                external_activity_id="123",
+                name="Standalone route",
+                started_at=now,
+                local_date=now.date(),
+                bronze_object_key=bronze,
+                silver_object_key=silver,
+            )
+        )
+        db.commit()
+
+    old_ts = (now - timedelta(hours=48)).timestamp()
+    for key in (bronze, silver, orphan_bronze, orphan_silver):
+        airflow_harness.store.put_bytes(key, b"synthetic artifact")
+        os.utime(airflow_harness.store.resolve_existing_path(key), (old_ts, old_ts))
+
+    with airflow_harness.session_factory() as db:
+        summary = reconcile_postgres_and_object_store(
+            db, airflow_harness.store, delete_orphans=True, now=now
+        )
+
+    assert summary["stages_checked"] == 0
+    assert summary["orphaned_bronze"] == [orphan_bronze]
+    assert summary["orphaned_silver"] == [orphan_silver]
+    assert summary["deleted_orphans_count"] == 2
+    assert airflow_harness.store.get_bytes(bronze) == b"synthetic artifact"
+    assert airflow_harness.store.get_bytes(silver) == b"synthetic artifact"
+    assert not object_exists(airflow_harness.store, orphan_bronze)
+    assert not object_exists(airflow_harness.store, orphan_silver)
 
 
 def test_silver_parquet_metadata_audit_comprehensive(

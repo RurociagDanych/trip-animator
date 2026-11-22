@@ -159,7 +159,7 @@ def test_alembic_vault_sqlite_upgrade_downgrade_roundtrip(
         }
         with engine.connect() as conn:
             ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-            assert ver == "0011_vault_activity_search_name"
+            assert ver == "0012_vault_original_artifacts"
     finally:
         engine.dispose()
 
@@ -713,6 +713,15 @@ def test_webhook_decision_1a_vault_upsert_hydrated_stage_update_and_delete(
                     "map": {"summary_polyline": poly},
                 },
             )
+        if req.url.path == "/api/v3/activities/8001/streams":
+            return httpx.Response(
+                200,
+                json={
+                    "latlng": {"data": [[46.50, 11.80], [46.51, 11.81], [46.52, 11.82]]},
+                    "time": {"data": [0, 60, 120]},
+                    "altitude": {"data": [1000.0, 1050.0, 1120.0]},
+                },
+            )
         if req.url.path == "/api/v3/activities/8002/streams":
             return httpx.Response(
                 200,
@@ -741,12 +750,31 @@ def test_webhook_decision_1a_vault_upsert_hydrated_stage_update_and_delete(
         db.commit()
         res1 = process_pending_ingest_jobs(db, h.store, h.settings, http_client_factory=factory)
         assert res1["succeeded"] == 1
-        assert requested_paths == ["/api/v3/activities/8001"]
+        assert requested_paths == [
+            "/api/v3/activities/8001",
+            "/api/v3/activities/8001/streams",
+        ]
         assert db.scalars(select(Stage)).all() == []
         assert db.scalars(select(Project)).all() == []
         va_8001 = db.scalar(select(VaultActivity).where(VaultActivity.strava_activity_id == 8001))
         assert va_8001 is not None
-        assert va_8001.tile_precision == "summary_polyline"
+        assert va_8001.tile_precision == "full_stream"
+        assert va_8001.bronze_object_key is not None
+        assert va_8001.silver_object_key is not None
+        assert va_8001.source_sha256 is not None
+        assert va_8001.source_stage_id is None
+        assert hashlib.sha256(h.store.get_bytes(va_8001.bronze_object_key)).hexdigest() == (
+            va_8001.source_sha256
+        )
+        assert va_8001.start_lat == 46.50
+        assert va_8001.end_lat == 46.52
+        assert va_8001.summary_polyline == encode_polyline(
+            [(46.50, 11.80), (46.51, 11.81), (46.52, 11.82)]
+        )
+        assert va_8001.elev_high_m == 1120.0
+        version = db.scalar(select(VaultSyncState).where(VaultSyncState.user_id == user.id))
+        assert version is not None
+        assert version.vault_version > 1
         assert va_8001.tile_count_z14 > 0
         assert va_8001.new_tiles_z14_count == va_8001.tile_count_z14
 
@@ -807,10 +835,12 @@ def test_webhook_decision_1a_vault_upsert_hydrated_stage_update_and_delete(
         assert updated_stage.distance_m == 1000.0
         assert updated_stage.trim_start_s == 15.0
         assert updated_stage.trim_end_s == 105.0
-        assert updated_stage.vault_activity_id is not None
+        assert updated_stage.vault_activity_id is None
 
-        va_8002 = db.get(VaultActivity, updated_stage.vault_activity_id)
+        va_8002 = db.get(VaultActivity, canonical_before_refresh.id)
         assert va_8002 is not None
+        assert va_8002.source_stage_id is None
+        assert va_8002.silver_object_key != updated_stage.silver_object_key
         assert va_8002.tile_precision == "full_stream"
         assert va_8002.id == canonical_before_refresh.id
         assert va_8002.elev_high_m == 1120.0
@@ -1009,6 +1039,103 @@ def test_stage_upload_split_mirroring_and_backfill_stages(
     assert missing_source_backfill.json()["mirrored_stages"] == 0
     assert missing_source_backfill.json()["linked_stages"] == 0
     assert alice_client.get("/api/v1/vault/sync/status").json()["total_activities"] == 0
+
+
+@pytest.mark.parametrize("invalidation", [None, "disconnect", "delete", "oauth", "owner"])
+def test_history_enrichment_fences_catalog_lifecycle_without_project_creation(
+    make_harness: HarnessFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    invalidation: str | None,
+) -> None:
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_public_getaddrinfo)
+    h = make_harness()
+    user = h.create_user("history-original@example.com")
+    _seed_strava_oauth(h, user.id, athlete_id="777888")
+    summary = _make_strava_summary(
+        8801,
+        started_at_utc=datetime(2026, 6, 1, 8, tzinfo=UTC),
+        points=[(46.5, 11.8), (46.52, 11.82)],
+    )
+    with h.session_factory() as db:
+        activity = upsert_strava_activity_to_vault(
+            db, user_id=user.id, item=summary, now=datetime.now(UTC)
+        ).vault_activity
+        assert activity is not None
+        activity_id = activity.id
+        db.add(
+            IngestJob(
+                provider="strava",
+                event_type="update",
+                external_owner_id="777888",
+                external_object_id=8801,
+                status="queued",
+                payload_json={
+                    "kind": "library_enrichment",
+                    "object_type": "activity",
+                    "owner_user_id": str(uuid.uuid4() if invalidation == "owner" else user.id),
+                    "catalog_activity_id": str(activity_id),
+                },
+            )
+        )
+        db.commit()
+
+    requested: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        requested.append(req.url.path)
+        if req.url.path.endswith("/streams"):
+            if invalidation in {"disconnect", "delete", "oauth"}:
+                with h.session_factory() as other:
+                    row = other.get(VaultActivity, activity_id)
+                    assert row is not None
+                    if invalidation == "disconnect":
+                        row.disconnected_at = datetime.now(UTC)
+                    elif invalidation == "delete":
+                        other.delete(row)
+                    else:
+                        connection = other.scalar(select(OAuthConnection))
+                        assert connection is not None
+                        other.delete(connection)
+                    other.commit()
+            return httpx.Response(
+                200,
+                json={
+                    "latlng": {"data": [[46.5, 11.8], [46.51, 11.81], [46.52, 11.82]]},
+                    "time": {"data": [0, 60, 120]},
+                    "altitude": {"data": [1000, 1010, 1020]},
+                },
+            )
+        return httpx.Response(200, json=summary)
+
+    with h.session_factory() as db:
+        result = process_pending_ingest_jobs(
+            db,
+            h.store,
+            h.settings,
+            http_client_factory=lambda: httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+        assert result["failed"] == 0
+        assert db.scalars(select(Project)).all() == []
+        assert db.scalars(select(Stage)).all() == []
+        row = db.get(VaultActivity, activity_id)
+        if invalidation is None:
+            assert result["succeeded"] == 1
+            assert row is not None and row.silver_object_key is not None
+            assert row.tile_precision == "full_stream"
+        elif invalidation == "delete":
+            assert row is None
+            assert (
+                db.scalar(
+                    select(VaultActivity.id).where(
+                        VaultActivity.strava_activity_id == 8801,
+                    )
+                )
+                is None
+            )
+        else:
+            assert row is not None and row.silver_object_key is None
+        if invalidation == "owner":
+            assert requested == []
 
 
 def test_catalog_first_mirror_attaches_only_eligible_local_strava_source(

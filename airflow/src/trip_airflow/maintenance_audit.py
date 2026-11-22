@@ -14,7 +14,7 @@ import pyarrow.parquet as pq  # type: ignore[import-untyped]
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from trip_api.config import Settings
-from trip_api.db import RenderJob, RenderJobChunk, Stage
+from trip_api.db import RenderJob, RenderJobChunk, Stage, VaultActivity
 from trip_api.deps import ensure_utc
 from trip_api.reaper import reap_expired
 from trip_api.services import (
@@ -105,7 +105,7 @@ def reconcile_postgres_and_object_store(
     fail_on_missing: bool = True,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Reconcile Stage and RenderJob DB records with bronze/, silver/, outputs/ objects."""
+    """Reconcile project, library, and render records with stored objects."""
     if orphan_min_age_hours < 0:
         raise ValueError("orphan_min_age_hours must be >= 0")
 
@@ -118,6 +118,17 @@ def reconcile_postgres_and_object_store(
 
     expected_bronze = {s.bronze_object_key for s in stages if s.bronze_object_key}
     expected_silver = {s.silver_object_key for s in stages if s.silver_object_key}
+    library_keys = db.execute(
+        select(VaultActivity.bronze_object_key, VaultActivity.silver_object_key).where(
+            VaultActivity.bronze_object_key.is_not(None)
+            | VaultActivity.silver_object_key.is_not(None)
+        )
+    )
+    for bronze_key, silver_key in library_keys:
+        if bronze_key:
+            expected_bronze.add(bronze_key)
+        if silver_key:
+            expected_silver.add(silver_key)
     expected_sidecars: set[str] = set()
     for s in stages:
         expected_sidecars.add(stage_lod_cache_key(s.project_id, s.id))
