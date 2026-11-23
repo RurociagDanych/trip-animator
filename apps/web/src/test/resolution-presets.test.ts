@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   createDefaultRenderSpecV2,
   normalizeRenderSpecV2,
+  type RenderSpecV2,
   type ResolutionPreset,
 } from "../lib/api/types";
 import { parseResolutionPreset } from "../lib/geo/format";
@@ -42,5 +43,13 @@ describe("resolution presets", () => {
       expect(width % 2).toBe(0);
       expect(height % 2).toBe(0);
     }
+  });
+
+  it("round-trips the supported frame rates and rejects others", () => {
+    for (const fps of [15, 30, 60] as const) {
+      expect(normalizeRenderSpecV2({ fps }).fps).toBe(fps);
+    }
+    const raw = { fps: 24 } as unknown as Partial<RenderSpecV2>;
+    expect(normalizeRenderSpecV2(raw).fps).toBe(createDefaultRenderSpecV2().fps);
   });
 });

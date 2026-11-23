@@ -9,6 +9,7 @@ import type {
   MapStylePreset,
   PanelPosition,
   PhotoCardStyle,
+  RenderFps,
   RenderSpecV2,
   ResolutionPreset,
   StatisticMetric,
@@ -594,9 +595,10 @@ export function InspectorPanel({
                 <span className="block font-medium text-ink-muted">Frame rate</span>
                 <select
                   value={spec.fps}
-                  onChange={(e) => onUpdateSpec({ fps: Number(e.currentTarget.value) as 30 | 60 })}
+                  onChange={(e) => onUpdateSpec({ fps: Number(e.currentTarget.value) as RenderFps })}
                   className="w-full rounded-md border border-border bg-elevated px-2.5 py-2 text-xs text-ink focus:border-sky-accent focus:outline-none"
                 >
+                  <option value={15}>15 fps</option>
                   <option value={30}>30 fps</option>
                   <option value={60}>60 fps</option>
                 </select>

@@ -223,10 +223,12 @@ export interface CameraKeyframe {
   label: string;
 }
 
+export type RenderFps = 15 | 30 | 60;
+
 export interface RenderSpecV2 {
   version: 2;
   resolution: ResolutionPreset;
-  fps: 30 | 60;
+  fps: RenderFps;
   map_style: MapStylePreset;
   duration_seconds: number;
   timeline_mode: TimelineMode;
@@ -995,6 +997,7 @@ export function createDefaultRenderSpecV2(): RenderSpecV2 {
   };
 }
 
+const VALID_FPS_SET = new Set<RenderFps>([15, 30, 60]);
 const VALID_RESOLUTION_SET = new Set<ResolutionPreset>([
   "1280x720",
   "1920x1080",
@@ -1108,6 +1111,10 @@ export function normalizeRenderSpecV2(raw?: Partial<RenderSpecV2> | null): Rende
   }
   const panelDefaults = defaults.statistics_panel;
   const rawPanel = raw.statistics_panel;
+  const fps: RenderFps =
+    typeof raw.fps === "number" && VALID_FPS_SET.has(raw.fps as RenderFps)
+      ? (raw.fps as RenderFps)
+      : defaults.fps;
   const resolution: ResolutionPreset =
     typeof raw.resolution === "string" && VALID_RESOLUTION_SET.has(raw.resolution as ResolutionPreset)
       ? (raw.resolution as ResolutionPreset)
@@ -1192,6 +1199,7 @@ export function normalizeRenderSpecV2(raw?: Partial<RenderSpecV2> | null): Rende
     ...raw,
     version: 2,
     resolution,
+    fps,
     map_style: mapStyle,
     duration_seconds: durationSeconds,
     camera_preset: cameraPreset,

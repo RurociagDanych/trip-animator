@@ -194,7 +194,10 @@ def test_build_render_manifest_multi_stage_with_trim_and_antimeridian(tmp_path: 
     assert [p.segment_idx for p in second.points] == [0, 1]
 
 
-def test_build_render_manifest_720p_portrait_uses_preset_dimensions(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("fps", "expected_frames"), [(30, 300), (15, 150)])
+def test_build_render_manifest_720p_portrait_uses_preset_dimensions(
+    tmp_path: Path, fps: int, expected_frames: int
+) -> None:
     store = LocalObjectStore(tmp_path)
     project_id = uuid.uuid4()
     stage_id = uuid.uuid4()
@@ -235,7 +238,7 @@ def test_build_render_manifest_720p_portrait_uses_preset_dimensions(tmp_path: Pa
         spec_json={
             "version": 2,
             "resolution": "720x1280",
-            "fps": 30,
+            "fps": fps,
             "duration_seconds": 10.0,
             "is_preview": False,
         },
@@ -245,7 +248,8 @@ def test_build_render_manifest_720p_portrait_uses_preset_dimensions(tmp_path: Pa
 
     assert manifest.width == 720
     assert manifest.height == 1280
-    assert manifest.total_frames == 300
+    assert manifest.fps == fps
+    assert manifest.total_frames == expected_frames
 
 
 def test_build_render_manifest_preview_caps_duration_and_downsamples(tmp_path: Path) -> None:
