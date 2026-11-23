@@ -14,7 +14,8 @@ type GoldenRow = { duration_s: number; fps: number; is_preview: boolean; frames:
 
 const GOLDEN_ROWS = JSON.parse(
   readFileSync(
-    resolve(process.cwd(), "../../packages/telemetry/tests/golden/frame_counts.json"),
+    // __dirname keeps the path stable when vitest runs from the repo root; process.cwd() does not.
+    resolve(__dirname, "../../../../packages/telemetry/tests/golden/frame_counts.json"),
     "utf8",
   ),
 ) as GoldenRow[];

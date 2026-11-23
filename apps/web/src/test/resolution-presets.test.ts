@@ -14,7 +14,7 @@ import { parseResolutionPreset } from "../lib/geo/format";
 
 const ALL_PRESETS: ResolutionPreset[] = [...RESOLUTION_PRESETS];
 
-const SCHEMA_PATH = resolve(process.cwd(), "../../packages/telemetry/src/trip_telemetry/schemas.py");
+const SCHEMA_PATH = resolve(__dirname, "../../../../packages/telemetry/src/trip_telemetry/schemas.py");
 
 function literalValues(source: string, pattern: RegExp): string[] {
   const match = pattern.exec(source);
