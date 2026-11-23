@@ -281,6 +281,20 @@ def test_third_party_debug_and_info_stay_hidden_when_worker_level_is_debug(
     assert [line["message"] for line in lines] == ["worker debug"]
 
 
+def test_playwright_level_resets_to_inherit_when_env_var_is_removed(
+    restore_root_logging: None,
+) -> None:
+    configure_logging(
+        environ={"TRIP_WORKER_PLAYWRIGHT_LOG_LEVEL": "DEBUG"},
+        stream=io.StringIO(),
+    )
+    assert logging.getLogger("playwright").level == logging.DEBUG
+
+    configure_logging(environ={}, stream=io.StringIO())
+
+    assert logging.getLogger("playwright").level == logging.NOTSET
+
+
 def test_configure_logging_installs_single_json_handler(
     restore_root_logging: None,
 ) -> None:

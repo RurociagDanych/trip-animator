@@ -144,7 +144,4 @@ def configure_logging(
     )
 
     playwright_raw = env.get(_PLAYWRIGHT_LEVEL_ENV)
-    if playwright_raw and playwright_raw.strip():
-        logging.getLogger("playwright").setLevel(
-            _parse_level(playwright_raw, default=logging.NOTSET)
-        )
+    logging.getLogger("playwright").setLevel(_parse_level(playwright_raw, default=logging.NOTSET))
