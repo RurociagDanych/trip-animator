@@ -110,6 +110,10 @@ class _StdoutJsonHandler(logging.Handler):
         self._stream = stream
         self.setFormatter(JsonFormatter())
 
+    def set_stream(self, stream: TextIO | None) -> None:
+        """Redirect output; None means the current sys.stdout."""
+        self._stream = stream
+
     def emit(self, record: logging.LogRecord) -> None:
         """Write one formatted record and flush so container log drivers see it promptly."""
         try:
@@ -139,7 +143,13 @@ def configure_logging(
     """Install the JSON stdout handler on the root logger once and apply level env vars."""
     env = os.environ if environ is None else environ
     root = logging.getLogger()
-    if not any(getattr(handler, _HANDLER_MARKER, False) for handler in root.handlers):
+    handler = next(
+        (h for h in root.handlers if getattr(h, _HANDLER_MARKER, False)),
+        None,
+    )
+    if isinstance(handler, _StdoutJsonHandler):
+        handler.set_stream(stream)
+    else:
         handler = _StdoutJsonHandler(stream)
         setattr(handler, _HANDLER_MARKER, True)
         root.addHandler(handler)

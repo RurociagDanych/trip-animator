@@ -329,6 +329,22 @@ def test_valid_level_values_emit_no_setup_warning(
     assert logging.getLogger("trip_worker").level == logging.DEBUG
 
 
+def test_repeat_configure_writes_to_the_latest_stream(
+    restore_root_logging: None,
+) -> None:
+    first = io.StringIO()
+    second = io.StringIO()
+    configure_logging(environ={}, stream=first)
+    configure_logging(environ={}, stream=second)
+
+    logging.getLogger("trip_worker.runner").warning("after reconfigure", extra={"event": "x"})
+
+    assert first.getvalue() == ""
+    assert [json.loads(line)["message"] for line in second.getvalue().splitlines()] == [
+        "after reconfigure"
+    ]
+
+
 def test_configure_logging_installs_single_json_handler(
     restore_root_logging: None,
 ) -> None:
