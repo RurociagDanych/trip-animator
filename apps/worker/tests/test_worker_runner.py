@@ -1524,6 +1524,50 @@ def test_chunked_job_fanout_render_concat_notifications_and_failure(
     fail_chunks = [ch for ch in db.chunks.values() if ch["render_job_id"] == fail_job_id]
     assert any(ch["status"] == "failed" for ch in fail_chunks)
     assert all(ch["status"] in {"failed", "cancelled"} for ch in fail_chunks)
+    first_chunk_id = str(fail_chunks[0]["id"])
+    assert f"Chunk {first_chunk_id} (job {fail_job_id}) failed: Invalid render job parameters" in [
+        r.getMessage() for r in chunk_failure_records
+    ]
+
+
+def test_failed_unchunked_job_warning_keeps_original_wording(
+    tmp_path: Path,
+    monkeypatch: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = LocalObjectStore(tmp_path)
+    db = InMemoryRenderDatabase()
+    owner_id, project_id, _ = _seed_project_and_stage(db, store)
+    cf = db.conn_factory()
+    job_id = uuid.uuid4()
+    db.jobs[job_id] = {
+        "id": job_id,
+        "project_id": project_id,
+        "owner_user_id": owner_id,
+        "spec_json": {"version": 2, "resolution": "1280x720", "fps": 30, "duration_seconds": 10.0},
+        "status": "queued",
+        "progress_pct": 0,
+        "attempt_count": 0,
+        "lease_expires_at": None,
+        "output_object_key": None,
+        "thumbnail_key": None,
+        "expires_at": None,
+        "error_message": None,
+        "is_chunked": False,
+        "total_frames": None,
+        "created_at": datetime.now(UTC),
+        "updated_at": datetime.now(UTC),
+    }
+
+    async def fail_render(*_a: Any, **_kw: Any) -> Path:
+        raise RuntimeError("boom")
+
+    settings = WorkerSettings(chunk_threshold_frames=10**9)
+    with caplog.at_level("WARNING", logger="trip_worker.runner"):
+        run_once(settings, conn_factory=cf, store=store, render_fn=fail_render)
+    assert f"Render job {job_id} failed: Render worker encountered an internal error" in [
+        r.getMessage() for r in caplog.records if r.name == "trip_worker.runner"
+    ]
 
 
 def test_run_worker_loop_concurrency_spawns_and_stops_threads(

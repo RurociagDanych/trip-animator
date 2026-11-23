@@ -1143,7 +1143,8 @@ class _JobLeaseSession:
                         return
                 except Exception:
                     logger.warning(
-                        "Background lease renewal failed",
+                        "Background lease renewal failed for job %s",
+                        self._job.id,
                         extra={"event": "lease_renew_failed", "job_id": self._job.id},
                         exc_info=True,
                     )
@@ -1283,7 +1284,8 @@ class _ChunkLeaseSession:
                         return
                 except Exception:
                     logger.warning(
-                        "Background chunk lease renewal failed",
+                        "Background chunk lease renewal failed for chunk %s",
+                        self._chunk.id,
                         extra={
                             "event": "lease_renew_failed",
                             "job_id": self._chunk.render_job_id,
@@ -1910,7 +1912,9 @@ def _process_claimed_chunk(
             fatal = isinstance(exc, (ValidationError, ValueError))
             msg = _sanitize_error_message(exc)
             logger.warning(
-                "Chunk failed: %s",
+                "Chunk %s (job %s) failed: %s",
+                chunk.id,
+                chunk.render_job_id,
                 msg,
                 extra={
                     "event": "chunk_failed",
@@ -2247,7 +2251,8 @@ def _process_claimed_job(
                         store.delete(thumbnail_key)
                         return "cancelled"
                     logger.warning(
-                        "Lost lease/fencing token before commit (attempt=%d)",
+                        "Lost lease/fencing token for job %s (attempt=%d) before commit",
+                        job.id,
                         job.attempt_count,
                         extra={"event": "lease_lost", "job_id": job.id, "stage": "commit"},
                     )
@@ -2279,13 +2284,15 @@ def _process_claimed_job(
             def _handle_cancel(conn: DbConnection) -> str:
                 if not is_job_cancelled(conn, job_id=job.id):
                     logger.warning(
-                        "Lost lease/fencing token (attempt=%d); aborting cleanly",
+                        "Lost lease/fencing token for job %s (attempt=%d); aborting cleanly",
+                        job.id,
                         job.attempt_count,
                         extra={"event": "lease_lost", "job_id": job.id, "stage": "cancel"},
                     )
                     return "lost_lease"
                 logger.info(
-                    "Render job cancelled; aborting cleanly",
+                    "Render job %s cancelled; aborting cleanly",
+                    job.id,
                     extra={"event": "job_cancelled", "job_id": job.id, "stage": "cancel"},
                 )
                 record_audit_event(
@@ -2303,7 +2310,8 @@ def _process_claimed_job(
             lease.stop_background_renewer()
             msg = _sanitize_error_message(exc)
             logger.warning(
-                "Render job failed validation fatally: %s",
+                "Render job %s failed validation fatally: %s",
+                job.id,
                 msg,
                 extra={"event": "job_failed_fatal", "job_id": job.id, "stage": "job"},
             )
@@ -2319,7 +2327,8 @@ def _process_claimed_job(
                 )
                 if final_status is None:
                     logger.warning(
-                        "Fencing token lost during fatal failure (attempt=%d)",
+                        "Fencing token lost for job %s (attempt=%d) during fatal failure",
+                        job.id,
                         job.attempt_count,
                         extra={"event": "lease_lost", "job_id": job.id, "stage": "fail"},
                     )
@@ -2339,7 +2348,8 @@ def _process_claimed_job(
             lease.stop_background_renewer()
             msg = _sanitize_error_message(exc)
             logger.exception(
-                "Render job failed: %s",
+                "Render job %s failed: %s",
+                job.id,
                 msg,
                 extra={"event": "job_failed", "job_id": job.id, "stage": "job"},
             )
@@ -2355,7 +2365,8 @@ def _process_claimed_job(
                 )
                 if final_status is None:
                     logger.warning(
-                        "Fencing token lost during error handling (attempt=%d)",
+                        "Fencing token lost for job %s (attempt=%d) during error handling",
+                        job.id,
                         job.attempt_count,
                         extra={"event": "lease_lost", "job_id": job.id, "stage": "fail"},
                     )
