@@ -863,3 +863,27 @@ async def test_ssrf_route_handler_external_without_tile_cache_blocks_redirects_a
         ("HEAD", "https://tiles.openfreemap.org/styles/liberty"),
         ("GET", "https://tiles.openfreemap.org/redir"),
     ]
+
+
+async def test_ssrf_route_handler_aborts_when_http_client_already_closed() -> None:
+    import httpx
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=b"{}")),
+        follow_redirects=False,
+    )
+    await client.aclose()
+    handler = make_ssrf_route_handler(
+        render_origin="http://caddy",
+        allowed_external_hosts=frozenset({"tiles.openfreemap.org"}),
+        resolve_dns=False,
+        tile_cache=None,
+        http_client=client,
+    )
+
+    route = FakeRoute("https://tiles.openfreemap.org/styles/liberty", method="GET")
+    await handler(route)  # type: ignore[arg-type]
+
+    assert route.aborted_reason == "failed"
+    assert route.continued is False
+    assert route.fulfilled is None
