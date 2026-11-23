@@ -755,7 +755,7 @@ export function TripStageCanvas({
     return { width, height };
   }, [renderMode, exactSize, observedSize, fallbackResolution]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (renderMode === "deterministic" && exactSize) {
       return;
     }
@@ -784,9 +784,15 @@ export function TripStageCanvas({
           width: (Number.parseFloat(frameStyle.borderLeftWidth) || 0) + (Number.parseFloat(frameStyle.borderRightWidth) || 0),
           height: (Number.parseFloat(frameStyle.borderTopWidth) || 0) + (Number.parseFloat(frameStyle.borderBottomWidth) || 0),
         };
-        setObservedSize(frameInteriorSize(fit, border));
+        const interior = frameInteriorSize(fit, border);
+        setObservedSize((prev) =>
+          prev && prev.width === interior.width && prev.height === interior.height ? prev : interior,
+        );
       } else if (el.clientWidth > 0 && el.clientHeight > 0) {
-        setObservedSize({ width: el.clientWidth, height: el.clientHeight });
+        const next = { width: el.clientWidth, height: el.clientHeight };
+        setObservedSize((prev) =>
+          prev && prev.width === next.width && prev.height === next.height ? prev : next,
+        );
       }
     };
     const observer = new ResizeObserver(measure);
