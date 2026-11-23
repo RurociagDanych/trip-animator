@@ -71,6 +71,7 @@ describe("Web UI & timeline fixes", () => {
   });
 
   it("ExportPanel preserves spec.duration_seconds for 5s preview so holdScale stays proportional", async () => {
+    useEditorStore.getState().setPreviewWatermark(true);
     const spec = createDefaultRenderSpecV2();
     spec.duration_seconds = 30;
     spec.intro_hold_seconds = 3;
