@@ -1841,7 +1841,13 @@ def process_claimed_chunk(
             lease.stop_background_renewer()
             fatal = isinstance(exc, (ValidationError, ValueError))
             msg = _sanitize_error_message(exc)
-            logger.warning("Chunk %s (job %s) failed: %s", chunk.id, chunk.render_job_id, msg)
+            logger.warning(
+                "Chunk %s (job %s) failed: %s",
+                chunk.id,
+                chunk.render_job_id,
+                msg,
+                exc_info=True,
+            )
 
             def _handle_chunk_error(conn: DbConnection) -> str:
                 res_row = conn.execute(
