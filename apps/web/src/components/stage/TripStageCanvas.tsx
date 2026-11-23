@@ -27,7 +27,6 @@ import type {
   ClimbHighlightOut,
   ManifestClimb,
   RenderSpecV2,
-  ResolutionPreset,
   TransitionIcon,
 } from "../../lib/api/types";
 import {
@@ -41,6 +40,7 @@ import {
   formatDistance,
   formatElapsedTime,
   formatElevation,
+  fitResolutionPreset,
   parseResolutionPreset,
 } from "../../lib/geo/format";
 import {
@@ -76,14 +76,6 @@ import {
 } from "../../lib/geo/timeline";
 import { ActivityIcon, ActivityMarkerBadge, ActivitySvgGroup } from "../icons";
 import { StatisticsHud } from "./StatisticsHud";
-
-const ASPECT_RATIO_CLASS: Record<ResolutionPreset, string> = {
-  "1920x1080": "aspect-video max-w-full max-h-full",
-  "1280x720": "aspect-video max-w-full max-h-full",
-  "1080x1080": "aspect-square max-h-full",
-  "1080x1350": "aspect-[4/5] max-h-full",
-  "1080x1920": "aspect-[9/16] max-h-full",
-};
 
 const BUILDINGS_LAYER_ID = "trip-3d-buildings";
 const EMPTY_MATCHED_PHOTOS: readonly MatchedPhoto[] = [];
@@ -746,6 +738,7 @@ export function TripStageCanvas({
     null,
   );
   const [observedSize, setObservedSize] = useState<{ width: number; height: number } | null>(null);
+  const [containerFit, setContainerFit] = useState<{ width: number; height: number } | null>(null);
 
   const fallbackResolution = useMemo(() => parseResolutionPreset(spec.resolution), [spec.resolution]);
   const viewportSize = useMemo(() => {
@@ -769,14 +762,34 @@ export function TripStageCanvas({
     if (!el || typeof ResizeObserver === "undefined") {
       return;
     }
-    const observer = new ResizeObserver(() => {
+    // Fit the preview box to the dock, so a resolution change re-measures even when
+    // the dock itself does not resize.
+    const measure = () => {
       if (el.clientWidth > 0 && el.clientHeight > 0) {
         setObservedSize({ width: el.clientWidth, height: el.clientHeight });
       }
-    });
+      const parent = el.parentElement;
+      if (!parent) {
+        return;
+      }
+      const style = window.getComputedStyle(parent);
+      const available = {
+        width: parent.clientWidth - (Number.parseFloat(style.paddingLeft) || 0) - (Number.parseFloat(style.paddingRight) || 0),
+        height: parent.clientHeight - (Number.parseFloat(style.paddingTop) || 0) - (Number.parseFloat(style.paddingBottom) || 0),
+      };
+      const fit = fitResolutionPreset(spec.resolution, available);
+      setContainerFit((prev) =>
+        fit && (!prev || prev.width !== fit.width || prev.height !== fit.height) ? fit : prev,
+      );
+    };
+    const observer = new ResizeObserver(measure);
     observer.observe(el);
+    if (el.parentElement) {
+      observer.observe(el.parentElement);
+    }
+    measure();
     return () => observer.disconnect();
-  }, [renderMode, exactSize]);
+  }, [renderMode, exactSize, spec.resolution]);
 
   const isCinematicStop = spec.photo_card_style === "cinematic_stop";
   const journeyDurationS = useMemo(
@@ -1749,12 +1762,14 @@ export function TripStageCanvas({
   const wrapperClass =
     renderMode === "deterministic" && exactSize
       ? "relative overflow-hidden bg-[#0b1117]"
-      : `relative w-full overflow-hidden rounded-lg border border-border bg-[#0b1117] shadow-2xl ${ASPECT_RATIO_CLASS[spec.resolution]}`;
+      : "relative overflow-hidden rounded-lg border border-border bg-[#0b1117] shadow-2xl";
 
   const wrapperStyle =
     renderMode === "deterministic" && exactSize
       ? { width: `${exactSize.width}px`, height: `${exactSize.height}px` }
-      : undefined;
+      : containerFit
+        ? { width: `${containerFit.width}px`, height: `${containerFit.height}px` }
+        : undefined;
 
   const displayedFollowZoom =
     spec.camera_mode === "follow-marker"
