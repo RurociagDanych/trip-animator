@@ -29,6 +29,7 @@ from trip_worker.encoder import (
     extract_thumbnail,
     verify_mp4_output,
 )
+from trip_worker.logging_setup import configure_logging, current_rss_mb, elapsed_ms
 from trip_worker.manifest import (
     PhotoRecord,
     RenderManifest,
@@ -1142,8 +1143,8 @@ class _JobLeaseSession:
                         return
                 except Exception:
                     logger.warning(
-                        "Background lease renewal failed for job %s",
-                        self._job.id,
+                        "Background lease renewal failed",
+                        extra={"event": "lease_renew_failed", "job_id": self._job.id},
                         exc_info=True,
                     )
 
@@ -1282,8 +1283,12 @@ class _ChunkLeaseSession:
                         return
                 except Exception:
                     logger.warning(
-                        "Background chunk lease renewal failed for chunk %s",
-                        self._chunk.id,
+                        "Background chunk lease renewal failed",
+                        extra={
+                            "event": "lease_renew_failed",
+                            "job_id": self._chunk.render_job_id,
+                            "chunk_id": self._chunk.id,
+                        },
                         exc_info=True,
                     )
 
@@ -1574,9 +1579,19 @@ def _finalize_chunked_job(
                             f"Render job {job.id} cancelled or fenced before upload"
                         )
 
+                    upload_started = time.monotonic()
                     store.put_bytes(output_key, mp4_path.read_bytes(), content_type="video/mp4")
                     store.put_bytes(
                         thumbnail_key, thumb_path.read_bytes(), content_type="image/webp"
+                    )
+                    logger.info(
+                        "Render upload finished",
+                        extra={
+                            "event": "upload_finish",
+                            "job_id": job.id,
+                            "stage": "upload",
+                            "duration_ms": elapsed_ms(upload_started),
+                        },
                     )
             finally:
                 lease.stop_background_renewer()
@@ -1692,6 +1707,48 @@ def process_claimed_chunk(
     browser_host: WarmPlaywrightHost | None = None,
 ) -> str:
     """Render a single GOP-aligned chunk `[start_frame, end_frame)` and finalize if last."""
+    started = time.monotonic()
+    chunk_extra = {"job_id": chunk.render_job_id, "chunk_id": chunk.id, "stage": "chunk"}
+    logger.info(
+        "Chunk %d started",
+        chunk.chunk_index,
+        extra={**chunk_extra, "event": "chunk_start", "rss_mb": current_rss_mb()},
+    )
+    status = "error"
+    try:
+        status = _process_claimed_chunk(
+            conn_factory,
+            chunk,
+            settings,
+            store,
+            render_fn=render_fn,
+            browser_host=browser_host,
+        )
+        return status
+    finally:
+        logger.info(
+            "Chunk %d finished with status %s",
+            chunk.chunk_index,
+            status,
+            extra={
+                **chunk_extra,
+                "event": "chunk_finish",
+                "status": status,
+                "duration_ms": elapsed_ms(started),
+                "rss_mb": current_rss_mb(),
+            },
+        )
+
+
+def _process_claimed_chunk(
+    conn_factory: Callable[[], AbstractContextManager[DbConnection]],
+    chunk: ClaimedChunk,
+    settings: WorkerSettings,
+    store: ObjectStore,
+    *,
+    render_fn: RenderCallable,
+    browser_host: WarmPlaywrightHost | None,
+) -> str:
     heartbeat_interval_s = min(
         settings.lease_heartbeat_interval_seconds,
         max(0.05, settings.lease_seconds / 3.0),
@@ -1761,7 +1818,18 @@ def process_claimed_chunk(
                         raise RenderCancelledError(
                             f"Chunk {chunk.id} cancelled or lost lease before upload"
                         )
+                    upload_started = time.monotonic()
                     store.put_bytes(chunk_key, chunk_mp4.read_bytes(), content_type="video/mp4")
+                    logger.info(
+                        "Chunk upload finished",
+                        extra={
+                            "event": "upload_finish",
+                            "job_id": chunk.render_job_id,
+                            "chunk_id": chunk.id,
+                            "stage": "upload",
+                            "duration_ms": elapsed_ms(upload_started),
+                        },
+                    )
             finally:
                 lease.stop_background_renewer()
 
@@ -1842,10 +1910,14 @@ def process_claimed_chunk(
             fatal = isinstance(exc, (ValidationError, ValueError))
             msg = _sanitize_error_message(exc)
             logger.warning(
-                "Chunk %s (job %s) failed: %s",
-                chunk.id,
-                chunk.render_job_id,
+                "Chunk failed: %s",
                 msg,
+                extra={
+                    "event": "chunk_failed",
+                    "job_id": chunk.render_job_id,
+                    "chunk_id": chunk.id,
+                    "stage": "chunk",
+                },
                 exc_info=True,
             )
 
@@ -1910,6 +1982,45 @@ def process_claimed_job(
     frame_count_fn: FrameCountCallable = probe_film_frame_count,
 ) -> str:
     """Execute unchunked or chunked Playwright frame capture, FFmpeg encode, probe, and upload."""
+    started = time.monotonic()
+    job_extra = {"job_id": job.id, "stage": "job"}
+    logger.info("Render job started", extra={**job_extra, "event": "job_start"})
+    status = "error"
+    try:
+        status = _process_claimed_job(
+            conn_factory,
+            job,
+            settings,
+            store,
+            render_fn=render_fn,
+            browser_host=browser_host,
+            frame_count_fn=frame_count_fn,
+        )
+        return status
+    finally:
+        logger.info(
+            "Render job finished with status %s",
+            status,
+            extra={
+                **job_extra,
+                "event": "job_finish",
+                "status": status,
+                "duration_ms": elapsed_ms(started),
+                "rss_mb": current_rss_mb(),
+            },
+        )
+
+
+def _process_claimed_job(
+    conn_factory: Callable[[], AbstractContextManager[DbConnection]],
+    job: ClaimedJob,
+    settings: WorkerSettings,
+    store: ObjectStore,
+    *,
+    render_fn: RenderCallable,
+    browser_host: WarmPlaywrightHost | None,
+    frame_count_fn: FrameCountCallable,
+) -> str:
     started_at = datetime.now(UTC)
     heartbeat_interval_s = min(
         settings.lease_heartbeat_interval_seconds,
@@ -1944,7 +2055,22 @@ def process_claimed_job(
                 if probe_cancelled or probe_manifest is None:
                     return "cancelled"
                 if probe_manifest.photos:
+                    probe_started = time.monotonic()
+                    logger.info(
+                        "Probe started",
+                        extra={"event": "probe_start", "job_id": job.id, "stage": "probe"},
+                    )
                     total_frames_spec = frame_count_fn(probe_manifest, settings, browser_host)
+                    logger.info(
+                        "Probe finished: %d frames",
+                        total_frames_spec,
+                        extra={
+                            "event": "probe_finish",
+                            "job_id": job.id,
+                            "stage": "probe",
+                            "duration_ms": elapsed_ms(probe_started),
+                        },
+                    )
 
             if total_frames_spec > settings.chunk_threshold_frames:
 
@@ -2086,9 +2212,19 @@ def process_claimed_job(
                             f"Render job {job.id} cancelled or fenced before upload"
                         )
 
+                    upload_started = time.monotonic()
                     store.put_bytes(output_key, mp4_path.read_bytes(), content_type="video/mp4")
                     store.put_bytes(
                         thumbnail_key, thumb_path.read_bytes(), content_type="image/webp"
+                    )
+                    logger.info(
+                        "Render upload finished",
+                        extra={
+                            "event": "upload_finish",
+                            "job_id": job.id,
+                            "stage": "upload",
+                            "duration_ms": elapsed_ms(upload_started),
+                        },
                     )
             finally:
                 lease.stop_background_renewer()
@@ -2111,9 +2247,9 @@ def process_claimed_job(
                         store.delete(thumbnail_key)
                         return "cancelled"
                     logger.warning(
-                        "Lost lease/fencing token for job %s (attempt=%d) before commit",
-                        job.id,
+                        "Lost lease/fencing token before commit (attempt=%d)",
                         job.attempt_count,
+                        extra={"event": "lease_lost", "job_id": job.id, "stage": "commit"},
                     )
                     return "lost_lease"
                 record_audit_event(
@@ -2143,12 +2279,15 @@ def process_claimed_job(
             def _handle_cancel(conn: DbConnection) -> str:
                 if not is_job_cancelled(conn, job_id=job.id):
                     logger.warning(
-                        "Lost lease/fencing token for job %s (attempt=%d); aborting cleanly",
-                        job.id,
+                        "Lost lease/fencing token (attempt=%d); aborting cleanly",
                         job.attempt_count,
+                        extra={"event": "lease_lost", "job_id": job.id, "stage": "cancel"},
                     )
                     return "lost_lease"
-                logger.info("Render job %s cancelled; aborting cleanly", job.id)
+                logger.info(
+                    "Render job cancelled; aborting cleanly",
+                    extra={"event": "job_cancelled", "job_id": job.id, "stage": "cancel"},
+                )
                 record_audit_event(
                     conn,
                     user_id=job.owner_user_id,
@@ -2163,7 +2302,11 @@ def process_claimed_job(
         except (ValidationError, ValueError) as exc:
             lease.stop_background_renewer()
             msg = _sanitize_error_message(exc)
-            logger.warning("Render job %s failed validation fatally: %s", job.id, msg)
+            logger.warning(
+                "Render job failed validation fatally: %s",
+                msg,
+                extra={"event": "job_failed_fatal", "job_id": job.id, "stage": "job"},
+            )
 
             def _handle_fatal(conn: DbConnection) -> str:
                 final_status = mark_job_failed(
@@ -2176,9 +2319,9 @@ def process_claimed_job(
                 )
                 if final_status is None:
                     logger.warning(
-                        "Fencing token lost for job %s (attempt=%d) during fatal failure",
-                        job.id,
+                        "Fencing token lost during fatal failure (attempt=%d)",
                         job.attempt_count,
+                        extra={"event": "lease_lost", "job_id": job.id, "stage": "fail"},
                     )
                     return "lost_lease"
                 record_audit_event(
@@ -2195,7 +2338,11 @@ def process_claimed_job(
         except Exception as exc:
             lease.stop_background_renewer()
             msg = _sanitize_error_message(exc)
-            logger.exception("Render job %s failed: %s", job.id, msg)
+            logger.exception(
+                "Render job failed: %s",
+                msg,
+                extra={"event": "job_failed", "job_id": job.id, "stage": "job"},
+            )
 
             def _handle_error(conn: DbConnection) -> str:
                 final_status = mark_job_failed(
@@ -2208,9 +2355,9 @@ def process_claimed_job(
                 )
                 if final_status is None:
                     logger.warning(
-                        "Fencing token lost for job %s (attempt=%d) during error handling",
-                        job.id,
+                        "Fencing token lost during error handling (attempt=%d)",
                         job.attempt_count,
+                        extra={"event": "lease_lost", "job_id": job.id, "stage": "fail"},
                     )
                     return "lost_lease"
                 record_audit_event(
@@ -2340,6 +2487,7 @@ def _worker_thread_loop(
 
 def run_worker_loop(settings: WorkerSettings | None = None, *, once: bool = False) -> None:
     """Poll PostgreSQL `render_jobs` / `render_job_chunks` lease queue and execute renders."""
+    configure_logging()
     cfg = settings or WorkerSettings()
     logger.info(
         "Worker initialized (render_base_url=%s, concurrency=%d, once=%s)",

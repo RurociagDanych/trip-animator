@@ -1932,3 +1932,59 @@ def test_cinematic_job_with_grouped_photos_chunks_on_the_browser_total(
     assert seen["ranges"] == [(start, start + 300) for start in range(0, 2400, 300)]
     assert all(list(assets.values()) == [b"FULL"] * 3 for assets in seen["assets"])
     assert seen["verify"][0]["expected_duration_s"] == 80.0
+
+
+def test_cinematic_job_logs_lifecycle_probe_and_chunk_stage_events(
+    tmp_path: Path, monkeypatch: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    settings = WorkerSettings(chunk_threshold_frames=1800, chunk_size_frames=300)
+    caplog.set_level("INFO", logger="trip_worker.runner")
+    db, job_id, _seen = _run_cinematic_job(
+        tmp_path,
+        monkeypatch,
+        duration_seconds=10.0,
+        photo_count=1,
+        probed_frames=300,
+        settings=settings,
+    )
+    assert db.jobs[job_id]["status"] == "succeeded"
+
+    events = {
+        r.event: r  # type: ignore[attr-defined]
+        for r in caplog.records
+        if r.name == "trip_worker.runner" and hasattr(r, "event")
+    }
+    assert str(events["job_start"].job_id) == str(job_id)  # type: ignore[attr-defined]
+    assert events["job_finish"].status == "succeeded"  # type: ignore[attr-defined]
+    assert events["job_finish"].duration_ms >= 0  # type: ignore[attr-defined]
+    assert events["probe_finish"].stage == "probe"  # type: ignore[attr-defined]
+    assert events["probe_finish"].duration_ms >= 0  # type: ignore[attr-defined]
+
+
+def test_chunked_job_logs_chunk_start_and_finish_with_rss(
+    tmp_path: Path, monkeypatch: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    settings = WorkerSettings(chunk_threshold_frames=1800, chunk_size_frames=300)
+    caplog.set_level("INFO", logger="trip_worker.runner")
+    db, job_id, _seen = _run_cinematic_job(
+        tmp_path,
+        monkeypatch,
+        duration_seconds=100.0,
+        photo_count=0,
+        probed_frames=9999,
+        settings=settings,
+    )
+    assert db.jobs[job_id]["is_chunked"] is True
+
+    chunk_finishes = [
+        r
+        for r in caplog.records
+        if r.name == "trip_worker.runner" and getattr(r, "event", None) == "chunk_finish"
+    ]
+    assert len(chunk_finishes) == 10
+    first = chunk_finishes[0]
+    assert first.stage == "chunk"  # type: ignore[attr-defined]
+    assert str(first.job_id) == str(job_id)  # type: ignore[attr-defined]
+    assert first.status == "succeeded"  # type: ignore[attr-defined]
+    assert first.duration_ms >= 0  # type: ignore[attr-defined]
+    assert first.rss_mb is None or first.rss_mb > 0  # type: ignore[attr-defined]

@@ -20,6 +20,7 @@ from playwright.async_api import Browser, Page, Playwright, Route, async_playwri
 
 from trip_worker.config import WorkerSettings
 from trip_worker.encoder import StreamingVideoEncoder
+from trip_worker.logging_setup import elapsed_ms
 from trip_worker.manifest import RenderManifest, compute_frame_render_spans
 from trip_worker.ssrf import (
     ResolvedExternalTarget,
@@ -30,6 +31,10 @@ from trip_worker.ssrf import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 300 frames is 10 s at 30 fps and equals the default chunk size, so a chunked render
+# logs roughly one progress line per chunk.
+PROGRESS_LOG_EVERY_FRAMES = 300
 
 
 class RenderCancelledError(RuntimeError):
@@ -491,6 +496,7 @@ async def render_manifest_with_page(
         )
         chunk_frame_count = eff_end - eff_start
 
+        capture_started = time.monotonic()
         encoder.start()
         frames_written = 0
         try:
@@ -510,6 +516,7 @@ async def render_manifest_with_page(
 
             last_cancel_check_at = -settings.lease_renew_interval_frames
             last_progress_at = 0
+            last_logged_at = 0
             for span in spans:
                 if (
                     frames_written == 0
@@ -547,6 +554,19 @@ async def render_manifest_with_page(
                     encoder.write_frame(frame_bytes)
                     frames_written += 1
 
+                if frames_written - last_logged_at >= PROGRESS_LOG_EVERY_FRAMES:
+                    last_logged_at = frames_written
+                    logger.info(
+                        "Render progress: %d/%d frames",
+                        frames_written,
+                        chunk_frame_count,
+                        extra={
+                            "event": "render_progress",
+                            "job_id": str(manifest.job_id),
+                            "stage": "frame_capture",
+                        },
+                    )
+
                 is_last = frames_written >= chunk_frame_count
                 if on_progress is not None and (
                     is_last
@@ -562,7 +582,27 @@ async def render_manifest_with_page(
                             f"Render job {manifest.job_id} cancelled during frame {frames_written}"
                         )
 
+            logger.info(
+                "Frame capture finished: %d frames",
+                frames_written,
+                extra={
+                    "event": "frame_capture_finish",
+                    "job_id": str(manifest.job_id),
+                    "stage": "frame_capture",
+                    "duration_ms": elapsed_ms(capture_started),
+                },
+            )
+            encoder_started = time.monotonic()
             await asyncio.to_thread(encoder.finish, timeout_seconds=settings.ffmpeg_timeout_seconds)
+            logger.info(
+                "Encoder finished",
+                extra={
+                    "event": "encoder_finish",
+                    "job_id": str(manifest.job_id),
+                    "stage": "encode",
+                    "duration_ms": elapsed_ms(encoder_started),
+                },
+            )
         except RenderCancelledError:
             encoder.abort()
             raise
