@@ -1,10 +1,10 @@
+/** Coordinates server exports and the project's combined render history. */
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
   CheckCircle2,
   Download,
   FileCode2,
-  Film,
   Loader2,
   Map as MapIcon,
   PlayCircle,
@@ -15,21 +15,71 @@ import { useEffect, useMemo, useState } from "react";
 import { ApiError } from "../../lib/api/client";
 import { projectsApi, rendersApi } from "../../lib/api/endpoints";
 import type { RenderJobOut, RenderSpecV2 } from "../../lib/api/types";
-import { useEditorStore } from "../../lib/state/editor-store";
+import { listLocalRenders, type LocalRenderRecord } from "../../lib/export/local-history";
+import { LocalExportControls, type LocalExportSource } from "./LocalExportControls";
+import { VideoExportButton } from "./VideoExportButton";
 
 export interface ExportPanelProps {
   projectId: string;
   spec: RenderSpecV2;
   stageCount: number;
   onFlushSave: () => Promise<boolean>;
+  localExportSource?: LocalExportSource;
 }
 
 const TERMINAL_STATES = new Set(["succeeded", "failed", "cancelled"]);
 
-export function ExportPanel({ projectId, spec, stageCount, onFlushSave }: ExportPanelProps) {
+function VideoActions({ id, url, expanded, onToggle }: {
+  id: string;
+  url: string;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <button type="button" onClick={onToggle}
+          className="inline-flex flex-1 items-center justify-center gap-1 rounded border border-border bg-elevated py-1 text-[11px] font-medium text-ink hover:border-sky-accent/50 hover:text-sky-accent">
+          <PlayCircle className="h-3.5 w-3.5" aria-hidden="true" />
+          <span>{expanded ? "Hide player" : "Watch"}</span>
+        </button>
+        <a href={url} download={`trip-render-${id}.mp4`}
+          className="inline-flex flex-1 items-center justify-center gap-1 rounded border border-border bg-elevated py-1 text-[11px] font-medium text-ink hover:border-teal-accent/50 hover:text-teal-accent">
+          <Download className="h-3.5 w-3.5" aria-hidden="true" />
+          <span>Download</span>
+        </a>
+      </div>
+      {expanded && <video controls playsInline src={url} className="w-full rounded border border-border bg-black" />}
+    </div>
+  );
+}
+
+function LocalVideoActions({ record, expanded, onToggle }: {
+  record: LocalRenderRecord;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const [url, setUrl] = useState<string>();
+  useEffect(() => {
+    let next: string | undefined;
+    let disposed = false;
+    queueMicrotask(() => {
+      if (disposed) return;
+      next = URL.createObjectURL(record.blob);
+      setUrl(next);
+    });
+    return () => {
+      disposed = true;
+      if (next) URL.revokeObjectURL(next);
+    };
+  }, [record.blob]);
+  return url ? <VideoActions id={record.id} url={url} expanded={expanded} onToggle={onToggle} /> : null;
+}
+
+/** Submits full server renders and shows the project's local and server exports. */
+export function ExportPanel({ projectId, spec, stageCount, onFlushSave, localExportSource }: ExportPanelProps) {
   const queryClient = useQueryClient();
-  const previewWatermark = useEditorStore((s) => s.previewWatermark);
-  const [submittingKind, setSubmittingKind] = useState<"preview" | "export" | null>(null);
+  const [submitting, setSubmitting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [liveJob, setLiveJob] = useState<RenderJobOut | null>(null);
@@ -42,6 +92,21 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave }: Export
     enabled: Boolean(projectId),
     retry: false,
   });
+
+  const localHistoryKey = ["projects", projectId, "local-renders"] as const;
+  const localHistory = useQuery({
+    queryKey: localHistoryKey,
+    queryFn: () => listLocalRenders(projectId),
+    enabled: Boolean(projectId && localExportSource),
+    retry: false,
+  });
+
+  function showSavedRender(record: LocalRenderRecord) {
+    queryClient.setQueryData<LocalRenderRecord[]>(localHistoryKey, (previous = []) => [
+      record, ...previous.filter(({ id }) => id !== record.id),
+    ]);
+    void queryClient.invalidateQueries({ queryKey: localHistoryKey });
+  }
 
   const firstActiveFromHistory = useMemo(
     () => (rendersQuery.data ?? []).find((j) => !TERMINAL_STATES.has(j.status)) ?? null,
@@ -116,19 +181,14 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave }: Export
     };
   }, [trackedJobId, projectId, queryClient]);
 
-  // The preview button renders what the dock shows, so its flag mirrors the toggle; the
-  // full export always sends false so a complete film is never clipped to the preview.
-  async function startRender(kind: "preview" | "export") {
-    if (kind === "preview" && !previewWatermark) {
-      return;
-    }
+  async function startRender() {
     if (stageCount === 0) {
       setExportError("Add at least one GPX or Strava stage before rendering.");
       return;
     }
 
     setExportError(null);
-    setSubmittingKind(kind);
+    setSubmitting(true);
 
     try {
       const saved = await onFlushSave();
@@ -139,7 +199,7 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave }: Export
 
       const payload: RenderSpecV2 = {
         ...spec,
-        is_preview: kind === "preview" ? previewWatermark : false,
+        is_preview: false,
       };
       const job = await rendersApi.create(projectId, payload);
       setActiveJobId(job.id);
@@ -148,7 +208,7 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave }: Export
     } catch (err) {
       setExportError(err instanceof ApiError ? err.message : "Failed to submit render job.");
     } finally {
-      setSubmittingKind(null);
+      setSubmitting(false);
     }
   }
 
@@ -177,43 +237,33 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave }: Export
   const displayedActiveJob =
     liveJob && liveJob.id === trackedJobId ? liveJob : firstActiveFromHistory;
 
+  const history = [
+    ...jobs.map((job) => ({
+      id: job.id, createdAt: job.created_at, job, local: null, status: job.status, progress: job.progress_pct,
+      isPreview: job.spec?.is_preview, resolution: job.spec?.resolution ?? "1920x1080",
+    })),
+    ...(localHistory.data ?? []).map((local) => ({
+      id: `local:${local.id}`, createdAt: local.createdAt, local, job: null, status: "succeeded", progress: 100,
+      isPreview: local.isPreview, resolution: local.resolution,
+    })),
+  ].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+
   return (
     <div className="space-y-4 text-xs">
       <div className="grid grid-cols-1 gap-2">
-        {/* A preview without the watermark toggle would render the full film, so the button is disabled instead of mislabelled. */}
-        <button
-          type="button"
-          disabled={submittingKind !== null || !previewWatermark}
-          aria-describedby={previewWatermark ? undefined : "preview-clip-hint"}
-          onClick={() => void startRender("preview")}
-          className="inline-flex w-full items-center justify-center gap-2 rounded-md border border-border bg-elevated px-3 py-2 text-xs font-medium text-ink hover:border-teal-accent/60 hover:text-teal-accent disabled:opacity-50 transition-colors"
-        >
-          {submittingKind === "preview" ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin text-teal-accent" aria-hidden="true" />
-          ) : (
-            <Film className="h-3.5 w-3.5 text-teal-accent" aria-hidden="true" />
-          )}
-          <span>Preview clip (5s)</span>
-        </button>
-        {previewWatermark ? null : (
-          <p id="preview-clip-hint" className="text-[11px] text-ink-muted">
-            Enable the preview watermark to render a 5 s preview clip
-          </p>
+        <VideoExportButton mode="Server" resolution={spec.resolution} busy={submitting}
+          disabled={submitting} onClick={() => void startRender()} />
+        {localExportSource && (
+          <LocalExportControls
+            key={projectId}
+            projectId={projectId}
+            source={localExportSource}
+            spec={spec}
+            disabled={submitting || stageCount === 0}
+            onFlushSave={onFlushSave}
+            onSaved={showSavedRender}
+          />
         )}
-
-        <button
-          type="button"
-          disabled={submittingKind !== null}
-          onClick={() => void startRender("export")}
-          className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-sky-accent px-3 py-2 text-xs font-semibold text-canvas hover:bg-sky-accent/90 disabled:opacity-50 transition-colors"
-        >
-          {submittingKind === "export" ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-          ) : (
-            <Download className="h-3.5 w-3.5" aria-hidden="true" />
-          )}
-          <span>Export MP4 ({spec.resolution})</span>
-        </button>
 
         <div className="grid grid-cols-2 gap-2 pt-1">
           <a
@@ -306,44 +356,47 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave }: Export
       <div className="space-y-2 border-t border-border pt-3">
         <div className="flex items-center justify-between">
           <span className="font-semibold text-ink">Render history</span>
-          <span className="tabular-telemetry text-[11px] text-ink-muted">{jobs.length}</span>
+          <span className="tabular-telemetry text-[11px] text-ink-muted">{history.length}</span>
         </div>
 
-        {rendersQuery.isLoading ? (
+        {localHistory.isError && <p role="alert">Could not load this browser’s render history.</p>}
+        {rendersQuery.isError && <p role="alert">Could not load server render history.</p>}
+        {history.length === 0 && (rendersQuery.isLoading || localHistory.isLoading) ? (
           <p className="py-4 text-center text-[11px] text-ink-muted">Loading render history...</p>
-        ) : jobs.length === 0 ? (
+        ) : history.length === 0 ? (
           <p className="rounded border border-border bg-canvas/40 p-3 text-center text-[11px] text-ink-muted">
-            No exports yet. Run a 5s preview or full MP4 render.
+            No exports to show.
           </p>
         ) : (
           <ul className="space-y-2.5">
-            {jobs.map((job) => {
-              const isExpanded = expandedVideoId === job.id;
+            {history.map(({ id, job, local, status, progress, isPreview, resolution }) => {
+              const isExpanded = expandedVideoId === id;
+              const toggle = () => setExpandedVideoId(isExpanded ? null : id);
               return (
                 <li
-                  key={job.id}
+                  key={id}
                   className="space-y-2 rounded-lg border border-border bg-canvas/65 p-2.5"
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
                       <div className="flex items-center gap-1.5">
-                        {job.status === "succeeded" ? (
+                        {status === "succeeded" ? (
                           <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-teal-accent" aria-hidden="true" />
-                        ) : job.status === "failed" || job.status === "cancelled" ? (
+                        ) : status === "failed" || status === "cancelled" ? (
                           <XCircle className="h-3.5 w-3.5 shrink-0 text-coral-accent" aria-hidden="true" />
                         ) : (
                           <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-sky-accent" aria-hidden="true" />
                         )}
                         <span className="truncate font-medium text-ink">
-                          {job.spec?.is_preview ? "Preview (5s)" : "MP4 Export"}
+                          {isPreview ? "Preview (5s)" : "MP4 Export"}
                         </span>
                       </div>
                       <div className="tabular-telemetry mt-0.5 text-[10px] text-ink-muted">
-                        {job.spec?.resolution ?? "1920x1080"} • {job.status} ({job.progress_pct}%)
+                        {local ? "Local" : "Server"} • {resolution} • {status} ({progress}%)
                       </div>
                     </div>
 
-                    {job.thumbnail_key ? (
+                    {job?.thumbnail_key ? (
                       <img
                         src={rendersApi.thumbnailUrl(job.id)}
                         alt="Render thumbnail"
@@ -352,43 +405,16 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave }: Export
                     ) : null}
                   </div>
 
-                  {job.error_message ? (
+                  {job?.error_message ? (
                     <p className="rounded bg-coral-accent/10 px-2 py-1 text-[10px] text-coral-accent">
                       {job.error_message}
                     </p>
                   ) : null}
 
-                  {job.status === "succeeded" ? (
-                    <div className="space-y-2">
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setExpandedVideoId(isExpanded ? null : job.id)}
-                          className="inline-flex flex-1 items-center justify-center gap-1 rounded border border-border bg-elevated py-1 text-[11px] font-medium text-ink hover:border-sky-accent/50 hover:text-sky-accent"
-                        >
-                          <PlayCircle className="h-3.5 w-3.5" aria-hidden="true" />
-                          <span>{isExpanded ? "Hide player" : "Watch"}</span>
-                        </button>
-                        <a
-                          href={rendersApi.downloadUrl(job.id)}
-                          download={`trip-render-${job.id}.mp4`}
-                          className="inline-flex flex-1 items-center justify-center gap-1 rounded border border-border bg-elevated py-1 text-[11px] font-medium text-ink hover:border-teal-accent/50 hover:text-teal-accent"
-                        >
-                          <Download className="h-3.5 w-3.5" aria-hidden="true" />
-                          <span>Download</span>
-                        </a>
-                      </div>
-
-                      {isExpanded ? (
-                        <video
-                          controls
-                          playsInline
-                          src={rendersApi.downloadUrl(job.id)}
-                          className="w-full rounded border border-border bg-black"
-                        />
-                      ) : null}
-                    </div>
-                  ) : null}
+                  {local ? <LocalVideoActions record={local} expanded={isExpanded} onToggle={toggle} />
+                    : job?.status === "succeeded" && (
+                      <VideoActions url={rendersApi.downloadUrl(job.id)} id={job.id} expanded={isExpanded} onToggle={toggle} />
+                    )}
                 </li>
               );
             })}

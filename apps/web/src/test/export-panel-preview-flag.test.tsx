@@ -1,132 +1,116 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useEffect, useState, type ComponentProps } from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ExportPanel } from "../components/editor/ExportPanel";
-import { clearCsrfToken, setCsrfToken } from "../lib/api/client";
+import { InspectorPanel } from "../components/editor/InspectorPanel";
+import type { LocalExportSceneProps } from "../components/local-export/LocalExportScene";
 import { createDefaultRenderSpecV2 } from "../lib/api/types";
+import { listLocalRenders, saveLocalRender } from "../lib/export/local-history";
+import { encodeLocalVideo } from "../lib/export/local-video";
+import { PREVIEW_RENDER_FPS } from "../lib/geo/playback";
 import { useEditorStore } from "../lib/state/editor-store";
 
-function mockJsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
+vi.mock("../lib/export/local-history", () => ({ listLocalRenders: vi.fn(), saveLocalRender: vi.fn() }));
+vi.mock("../lib/export/local-video", () => ({
+  probeLocalVideo: vi.fn(async () => ({ supported: true, encoding: "hardware-preferred" })),
+  encodeLocalVideo: vi.fn(),
+}));
+vi.mock("../components/local-export/LocalExportScene", () => ({
+  LocalExportScene: ({ spec, onReady }: LocalExportSceneProps) => {
+    useEffect(() => {
+      onReady({ canvas: document.createElement("canvas"), frameCount: spec.is_preview ? 4 : 8, renderFrame: async () => {} });
+    }, [spec, onReady]);
+    return null;
+  },
+}));
+
+function ExportInspector() {
+  const [section, setSection] = useState<ComponentProps<typeof InspectorPanel>["section"]>("export");
+  return <InspectorPanel projectId="proj-1" spec={createDefaultRenderSpecV2()} stageCount={1}
+    section={section} onSelectSection={setSection} onUpdateSpec={() => {}} onUpdateHud={() => {}}
+    onFlushSave={async () => true}
+    localExportSource={{ stages: [], matchedPhotos: [], climbs: [], projectTitle: "Test trip", unavailableReason: null }} />;
 }
 
-function makeQueryClient() {
-  return new QueryClient({
-    defaultOptions: {
-      queries: { retry: false },
-      mutations: { retry: false },
-    },
-  });
-}
-
-const PREVIEW_HINT = "Enable the preview watermark to render a 5 s preview clip";
-
-function renderPanel() {
+function renderPanel(withLocal = false) {
   return render(
-    <QueryClientProvider client={makeQueryClient()}>
-      <ExportPanel
-        projectId="proj-1"
-        spec={createDefaultRenderSpecV2()}
-        stageCount={1}
-        onFlushSave={async () => true}
-      />
+    <QueryClientProvider client={new QueryClient()}>
+      {withLocal ? <ExportInspector /> : <ExportPanel projectId="proj-1" spec={createDefaultRenderSpecV2()}
+        stageCount={1} onFlushSave={async () => true} />}
     </QueryClientProvider>,
   );
 }
 
-// Renders ExportPanel with the given toggle state, clicks one render button and
-// returns the is_preview flag the panel sent to the render endpoint.
-async function submitFromButton(name: RegExp, previewWatermark: boolean): Promise<boolean> {
-  useEditorStore.getState().setPreviewWatermark(previewWatermark);
-  const bodies: Record<string, unknown>[] = [];
-
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-    const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
-    if (url.endsWith("/renders") && init?.method === "POST") {
-      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
-      bodies.push(body);
-      return mockJsonResponse(
-        {
-          id: `job-${bodies.length}`,
-          project_id: "proj-1",
-          status: "queued",
-          progress_pct: 0,
-          spec: body,
-          created_at: "2001-06-14T08:00:00Z",
-          updated_at: "2001-06-14T08:00:00Z",
-        },
-        201,
-      );
-    }
-    return mockJsonResponse([]);
-  });
-
-  render(
-    <QueryClientProvider client={makeQueryClient()}>
-      <ExportPanel
-        projectId="proj-1"
-        spec={createDefaultRenderSpecV2()}
-        stageCount={1}
-        onFlushSave={async () => true}
-      />
-    </QueryClientProvider>,
-  );
-
-  fireEvent.click(screen.getByRole("button", { name }));
-  await waitFor(() => {
-    expect(bodies).toHaveLength(1);
-  });
-  return bodies[0]?.is_preview as boolean;
-}
-
-describe("ExportPanel preview flag follows the preview watermark toggle", () => {
-  beforeEach(() => {
-    setCsrfToken("csrf-test-token");
-    useEditorStore.getState().setPreviewWatermark(false);
-  });
-
+describe("ExportPanel local preview", () => {
   afterEach(() => {
-    clearCsrfToken();
     useEditorStore.getState().setPreviewWatermark(false);
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
-  it("sends is_preview true for the preview button when the toggle is on", async () => {
-    expect(await submitFromButton(/Preview clip \(5s\)/i, true)).toBe(true);
-  });
-
-  it("sends is_preview false for the full export when the toggle is on", async () => {
-    expect(await submitFromButton(/Export MP4/i, true)).toBe(false);
-  });
-
-  it("disables the preview button and shows a hint when the toggle is off", () => {
-    useEditorStore.getState().setPreviewWatermark(false);
-    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => mockJsonResponse([]));
-
-    renderPanel();
-
-    const previewButton = screen.getByRole("button", { name: /Preview clip \(5s\)/i });
-    expect(previewButton).toBeDisabled();
-    expect(screen.getByText(PREVIEW_HINT)).toBeInTheDocument();
-
-    fireEvent.click(previewButton);
-    const renderPosts = fetchSpy.mock.calls.filter(([, init]) => init?.method === "POST");
-    expect(renderPosts).toHaveLength(0);
-  });
-
-  it("enables the preview button and hides the hint when the toggle is on", async () => {
+  it("does not offer server preview even when the editor watermark is on", () => {
     useEditorStore.getState().setPreviewWatermark(true);
-
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json([]));
     renderPanel();
-
-    expect(screen.getByRole("button", { name: /Preview clip \(5s\)/i })).toBeEnabled();
-    expect(screen.queryByText(PREVIEW_HINT)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Preview clip/i })).not.toBeInTheDocument();
   });
 
-  it("sends is_preview false for the full export when the toggle is off", async () => {
-    expect(await submitFromButton(/Export MP4/i, false)).toBe(false);
+  it("exports local preview across inspector tabs and shows it in history after remount", async () => {
+    useEditorStore.getState().setPreviewWatermark(false);
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json([]));
+    const objectUrls = class extends URL {
+      static override createObjectURL = vi.fn(() => "blob:local-render");
+      static override revokeObjectURL = vi.fn();
+    };
+    vi.stubGlobal("URL", objectUrls);
+    const video = new Blob(["video"], { type: "video/mp4" });
+    let completeEncoding!: (video: Blob) => void;
+    vi.mocked(encodeLocalVideo).mockReturnValue(new Promise((resolve) => { completeEncoding = resolve; }));
+    let completeInitialHistoryRead!: () => void;
+    vi.mocked(listLocalRenders).mockImplementationOnce(() => new Promise((resolve) => {
+      completeInitialHistoryRead = () => resolve([]);
+    }));
+    vi.mocked(saveLocalRender).mockImplementation(async (record) => {
+      vi.mocked(listLocalRenders).mockResolvedValue([record]);
+    });
+    const controls = renderPanel(true);
+    const preview = screen.getByRole("button", { name: /Preview clip \(5s\).*Local/i });
+    const server = screen.getByRole("button", { name: /Export MP4 \(\d+x\d+\).*Server/i });
+    const local = screen.getByRole("button", { name: /Export MP4 \(\d+x\d+\).*Local/i });
+    expect(server.className).toBe(local.className);
+    await waitFor(() => expect(preview).toBeEnabled());
+    fireEvent.click(preview);
+    await waitFor(() => expect(encodeLocalVideo).toHaveBeenCalled());
+    const signal = vi.mocked(encodeLocalVideo).mock.calls[0]?.[0].signal;
+    const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    expect(screen.getByRole("status")).toHaveTextContent(/Preparing local export|Exporting locally/);
+    expect(signal?.aborted).toBe(false);
+    hidden.mockReturnValue(false);
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    const exportTab = screen.getByRole("tab", { selected: true });
+    fireEvent.click(screen.getByRole("tab", { name: "HUD" }));
+    expect(screen.queryByRole("button", { name: /Preview clip/i })).not.toBeInTheDocument();
+    expect(signal?.aborted).toBe(false);
+    completeEncoding(video);
+    await waitFor(() => expect(saveLocalRender).toHaveBeenCalled());
+    fireEvent.click(exportTab);
+
+    const row = await screen.findByRole("listitem");
+    await act(async () => completeInitialHistoryRead());
+    expect(row).toBeInTheDocument();
+    const download = await within(row).findByRole("link", { name: "Download" });
+    expect(download).toHaveAttribute("href", "blob:local-render");
+    fireEvent.click(within(row).getByRole("button", { name: "Watch" }));
+    expect(row.querySelector("video")).toHaveAttribute("src", "blob:local-render");
+    expect(encodeLocalVideo).toHaveBeenCalledWith(expect.objectContaining({ fps: PREVIEW_RENDER_FPS, frameCount: 4 }));
+    expect(saveLocalRender).toHaveBeenCalledWith(expect.objectContaining({ projectId: "proj-1", isPreview: true, blob: video }));
+    expect(fetchSpy.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+
+    controls.unmount();
+    expect(objectUrls.revokeObjectURL).toHaveBeenCalledWith("blob:local-render");
+    renderPanel(true);
+    expect(await screen.findByText("Preview (5s)")).toBeInTheDocument();
   });
 });

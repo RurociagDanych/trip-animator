@@ -23,6 +23,7 @@ import { ALL_STATISTIC_METRICS } from "../../lib/api/types";
 import { generateDirectorKeyframes } from "../../lib/geo/director";
 import type { InspectorSection } from "../../lib/state/editor-store";
 import { ExportPanel } from "./ExportPanel";
+import type { LocalExportSource } from "./LocalExportControls";
 
 const INSPECTOR_TABS: readonly { id: InspectorSection; label: string }[] = [
   { id: "route", label: "Route" },
@@ -92,6 +93,7 @@ export interface InspectorPanelProps {
   onUpdateHud: (patch: Partial<StatisticsPanelConfig>) => void;
   onApplyDirectorPreset?: (preset: DirectorPreset) => void;
   onFlushSave: () => Promise<boolean>;
+  localExportSource?: LocalExportSource;
   invalidSpecValues?: InvalidRenderSpecValue[];
 }
 
@@ -113,6 +115,7 @@ export function InspectorPanel({
   onUpdateHud,
   onApplyDirectorPreset,
   onFlushSave,
+  localExportSource,
   invalidSpecValues = [],
 }: InspectorPanelProps) {
   const hud = spec.statistics_panel;
@@ -1242,14 +1245,15 @@ export function InspectorPanel({
           </div>
         ) : null}
 
-        {section === "export" ? (
+        <div hidden={section !== "export"}>
           <ExportPanel
             projectId={projectId}
             spec={spec}
             stageCount={stageCount}
             onFlushSave={onFlushSave}
+            localExportSource={localExportSource}
           />
-        ) : null}
+        </div>
       </div>
     </aside>
   );
