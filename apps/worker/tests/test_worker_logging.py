@@ -209,6 +209,29 @@ def test_presigned_s3_url_keeps_host_and_path_and_masks_signature() -> None:
     )
 
 
+def test_redacts_userinfo_up_to_last_at_sign_before_path() -> None:
+    out = _format(_record("dsn postgresql://u:pw@ss@h/db"))
+
+    assert out["message"] == "dsn postgresql://***@h/db"
+    assert "ss@" not in out["message"]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("connect //user:pw@host/db", "connect //***@host/db"),
+        ("open //u:p@ss@host?x=1", "open //***@host?x=1"),
+        (
+            "https://u:p@a.example.com:8443/x?y=1#frag@z",
+            "https://***@a.example.com:8443/x?y=1#frag@z",
+        ),
+        ("https://example.com/path/user@mail", "https://example.com/path/user@mail"),
+    ],
+)
+def test_userinfo_redaction_variants(raw: str, expected: str) -> None:
+    assert _format(_record(raw))["message"] == expected
+
+
 def test_level_env_var_controls_root_level(
     restore_root_logging: None,
 ) -> None:

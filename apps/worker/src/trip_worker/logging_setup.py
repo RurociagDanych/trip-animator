@@ -24,7 +24,7 @@ _CONTEXT_FIELDS = ("job_id", "chunk_id", "stage", "status", "duration_ms", "rss_
 _QUIET_LOGGERS = ("httpx", "httpcore")
 
 _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"(\b[a-zA-Z][\w+.-]*://)[^/\s@]+@"), r"\1***@"),
+    (re.compile(r"((?:\b[a-zA-Z][\w+.-]*:)?//)[^\s/?#]*@"), r"\1***@"),
     # The header value may carry a scheme; keep the scheme so the log still shows which
     # auth type was sent, and mask only the credential.
     (
