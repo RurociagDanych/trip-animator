@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1139,3 +1140,65 @@ def test_build_render_manifest_includes_climbs_and_respects_show_climb_callouts(
         store=store,
     )
     assert manifest_no_climbs.climbs == []
+
+
+GOLDEN_FRAME_TABLE = Path(__file__).resolve().parents[3] / "packages/telemetry/tests/golden/frame_counts.json"
+
+
+def _golden_frame_rows() -> list[dict[str, object]]:
+    return json.loads(GOLDEN_FRAME_TABLE.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("row", _golden_frame_rows(), ids=lambda r: json.dumps(r, sort_keys=True))
+def test_build_render_manifest_matches_shared_golden_frame_table(
+    tmp_path: Path, row: dict[str, object]
+) -> None:
+    store = LocalObjectStore(tmp_path)
+    project_id = uuid.uuid4()
+    stage_id = uuid.uuid4()
+    t0 = datetime(2001, 6, 2, 9, 0, 0, tzinfo=UTC)
+    points = [
+        TrackPoint(
+            lat=0.1 + i * 0.001,
+            lon=0.2 + i * 0.001,
+            elev_m=1200.0 + i,
+            ts_utc=t0 + timedelta(seconds=i * 5),
+            segment_idx=0,
+        )
+        for i in range(40)
+    ]
+    key, dist, gain = _write_stage_parquet(
+        store, project_id=project_id, stage_id=stage_id, points=points
+    )
+    stage = StageRecord(
+        id=stage_id,
+        project_id=project_id,
+        name="Golden Stage",
+        stage_order=0,
+        day_index=1,
+        trim_start_s=None,
+        trim_end_s=None,
+        silver_object_key=key,
+        distance_m=dist,
+        elevation_gain_m=gain,
+        moving_seconds=195.0,
+        elapsed_seconds=195.0,
+        has_timestamps=True,
+    )
+
+    manifest = build_render_manifest(
+        job_id=uuid.uuid4(),
+        project_id=project_id,
+        project_title="Golden Trip",
+        spec_json={
+            "version": 2,
+            "resolution": "1280x720",
+            "fps": row["fps"],
+            "duration_seconds": row["duration_s"],
+            "is_preview": row["is_preview"],
+        },
+        stages=[stage],
+        store=store,
+    )
+
+    assert manifest.total_frames == row["frames"]

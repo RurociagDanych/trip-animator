@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createDefaultRenderSpecV2 } from "../lib/api/types";
 import {
@@ -7,7 +9,23 @@ import {
   snapRatioToRenderFrame,
 } from "../lib/geo/playback";
 
+type GoldenRow = { duration_s: number; fps: number; is_preview: boolean; frames: number };
+
+const GOLDEN_ROWS = JSON.parse(
+  readFileSync(
+    resolve(process.cwd(), "../../packages/telemetry/tests/golden/frame_counts.json"),
+    "utf8",
+  ),
+) as GoldenRow[];
+
 describe("preview playback follows the render frame rate", () => {
+  it("matches the shared worker golden frame table", () => {
+    expect(GOLDEN_ROWS.length).toBeGreaterThan(0);
+    for (const row of GOLDEN_ROWS) {
+      expect(renderFrameCount(row.duration_s, row.fps), JSON.stringify(row)).toBe(row.frames);
+    }
+  });
+
   it("uses the spec fps for the film and 15 fps for a preview render", () => {
     const spec = createDefaultRenderSpecV2();
     expect(renderFpsForSpec({ ...spec, fps: 15, is_preview: false })).toBe(15);
