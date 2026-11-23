@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createDefaultRenderSpecV2 } from "../lib/api/types";
+import { createDefaultRenderSpecV2, type RenderFps } from "../lib/api/types";
+import { computeJourneyDurationS } from "../lib/geo/photos";
 import {
   PREVIEW_RENDER_FPS,
   renderFpsForSpec,
@@ -21,16 +22,21 @@ const GOLDEN_ROWS = JSON.parse(
 describe("preview playback follows the render frame rate", () => {
   it("matches the shared worker golden frame table", () => {
     expect(GOLDEN_ROWS.length).toBeGreaterThan(0);
+    const spec = createDefaultRenderSpecV2();
     for (const row of GOLDEN_ROWS) {
-      expect(renderFrameCount(row.duration_s, row.fps), JSON.stringify(row)).toBe(row.frames);
+      const durationS = computeJourneyDurationS(
+        { ...spec, duration_seconds: row.duration_s },
+        row.is_preview,
+      );
+      const fps = renderFpsForSpec({ fps: row.fps as RenderFps }, row.is_preview);
+      expect(renderFrameCount(durationS, fps), JSON.stringify(row)).toBe(row.frames);
     }
   });
 
   it("uses the spec fps for the film and 15 fps for a preview render", () => {
-    const spec = createDefaultRenderSpecV2();
-    expect(renderFpsForSpec({ ...spec, fps: 15, is_preview: false })).toBe(15);
-    expect(renderFpsForSpec({ ...spec, fps: 60, is_preview: false })).toBe(60);
-    expect(renderFpsForSpec({ ...spec, fps: 60, is_preview: true })).toBe(PREVIEW_RENDER_FPS);
+    expect(renderFpsForSpec({ fps: 15 }, false)).toBe(15);
+    expect(renderFpsForSpec({ fps: 60 }, false)).toBe(60);
+    expect(renderFpsForSpec({ fps: 60 }, true)).toBe(PREVIEW_RENDER_FPS);
   });
 
   it("counts frames the way the worker manifest does", () => {

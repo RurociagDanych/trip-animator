@@ -73,7 +73,7 @@ export const EditorPlaybackDock = memo(function EditorPlaybackDock({
   const togglePlaying = useEditorStore((s) => s.togglePlaying);
   const setPlaybackSpeed = useEditorStore((s) => s.setPlaybackSpeed);
   const resetPlayback = useEditorStore((s) => s.resetPlayback);
-  const fps = renderFpsForSpec(spec);
+  const fps = renderFpsForSpec(spec, previewWatermark);
 
   useEffect(() => {
     if (!isPlaying) {

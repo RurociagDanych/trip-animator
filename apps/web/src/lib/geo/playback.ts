@@ -4,8 +4,8 @@ import type { RenderFps, RenderSpecV2 } from "../api/types";
 // so the editor preview steps through the same frames the exported film contains.
 export const PREVIEW_RENDER_FPS: RenderFps = 15;
 
-export function renderFpsForSpec(spec: Pick<RenderSpecV2, "fps" | "is_preview">): RenderFps {
-  return spec.is_preview ? PREVIEW_RENDER_FPS : spec.fps;
+export function renderFpsForSpec(spec: Pick<RenderSpecV2, "fps">, isPreview: boolean): RenderFps {
+  return isPreview ? PREVIEW_RENDER_FPS : spec.fps;
 }
 
 // Python's round() is half-to-even; Math.round rounds halves up, so 52.5 frames would
