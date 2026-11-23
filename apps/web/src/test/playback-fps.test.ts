@@ -65,6 +65,12 @@ describe("preview playback follows the render frame rate", () => {
     expect(snapRatioToRenderFrame(-0.2, 10, 15)).toBe(0);
   });
 
+  it("returns zero for a non-finite playback ratio", () => {
+    expect(snapRatioToRenderFrame(Number.NaN, 10, 15)).toBe(0);
+    expect(snapRatioToRenderFrame(Number.POSITIVE_INFINITY, 10, 15)).toBe(0);
+    expect(snapRatioToRenderFrame(Number.NEGATIVE_INFINITY, 10, 15)).toBe(0);
+  });
+
   it("returns zero for a single-frame timeline", () => {
     expect(snapRatioToRenderFrame(0.7, 0, 15)).toBe(0);
   });

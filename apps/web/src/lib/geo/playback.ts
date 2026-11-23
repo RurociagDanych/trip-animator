@@ -29,6 +29,7 @@ export function renderFrameCount(durationS: number, fps: number): number {
 export function snapRatioToRenderFrame(ratio: number, durationS: number, fps: number): number {
   const frames = renderFrameCount(durationS, fps);
   if (frames <= 1) return 0;
+  if (!Number.isFinite(ratio)) return 0;
   const clamped = Math.min(1, Math.max(0, ratio));
   return roundHalfToEven(clamped * (frames - 1)) / (frames - 1);
 }
