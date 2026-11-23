@@ -973,16 +973,55 @@ async def test_render_waits_for_inflight_route_before_closing_pinned_client(
     page.route_background = True
     asyncio.get_running_loop().call_later(0.05, transport.release.set)
 
-    await render_manifest_with_page(
-        page,  # type: ignore[arg-type]
-        manifest,
-        FakeEncoder(),  # type: ignore[arg-type]
-        settings,
-        is_cancelled=lambda: False,
-        resolve_dns=False,
-    )
+    with pytest.raises(RenderError, match="External map request failed"):
+        await render_manifest_with_page(
+            page,  # type: ignore[arg-type]
+            manifest,
+            FakeEncoder(),  # type: ignore[arg-type]
+            settings,
+            is_cancelled=lambda: False,
+            resolve_dns=False,
+        )
 
     assert page.route_tasks[0].done()
     assert page.route_calls[0].aborted_reason == "failed"
     assert transport.closed_when_released is False
     assert [pattern for pattern, _handler in page.unrouted] == ["**/*"]
+
+
+async def test_render_fails_when_external_tile_fetch_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trip_worker import renderer
+
+    class _ConnectFailingTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused", request=request)
+
+    monkeypatch.setattr(
+        renderer,
+        "build_pinned_external_http_client",
+        lambda *, resolve_dns=True, **_kwargs: httpx.AsyncClient(
+            transport=_ConnectFailingTransport(),
+            follow_redirects=False,
+            trust_env=False,
+        ),
+    )
+    manifest = _sample_manifest(total_frames=2)
+    settings = WorkerSettings(render_base_url="http://web:8080", lease_renew_interval_frames=1)
+    page = FakePage(js_frame_count=2)
+    page.route_urls = ["https://tiles.openfreemap.org/styles/liberty"]
+    encoder = FakeEncoder()
+
+    with pytest.raises(RenderError, match="External map request failed"):
+        await render_manifest_with_page(
+            page,  # type: ignore[arg-type]
+            manifest,
+            encoder,  # type: ignore[arg-type]
+            settings,
+            is_cancelled=lambda: False,
+            resolve_dns=False,
+        )
+
+    assert page.route_calls[0].aborted_reason == "failed"
+    assert encoder.finished is True

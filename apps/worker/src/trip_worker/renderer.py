@@ -169,8 +169,13 @@ def make_ssrf_route_handler(
     photo_assets: Mapping[str, bytes] | None = None,
     tile_cache: TileCache | None = None,
     http_client: httpx.AsyncClient | None = None,
+    fetch_failures: list[str] | None = None,
 ) -> AsyncRouteHandler:
-    """Create a Playwright `page.route()` handler enforcing SSRF, virtual photos, and tile cache."""
+    """Create a Playwright `page.route()` handler enforcing SSRF, virtual photos, and tile cache.
+
+    When `fetch_failures` is given, the exception type name of each external fetch that
+    raised is appended to it, so the caller can fail a render that lost map data.
+    """
     owned_client: httpx.AsyncClient | None = None
 
     async def _fetch_external(
@@ -266,6 +271,8 @@ def make_ssrf_route_handler(
                 type(exc).__name__,
                 parsed.hostname,
             )
+            if fetch_failures is not None:
+                fetch_failures.append(type(exc).__name__)
             try:
                 await route.abort("failed")
             except Exception:
@@ -451,6 +458,7 @@ async def render_manifest_with_page(
     page_errors: list[str] = []
     page.on("pageerror", lambda err: page_errors.append(str(err)))
 
+    external_fetch_failures: list[str] = []
     async with (
         build_pinned_external_http_client(resolve_dns=resolve_dns) as http_client,
         _external_route_scope(
@@ -462,6 +470,7 @@ async def render_manifest_with_page(
                 photo_assets=photo_assets,
                 tile_cache=resolved_cache,
                 http_client=http_client,
+                fetch_failures=external_fetch_failures,
             ),
         ) as route_handler,
     ):
@@ -561,6 +570,13 @@ async def render_manifest_with_page(
             encoder.abort()
             err_suffix = f" (pageerror: {page_errors[0]})" if page_errors else ""
             raise RenderError(f"Frame capture failed: {exc}{err_suffix}") from exc
+
+    if external_fetch_failures:
+        failed_types = ", ".join(sorted(set(external_fetch_failures)))
+        raise RenderError(
+            f"External map request failed {len(external_fetch_failures)} time(s) "
+            f"during render: {failed_types}"
+        )
 
     return frames_written
 
