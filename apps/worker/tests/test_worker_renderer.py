@@ -1025,3 +1025,34 @@ async def test_render_fails_when_external_tile_fetch_fails(
 
     assert page.route_calls[0].aborted_reason == "failed"
     assert encoder.finished is True
+
+
+async def test_ssrf_route_handler_logs_hostname_without_userinfo_or_port(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import httpx
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=b"{}")),
+        follow_redirects=False,
+    )
+    handler = make_ssrf_route_handler(
+        render_origin="http://caddy",
+        allowed_external_hosts=frozenset({"tiles.openfreemap.org"}),
+        resolve_dns=False,
+        http_client=client,
+    )
+
+    with caplog.at_level("WARNING", logger="trip_worker.renderer"):
+        await handler(  # type: ignore[arg-type]
+            FakeRoute("http://user:s3cret@127.0.0.1:8081/render/job-1")
+        )
+        await client.aclose()
+        await handler(  # type: ignore[arg-type]
+            FakeRoute("https://user:s3cret@tiles.openfreemap.org:8443/styles/liberty")
+        )
+
+    assert "s3cret" not in caplog.text
+    assert ":8081" not in caplog.text
+    assert ":8443" not in caplog.text
+    assert "127.0.0.1" in caplog.text

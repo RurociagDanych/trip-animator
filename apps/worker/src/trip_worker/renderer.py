@@ -235,7 +235,7 @@ def make_ssrf_route_handler(
             logger.warning(
                 "Blocked disallowed Playwright request scheme=%s host=%s",
                 parsed.scheme,
-                parsed.netloc,
+                parsed.hostname,
             )
             await route.abort("blockedbyclient")
             return
@@ -249,7 +249,7 @@ def make_ssrf_route_handler(
             logger.warning(
                 "Blocked disallowed external HTTP method=%s host=%s",
                 method,
-                parsed.netloc,
+                parsed.hostname,
             )
             await route.abort("blockedbyclient")
             return
@@ -283,7 +283,7 @@ def make_ssrf_route_handler(
             logger.warning(
                 "Blocked redirect response status=%d for host=%s",
                 resp.status_code,
-                parsed.netloc,
+                parsed.hostname,
             )
             await route.abort("blockedbyclient")
             return
