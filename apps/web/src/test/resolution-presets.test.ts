@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   createDefaultRenderSpecV2,
+  findInvalidRenderSpecValues,
   normalizeRenderSpecV2,
   RENDER_FPS_VALUES,
   RESOLUTION_PRESETS,
@@ -55,6 +56,20 @@ describe("resolution presets", () => {
       expect(width % 2).toBe(0);
       expect(height % 2).toBe(0);
     }
+  });
+
+  it("reports stored resolution and fps values that normalization replaces", () => {
+    const defaults = createDefaultRenderSpecV2();
+    const raw = { resolution: "640x480", fps: 24 } as unknown as Partial<RenderSpecV2>;
+    expect(findInvalidRenderSpecValues(raw)).toEqual([
+      { field: "resolution", value: "640x480", fallback: defaults.resolution },
+      { field: "fps", value: 24, fallback: defaults.fps },
+    ]);
+  });
+
+  it("does not report valid or absent resolution and fps values", () => {
+    expect(findInvalidRenderSpecValues({ resolution: "720x720", fps: 30 })).toEqual([]);
+    expect(findInvalidRenderSpecValues({})).toEqual([]);
   });
 
   it("round-trips the supported frame rates and rejects others", () => {

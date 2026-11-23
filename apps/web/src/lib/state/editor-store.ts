@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import {
   createDefaultRenderSpecV2,
+  findInvalidRenderSpecValues,
+  type InvalidRenderSpecValue,
   normalizeRenderSpecV2,
   type ProjectDetailOut,
   type ProjectShareOut,
@@ -93,6 +95,7 @@ export interface EditorState {
   isPlaying: boolean;
   playbackSpeed: PlaybackSpeed;
   previewWatermark: boolean;
+  invalidSpecValues: InvalidRenderSpecValue[];
   undoStack: EditorHistorySnapshot[];
   redoStack: EditorHistorySnapshot[];
   lastHistoryAt: number;
@@ -203,6 +206,7 @@ export const useEditorStore = create<EditorState>((set) => ({
   isPlaying: false,
   playbackSpeed: 1,
   previewWatermark: false,
+  invalidSpecValues: [],
   undoStack: [],
   redoStack: [],
   lastHistoryAt: 0,
@@ -221,6 +225,7 @@ export const useEditorStore = create<EditorState>((set) => ({
         revision: project.revision,
         stages: project.stages,
         spec: normalizedSpec,
+        invalidSpecValues: findInvalidRenderSpecValues(project.settings),
         shareEnabled: Boolean(project.share_enabled),
         shareSlug: project.share_slug ?? null,
         shareCreatedAt: project.share_created_at ?? null,
@@ -254,6 +259,7 @@ export const useEditorStore = create<EditorState>((set) => ({
   updateSpec: (patch, coalesceKey) =>
     set((state) => ({
       ...pushUndoHistory(state, coalesceKey ?? inferSpecCoalesceKey(patch)),
+      invalidSpecValues: state.invalidSpecValues.filter((v) => !(v.field in patch)),
       spec: {
         ...state.spec,
         ...patch,
@@ -438,6 +444,7 @@ export const useEditorStore = create<EditorState>((set) => ({
       currentTimeRatio: 0,
       isPlaying: false,
       previewWatermark: false,
+      invalidSpecValues: [],
       undoStack: [],
       redoStack: [],
       lastHistoryAt: 0,

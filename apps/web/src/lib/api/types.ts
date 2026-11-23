@@ -1100,6 +1100,32 @@ function normalizeCameraKeyframe(raw: unknown): CameraKeyframe | null {
   };
 }
 
+export interface InvalidRenderSpecValue {
+  field: "resolution" | "fps";
+  value: unknown;
+  fallback: ResolutionPreset | RenderFps;
+}
+
+// Stored values that normalizeRenderSpecV2 replaces with defaults. The stored data is not
+// rewritten here; the Inspector lists these so the replacement is visible to the user.
+export function findInvalidRenderSpecValues(
+  raw?: Partial<RenderSpecV2> | null,
+): InvalidRenderSpecValue[] {
+  if (!raw || typeof raw !== "object") return [];
+  const defaults = createDefaultRenderSpecV2();
+  const invalid: InvalidRenderSpecValue[] = [];
+  if (
+    raw.resolution !== undefined &&
+    !(typeof raw.resolution === "string" && VALID_RESOLUTION_SET.has(raw.resolution))
+  ) {
+    invalid.push({ field: "resolution", value: raw.resolution, fallback: defaults.resolution });
+  }
+  if (raw.fps !== undefined && !(typeof raw.fps === "number" && VALID_FPS_SET.has(raw.fps))) {
+    invalid.push({ field: "fps", value: raw.fps, fallback: defaults.fps });
+  }
+  return invalid;
+}
+
 export function normalizeRenderSpecV2(raw?: Partial<RenderSpecV2> | null): RenderSpecV2 {
   const defaults = createDefaultRenderSpecV2();
   if (!raw || typeof raw !== "object") {

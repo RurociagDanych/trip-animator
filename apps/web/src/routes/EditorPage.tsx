@@ -108,6 +108,7 @@ export function EditorPage() {
   const isSaving = useEditorStore((s) => s.isSaving);
   const conflictError = useEditorStore((s) => s.conflictError);
   const previewWatermark = useEditorStore((s) => s.previewWatermark);
+  const invalidSpecValues = useEditorStore((s) => s.invalidSpecValues);
   const canUndo = useEditorStore((s) => s.undoStack.length > 0);
   const canRedo = useEditorStore((s) => s.redoStack.length > 0);
   const hydrateProject = useEditorStore((s) => s.hydrateProject);
@@ -856,6 +857,7 @@ export function EditorPage() {
           onUpdateHud={updateStatisticsPanel}
           onApplyDirectorPreset={handleApplyDirectorPreset}
           onFlushSave={flushSave}
+          invalidSpecValues={invalidSpecValues}
         />
       </div>
 
