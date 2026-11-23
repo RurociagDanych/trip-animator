@@ -295,6 +295,40 @@ def test_playwright_level_resets_to_inherit_when_env_var_is_removed(
     assert logging.getLogger("playwright").level == logging.NOTSET
 
 
+def test_invalid_level_values_warn_once_each_and_fall_back(
+    restore_root_logging: None,
+) -> None:
+    stream = io.StringIO()
+    configure_logging(
+        environ={
+            "TRIP_WORKER_LOG_LEVEL": "bogus",
+            "TRIP_WORKER_PLAYWRIGHT_LOG_LEVEL": "loud",
+        },
+        stream=stream,
+    )
+
+    lines = [json.loads(line) for line in stream.getvalue().splitlines()]
+    assert [line["level"] for line in lines] == ["WARNING", "WARNING"]
+    assert "TRIP_WORKER_LOG_LEVEL" in lines[0]["message"]
+    assert "TRIP_WORKER_PLAYWRIGHT_LOG_LEVEL" in lines[1]["message"]
+    assert "bogus" not in stream.getvalue()
+    assert logging.getLogger("trip_worker").level == logging.INFO
+    assert logging.getLogger("playwright").level == logging.NOTSET
+
+
+def test_valid_level_values_emit_no_setup_warning(
+    restore_root_logging: None,
+) -> None:
+    stream = io.StringIO()
+    configure_logging(
+        environ={"TRIP_WORKER_LOG_LEVEL": " debug ", "TRIP_WORKER_PLAYWRIGHT_LOG_LEVEL": "WARNING"},
+        stream=stream,
+    )
+
+    assert stream.getvalue() == ""
+    assert logging.getLogger("trip_worker").level == logging.DEBUG
+
+
 def test_configure_logging_installs_single_json_handler(
     restore_root_logging: None,
 ) -> None:

@@ -23,6 +23,7 @@ _CONTEXT_FIELDS = ("job_id", "chunk_id", "stage", "status", "duration_ms", "rss_
 # Root stays at WARNING so third-party loggers (botocore, urllib3, httpx request URLs with
 # presigned signatures) cannot emit DEBUG or INFO; only trip_worker.* follows the level env var.
 _WORKER_LOGGER = "trip_worker"
+logger = logging.getLogger(__name__)
 
 _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"((?:\b[a-zA-Z][\w+.-]*:)?//)[^\s/?#]*@"), r"\1***@"),
@@ -119,11 +120,15 @@ class _StdoutJsonHandler(logging.Handler):
             self.handleError(record)
 
 
-def _parse_level(raw: str | None, *, default: int) -> int:
-    if not raw or not raw.strip():
-        return default
+def _read_level(env: Mapping[str, str], name: str, *, default: int) -> tuple[int, bool]:
+    """Return the level named by `name` and whether a non-empty value was rejected."""
+    raw = env.get(name)
+    if raw is None or not raw.strip():
+        return default, False
     level = logging.getLevelNamesMapping().get(raw.strip().upper())
-    return level if level is not None else default
+    if level is None:
+        return default, True
+    return level, False
 
 
 def configure_logging(
@@ -139,9 +144,17 @@ def configure_logging(
         setattr(handler, _HANDLER_MARKER, True)
         root.addHandler(handler)
     root.setLevel(logging.WARNING)
-    logging.getLogger(_WORKER_LOGGER).setLevel(
-        _parse_level(env.get(_LOG_LEVEL_ENV), default=logging.INFO)
-    )
+    worker_level, worker_rejected = _read_level(env, _LOG_LEVEL_ENV, default=logging.INFO)
+    logging.getLogger(_WORKER_LOGGER).setLevel(worker_level)
 
-    playwright_raw = env.get(_PLAYWRIGHT_LEVEL_ENV)
-    logging.getLogger("playwright").setLevel(_parse_level(playwright_raw, default=logging.NOTSET))
+    playwright_level, playwright_rejected = _read_level(
+        env, _PLAYWRIGHT_LEVEL_ENV, default=logging.NOTSET
+    )
+    logging.getLogger("playwright").setLevel(playwright_level)
+
+    # Emitted after the handler is installed so the operator sees the rejection in the
+    # same JSON stream; the raw value is left out so a mistyped secret is not logged.
+    if worker_rejected:
+        logger.warning("Ignoring unsupported %s; using the default level", _LOG_LEVEL_ENV)
+    if playwright_rejected:
+        logger.warning("Ignoring unsupported %s; using the default level", _PLAYWRIGHT_LEVEL_ENV)
