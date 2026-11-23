@@ -22,6 +22,21 @@ function makeQueryClient() {
   });
 }
 
+const PREVIEW_HINT = "Enable the preview watermark to render a 5 s preview clip";
+
+function renderPanel() {
+  return render(
+    <QueryClientProvider client={makeQueryClient()}>
+      <ExportPanel
+        projectId="proj-1"
+        spec={createDefaultRenderSpecV2()}
+        stageCount={1}
+        onFlushSave={async () => true}
+      />
+    </QueryClientProvider>,
+  );
+}
+
 // Renders ExportPanel with the given toggle state, clicks one render button and
 // returns the is_preview flag the panel sent to the render endpoint.
 async function submitFromButton(name: RegExp, previewWatermark: boolean): Promise<boolean> {
@@ -87,8 +102,28 @@ describe("ExportPanel preview flag follows the preview watermark toggle", () => 
     expect(await submitFromButton(/Export MP4/i, true)).toBe(false);
   });
 
-  it("sends is_preview false for the preview button when the toggle is off", async () => {
-    expect(await submitFromButton(/Preview clip \(5s\)/i, false)).toBe(false);
+  it("disables the preview button and shows a hint when the toggle is off", () => {
+    useEditorStore.getState().setPreviewWatermark(false);
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => mockJsonResponse([]));
+
+    renderPanel();
+
+    const previewButton = screen.getByRole("button", { name: /Preview clip \(5s\)/i });
+    expect(previewButton).toBeDisabled();
+    expect(screen.getByText(PREVIEW_HINT)).toBeInTheDocument();
+
+    fireEvent.click(previewButton);
+    const renderPosts = fetchSpy.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(renderPosts).toHaveLength(0);
+  });
+
+  it("enables the preview button and hides the hint when the toggle is on", async () => {
+    useEditorStore.getState().setPreviewWatermark(true);
+
+    renderPanel();
+
+    expect(screen.getByRole("button", { name: /Preview clip \(5s\)/i })).toBeEnabled();
+    expect(screen.queryByText(PREVIEW_HINT)).not.toBeInTheDocument();
   });
 
   it("sends is_preview false for the full export when the toggle is off", async () => {

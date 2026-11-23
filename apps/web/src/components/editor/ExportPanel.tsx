@@ -119,6 +119,9 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave }: Export
   // The preview button renders what the dock shows, so its flag mirrors the toggle; the
   // full export always sends false so a complete film is never clipped to the preview.
   async function startRender(kind: "preview" | "export") {
+    if (kind === "preview" && !previewWatermark) {
+      return;
+    }
     if (stageCount === 0) {
       setExportError("Add at least one GPX or Strava stage before rendering.");
       return;
@@ -177,9 +180,11 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave }: Export
   return (
     <div className="space-y-4 text-xs">
       <div className="grid grid-cols-1 gap-2">
+        {/* A preview without the watermark toggle would render the full film, so the button is disabled instead of mislabelled. */}
         <button
           type="button"
-          disabled={submittingKind !== null}
+          disabled={submittingKind !== null || !previewWatermark}
+          aria-describedby={previewWatermark ? undefined : "preview-clip-hint"}
           onClick={() => void startRender("preview")}
           className="inline-flex w-full items-center justify-center gap-2 rounded-md border border-border bg-elevated px-3 py-2 text-xs font-medium text-ink hover:border-teal-accent/60 hover:text-teal-accent disabled:opacity-50 transition-colors"
         >
@@ -190,6 +195,11 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave }: Export
           )}
           <span>Preview clip (5s)</span>
         </button>
+        {previewWatermark ? null : (
+          <p id="preview-clip-hint" className="text-[11px] text-ink-muted">
+            Enable the preview watermark to render a 5 s preview clip
+          </p>
+        )}
 
         <button
           type="button"
