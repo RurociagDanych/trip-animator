@@ -2,7 +2,15 @@ import { describe, expect, it } from "vitest";
 import type { ResolutionPreset } from "../lib/api/types";
 import { fitResolutionPreset, frameInteriorSize, parseResolutionPreset } from "../lib/geo/format";
 
-const PRESETS: ResolutionPreset[] = ["1920x1080", "1080x1080", "1080x1350", "1080x1920"];
+const PRESETS: ResolutionPreset[] = [
+  "1920x1080",
+  "1080x1080",
+  "1080x1350",
+  "1080x1920",
+  "720x1280",
+  "720x900",
+  "720x720",
+];
 
 describe("preview box follows the selected resolution", () => {
   it("keeps portrait presets portrait inside a landscape dock", () => {

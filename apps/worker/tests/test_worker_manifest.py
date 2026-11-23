@@ -194,6 +194,60 @@ def test_build_render_manifest_multi_stage_with_trim_and_antimeridian(tmp_path: 
     assert [p.segment_idx for p in second.points] == [0, 1]
 
 
+def test_build_render_manifest_720p_portrait_uses_preset_dimensions(tmp_path: Path) -> None:
+    store = LocalObjectStore(tmp_path)
+    project_id = uuid.uuid4()
+    stage_id = uuid.uuid4()
+    t0 = datetime(2001, 6, 2, 9, 0, 0, tzinfo=UTC)
+    points = [
+        TrackPoint(
+            lat=0.1 + i * 0.001,
+            lon=0.2 + i * 0.001,
+            elev_m=1200.0 + i,
+            ts_utc=t0 + timedelta(seconds=i * 5),
+            segment_idx=0,
+        )
+        for i in range(40)
+    ]
+    key, dist, gain = _write_stage_parquet(
+        store, project_id=project_id, stage_id=stage_id, points=points
+    )
+    stage = StageRecord(
+        id=stage_id,
+        project_id=project_id,
+        name="Fictional Portrait Stage",
+        stage_order=0,
+        day_index=1,
+        trim_start_s=None,
+        trim_end_s=None,
+        silver_object_key=key,
+        distance_m=dist,
+        elevation_gain_m=gain,
+        moving_seconds=195.0,
+        elapsed_seconds=195.0,
+        has_timestamps=True,
+    )
+
+    manifest = build_render_manifest(
+        job_id=uuid.uuid4(),
+        project_id=project_id,
+        project_title="Fictional Portrait Trip",
+        spec_json={
+            "version": 2,
+            "resolution": "720x1280",
+            "fps": 30,
+            "duration_seconds": 10.0,
+            "is_preview": False,
+        },
+        stages=[stage],
+        store=store,
+    )
+
+    assert manifest.width == 720
+    assert manifest.height == 1280
+    assert manifest.total_frames == 300
+
+
 def test_build_render_manifest_preview_caps_duration_and_downsamples(tmp_path: Path) -> None:
     store = LocalObjectStore(tmp_path)
     project_id = uuid.uuid4()

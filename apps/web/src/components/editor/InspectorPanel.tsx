@@ -583,6 +583,9 @@ export function InspectorPanel({
                 <option value="1080x1080">1080×1080 (1:1 Square)</option>
                 <option value="1080x1350">1080×1350 (4:5 Portrait)</option>
                 <option value="1080x1920">1080×1920 (9:16 Vertical)</option>
+                <option value="720x1280">720×1280 (9:16 HD Vertical)</option>
+                <option value="720x900">720×900 (4:5 Portrait)</option>
+                <option value="720x720">720×720 (1:1 Square)</option>
               </select>
             </label>
 

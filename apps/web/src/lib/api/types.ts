@@ -49,7 +49,10 @@ export type ResolutionPreset =
   | "1920x1080"
   | "1080x1080"
   | "1080x1350"
-  | "1080x1920";
+  | "1080x1920"
+  | "720x1280"
+  | "720x900"
+  | "720x720";
 
 export type MapStylePreset =
   | "liberty"
@@ -992,6 +995,16 @@ export function createDefaultRenderSpecV2(): RenderSpecV2 {
   };
 }
 
+const VALID_RESOLUTION_SET = new Set<ResolutionPreset>([
+  "1280x720",
+  "1920x1080",
+  "1080x1080",
+  "1080x1350",
+  "1080x1920",
+  "720x1280",
+  "720x900",
+  "720x720",
+]);
 const VALID_MAP_STYLE_SET = new Set<MapStylePreset>([
   "liberty",
   "positron",
@@ -1095,6 +1108,10 @@ export function normalizeRenderSpecV2(raw?: Partial<RenderSpecV2> | null): Rende
   }
   const panelDefaults = defaults.statistics_panel;
   const rawPanel = raw.statistics_panel;
+  const resolution: ResolutionPreset =
+    typeof raw.resolution === "string" && VALID_RESOLUTION_SET.has(raw.resolution as ResolutionPreset)
+      ? (raw.resolution as ResolutionPreset)
+      : defaults.resolution;
   const mapStyle: MapStylePreset =
     typeof raw.map_style === "string" && VALID_MAP_STYLE_SET.has(raw.map_style as MapStylePreset)
       ? (raw.map_style as MapStylePreset)
@@ -1174,6 +1191,7 @@ export function normalizeRenderSpecV2(raw?: Partial<RenderSpecV2> | null): Rende
     ...defaults,
     ...raw,
     version: 2,
+    resolution,
     map_style: mapStyle,
     duration_seconds: durationSeconds,
     camera_preset: cameraPreset,

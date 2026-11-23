@@ -16,6 +16,9 @@ ResolutionPreset = Literal[
     "1080x1080",
     "1080x1350",
     "1080x1920",
+    "720x1280",
+    "720x900",
+    "720x720",
 ]
 MapStylePreset = Literal[
     "liberty",
