@@ -39,4 +39,9 @@ describe("preview box follows the selected resolution", () => {
     expect(fitResolutionPreset("1080x1350", { width: 0, height: 600 })).toBeNull();
     expect(fitResolutionPreset("1080x1350", { width: 900, height: 0 })).toBeNull();
   });
+
+  it("returns null when sub-pixel space floors a dimension to zero", () => {
+    expect(fitResolutionPreset("1080x1350", { width: 0.5, height: 100 })).toBeNull();
+    expect(fitResolutionPreset("1920x1080", { width: 1.5, height: 1000 })).toBeNull();
+  });
 });

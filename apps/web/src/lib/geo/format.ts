@@ -20,7 +20,9 @@ export function fitResolutionPreset(
   if (!(available.width > 0) || !(available.height > 0)) return null;
   const { width, height } = parseResolutionPreset(preset);
   const scale = Math.min(available.width / width, available.height / height);
-  return { width: Math.floor(width * scale), height: Math.floor(height * scale) };
+  const fitted = { width: Math.floor(width * scale), height: Math.floor(height * scale) };
+  // A zero dimension would collapse the preview box, so report it as unmeasured.
+  return fitted.width > 0 && fitted.height > 0 ? fitted : null;
 }
 
 export function hexToRgbTuple(hex: string, fallback: [number, number, number] = [56, 189, 248]): [number, number, number] {
