@@ -44,15 +44,18 @@ export interface VaultSyncStatusOut {
   last_synced_at: string | null; last_error: string | null;
 }
 
-export type ResolutionPreset =
-  | "1280x720"
-  | "1920x1080"
-  | "1080x1080"
-  | "1080x1350"
-  | "1080x1920"
-  | "720x1280"
-  | "720x900"
-  | "720x720";
+export const RESOLUTION_PRESETS = [
+  "1280x720",
+  "1920x1080",
+  "1080x1080",
+  "1080x1350",
+  "1080x1920",
+  "720x1280",
+  "720x900",
+  "720x720",
+] as const;
+
+export type ResolutionPreset = (typeof RESOLUTION_PRESETS)[number];
 
 export type MapStylePreset =
   | "liberty"
@@ -223,7 +226,9 @@ export interface CameraKeyframe {
   label: string;
 }
 
-export type RenderFps = 15 | 30 | 60;
+export const RENDER_FPS_VALUES = [15, 30, 60] as const;
+
+export type RenderFps = (typeof RENDER_FPS_VALUES)[number];
 
 export interface RenderSpecV2 {
   version: 2;
@@ -997,17 +1002,8 @@ export function createDefaultRenderSpecV2(): RenderSpecV2 {
   };
 }
 
-const VALID_FPS_SET = new Set<RenderFps>([15, 30, 60]);
-const VALID_RESOLUTION_SET = new Set<ResolutionPreset>([
-  "1280x720",
-  "1920x1080",
-  "1080x1080",
-  "1080x1350",
-  "1080x1920",
-  "720x1280",
-  "720x900",
-  "720x720",
-]);
+const VALID_FPS_SET = new Set<RenderFps>(RENDER_FPS_VALUES);
+const VALID_RESOLUTION_SET = new Set<ResolutionPreset>(RESOLUTION_PRESETS);
 const VALID_MAP_STYLE_SET = new Set<MapStylePreset>([
   "liberty",
   "positron",

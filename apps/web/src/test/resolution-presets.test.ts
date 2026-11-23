@@ -1,24 +1,36 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   createDefaultRenderSpecV2,
   normalizeRenderSpecV2,
+  RENDER_FPS_VALUES,
+  RESOLUTION_PRESETS,
   type RenderSpecV2,
   type ResolutionPreset,
 } from "../lib/api/types";
 import { parseResolutionPreset } from "../lib/geo/format";
 
-const ALL_PRESETS: ResolutionPreset[] = [
-  "1280x720",
-  "1920x1080",
-  "1080x1080",
-  "1080x1350",
-  "1080x1920",
-  "720x1280",
-  "720x900",
-  "720x720",
-];
+const ALL_PRESETS: ResolutionPreset[] = [...RESOLUTION_PRESETS];
+
+const SCHEMA_PATH = resolve(process.cwd(), "../../packages/telemetry/src/trip_telemetry/schemas.py");
+
+function literalValues(source: string, pattern: RegExp): string[] {
+  const match = pattern.exec(source);
+  if (!match) throw new Error(`schema literal not found: ${pattern.source}`);
+  return [...(match[1] ?? "").matchAll(/"([^"]+)"|(\d+)/g)].map((m) => m[1] ?? m[2] ?? "");
+}
 
 describe("resolution presets", () => {
+  it("matches the worker schema preset and fps literals", () => {
+    const source = readFileSync(SCHEMA_PATH, "utf8");
+    const presets = literalValues(source, /ResolutionPreset = Literal\[([^\]]*)\]/);
+    const fps = literalValues(source, /fps: Literal\[([\d,\s]+)\]/);
+    expect([...RESOLUTION_PRESETS].sort()).toEqual([...presets].sort());
+    expect(RESOLUTION_PRESETS).toHaveLength(presets.length);
+    expect([...RENDER_FPS_VALUES].map(String).sort()).toEqual([...fps].sort());
+  });
+
   it("round-trips every preset through normalization unchanged", () => {
     for (const preset of ALL_PRESETS) {
       expect(normalizeRenderSpecV2({ resolution: preset }).resolution).toBe(preset);
