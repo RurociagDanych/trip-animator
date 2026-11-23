@@ -4,7 +4,7 @@
 
 Trip Animator turns GPX/TCX tracks (or Strava activities, via an optional OAuth app you configure) into an animated multi-day trip film.
 
-A browser editor lets you arrange stages, preview the synchronized map and elevation/speed telemetry, and queue an MP4 render. Sharing and playback views are included.
+A browser editor lets you arrange stages, preview the synchronized map and elevation/speed telemetry, and export an MP4. Sharing and playback views are included.
 
 ![Local Trip Animator editor showing five consecutive cycling days on a loaded basemap, with elevation and speed telemetry](docs/demo/real-route-editor.png)
 
@@ -14,7 +14,7 @@ Basemap: [OpenFreeMap](https://openfreemap.org), © [OpenMapTiles](https://openm
 
 ## Status
 
-Active, self-hosted. Last substantive change: 2026-11-20. See [docs/OPERATIONS.md](docs/OPERATIONS.md) for what has and has not been validated.
+Active, self-hosted. Last substantive change: 2026-11-23. See [docs/OPERATIONS.md](docs/OPERATIONS.md) for what has and has not been validated.
 
 ## Architecture
 
@@ -109,6 +109,12 @@ make test-airflow
 make lint-airflow
 ```
 
+### Export an MP4
+
+In the editor’s **Export** tab, choose **Export MP4 locally (GPU)** to render the map on your device and download an MP4 without queuing a server job. This requires a secure context (HTTPS or localhost), accelerated WebGL, and WebCodecs support for H.264 at the chosen resolution and frame rate. GPU rendering does not guarantee hardware encoding: the browser may encode on the CPU.
+
+Keep the editor’s Export panel and browser tab open until the download link appears. Local files are not added to server render history. You can still export on the server if local export is unavailable or fails.
+
 ## Configuration
 
 Copy [`.env.example`](.env.example) to `.env` (`make bootstrap` does this when `.env` is absent) and set the values locally. Never commit `.env`. The full contract is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#5-configuration-contract-envexample).
@@ -151,11 +157,10 @@ Run `make check` for the full local gate (lint, format check, typecheck, tests, 
 
 ## Deployment
 
-A VPS deployment exists; AWS is an option, not a current deployment.
+A VPS deployment exists.
 
 - VPS (current deployment): the manual GitHub Actions workflow [`.github/workflows/deploy-vps.yml`](.github/workflows/deploy-vps.yml) (`workflow_dispatch`) connects to the VPS over SSH, checks out the requested Git ref, builds the Docker images, starts the Compose stack from `infra/compose.yaml` and verifies the health endpoint. See [docs/DEPLOY_VPS.md](docs/DEPLOY_VPS.md).
 - Docker Compose stack: `infra/compose.yaml`, see [docs/OPERATIONS.md](docs/OPERATIONS.md#docker-compose-deployment).
-- AWS (option, not deployed): Terraform in [infra/terraform/README.md](infra/terraform/README.md), see [docs/AWS_DEPLOYMENT.md](docs/AWS_DEPLOYMENT.md) and [docs/AWS_COST_ESTIMATE.md](docs/AWS_COST_ESTIMATE.md).
 
 ## Docs index
 
@@ -164,8 +169,6 @@ A VPS deployment exists; AWS is an option, not a current deployment.
 - [docs/OPERATIONS.md](docs/OPERATIONS.md): local setup, Strava OAuth setup, Compose deployment, observability and Airflow.
 - [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md): trust boundaries, threats and control matrix.
 - [docs/DEPLOY_VPS.md](docs/DEPLOY_VPS.md): manual VPS deployment through GitHub Actions.
-- [docs/AWS_DEPLOYMENT.md](docs/AWS_DEPLOYMENT.md): optional AWS deployment architecture.
-- [docs/AWS_COST_ESTIMATE.md](docs/AWS_COST_ESTIMATE.md): approximate monthly AWS cost scenarios.
 - [docs/specs/ACTIVITY_LIBRARY_SPEC.md](docs/specs/ACTIVITY_LIBRARY_SPEC.md): Activity Library specification.
 - [GLOSSARY.md](GLOSSARY.md): Activity Library domain language.
 - [docs/demo/](docs/demo/): README screenshot and synthetic GPX generator.

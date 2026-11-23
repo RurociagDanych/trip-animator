@@ -16,17 +16,19 @@ import { ApiError } from "../../lib/api/client";
 import { projectsApi, rendersApi } from "../../lib/api/endpoints";
 import type { RenderJobOut, RenderSpecV2 } from "../../lib/api/types";
 import { useEditorStore } from "../../lib/state/editor-store";
+import { LocalExportControls, type LocalExportSource } from "./LocalExportControls";
 
 export interface ExportPanelProps {
   projectId: string;
   spec: RenderSpecV2;
   stageCount: number;
   onFlushSave: () => Promise<boolean>;
+  localExportSource?: LocalExportSource;
 }
 
 const TERMINAL_STATES = new Set(["succeeded", "failed", "cancelled"]);
 
-export function ExportPanel({ projectId, spec, stageCount, onFlushSave }: ExportPanelProps) {
+export function ExportPanel({ projectId, spec, stageCount, onFlushSave, localExportSource }: ExportPanelProps) {
   const queryClient = useQueryClient();
   const previewWatermark = useEditorStore((s) => s.previewWatermark);
   const [submittingKind, setSubmittingKind] = useState<"preview" | "export" | null>(null);
@@ -180,6 +182,16 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave }: Export
   return (
     <div className="space-y-4 text-xs">
       <div className="grid grid-cols-1 gap-2">
+        {localExportSource && (
+          <LocalExportControls
+            key={projectId}
+            projectId={projectId}
+            source={localExportSource}
+            spec={spec}
+            disabled={submittingKind !== null || stageCount === 0}
+            onFlushSave={onFlushSave}
+          />
+        )}
         {/* A preview without the watermark toggle would render the full film, so the button is disabled instead of mislabelled. */}
         <button
           type="button"
@@ -212,7 +224,7 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave }: Export
           ) : (
             <Download className="h-3.5 w-3.5" aria-hidden="true" />
           )}
-          <span>Export MP4 ({spec.resolution})</span>
+          <span>Export MP4 ({spec.resolution}){localExportSource ? " on server" : ""}</span>
         </button>
 
         <div className="grid grid-cols-2 gap-2 pt-1">

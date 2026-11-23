@@ -456,6 +456,18 @@ export function EditorPage() {
     [spec, matchedPhotos, timelineStages],
   );
 
+  const localExportQueries = [chartQuery, timelineQuery, ...(spec.show_photos ? [photosQuery] : []),
+    ...(spec.show_climb_callouts ? [highlightsQuery] : [])];
+  const localExportUnavailableReason = stages.length === 0
+    ? "Add at least one GPX or Strava stage before exporting."
+    : geometryStatus.errorCount > 0 || localExportQueries.some((query) => query.isError)
+      ? "Some project data could not load. Retry or use server export."
+      : geometryStatus.pendingCount > 0 || localExportQueries.some((query) => query.isPending)
+        ? "Waiting for project data…"
+        : timelineStages.some((stage) => stage.points.length < 2)
+          ? "Local export needs route geometry for every stage. Use server export instead."
+          : null;
+
   const getCurrentProgress = useCallback(() => {
     const state = useEditorStore.getState();
     return evaluateTimelineSchedule(
@@ -857,6 +869,13 @@ export function EditorPage() {
           onUpdateHud={updateStatisticsPanel}
           onApplyDirectorPreset={handleApplyDirectorPreset}
           onFlushSave={flushSave}
+          localExportSource={{
+            stages: timelineStages,
+            matchedPhotos,
+            climbs: highlightsQuery.data?.climbs ?? EMPTY_CLIMBS,
+            projectTitle: title,
+            unavailableReason: localExportUnavailableReason,
+          }}
           invalidSpecValues={invalidSpecValues}
         />
       </div>

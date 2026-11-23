@@ -102,7 +102,9 @@ vi.mock("maplibre-gl", () => {
     getBearing() {
       return mockState.bearing;
     }
-    triggerRepaint() {}
+    triggerRepaint() {
+      requestAnimationFrame(() => mockState.emit?.("render"));
+    }
     project(lngLat: [number, number]) {
       return {
         x: 640 + (lngLat[0] - mockState.center[0]) * 500,
@@ -523,7 +525,7 @@ describe("TripStageCanvas WebGL wiring (canvas.test.tsx)", () => {
     expect(leftAfter).not.toBeCloseTo(leftBefore, 1);
   });
 
-  it("fast-paths waitForFrameSettle in 1 rAF when tiles are cached and awaits idle when tiles are not loaded", async () => {
+  it("waits for a rendered frame and only waits for idle when tiles are not loaded", async () => {
     const stage = makeStage();
     const spec = createDefaultRenderSpecV2();
     spec.camera_mode = "follow-marker";

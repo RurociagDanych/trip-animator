@@ -1728,6 +1728,19 @@ export function TripStageCanvas({
           return;
         }
         await awaitNextAnimationFrames(1);
+        const rendered = new Promise<void>((resolve) => {
+          const onRender = () => {
+            window.clearTimeout(timeout);
+            resolve();
+          };
+          const timeout = window.setTimeout(() => {
+            map.off("render", onRender);
+            resolve();
+          }, 1200);
+          map.once("render", onRender);
+        });
+        map.triggerRepaint();
+        await rendered;
         const tilesCached =
           typeof map.loaded === "function" &&
           typeof map.areTilesLoaded === "function" &&
@@ -1736,7 +1749,6 @@ export function TripStageCanvas({
         if (tilesCached) {
           return;
         }
-        map.triggerRepaint();
         if (
           cameraChanged ||
           spec.camera_mode === "follow-marker" ||
