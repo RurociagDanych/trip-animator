@@ -9,7 +9,8 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlparse
@@ -293,6 +294,44 @@ def make_ssrf_route_handler(
     return _handle_route
 
 
+class _TrackedRouteHandler:
+    """Run each route callback as a task that the render scope can wait for."""
+
+    def __init__(self, handler: AsyncRouteHandler) -> None:
+        self._handler = handler
+        self._tasks: set[asyncio.Task[None]] = set()
+
+    async def __call__(self, route: Route) -> None:
+        task = asyncio.ensure_future(self._handler(route))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        await task
+
+    async def drain(self) -> None:
+        while self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+
+
+@asynccontextmanager
+async def _external_route_scope(
+    page: Page,
+    route_handler: AsyncRouteHandler,
+) -> AsyncIterator[AsyncRouteHandler]:
+    """Yield a tracked route handler, then unroute it and wait for in-flight calls on exit.
+
+    The pinned HTTP client used by the handler must be closed only after this scope exits.
+    """
+    tracked = _TrackedRouteHandler(route_handler)
+    try:
+        yield tracked
+    finally:
+        try:
+            await page.unroute("**/*", tracked)
+        except Exception:
+            logger.debug("Ignoring error removing Playwright route", exc_info=True)
+        await tracked.drain()
+
+
 async def _open_render_page(
     page: Page,
     manifest: RenderManifest,
@@ -353,14 +392,19 @@ async def probe_manifest_frame_count(
         try:
             page = await context.new_page()
             page.set_default_timeout(settings.render_frame_timeout_ms)
-            async with build_pinned_external_http_client(resolve_dns=resolve_dns) as http_client:
-                route_handler = make_ssrf_route_handler(
-                    render_origin=settings.render_base_url,
-                    allowed_external_hosts=settings.allowed_external_hosts,
-                    resolve_dns=resolve_dns,
-                    photo_assets={},
-                    http_client=http_client,
-                )
+            async with (
+                build_pinned_external_http_client(resolve_dns=resolve_dns) as http_client,
+                _external_route_scope(
+                    page,
+                    make_ssrf_route_handler(
+                        render_origin=settings.render_base_url,
+                        allowed_external_hosts=settings.allowed_external_hosts,
+                        resolve_dns=resolve_dns,
+                        photo_assets={},
+                        http_client=http_client,
+                    ),
+                ) as route_handler,
+            ):
                 return await _open_render_page(page, manifest, settings, route_handler)
         finally:
             await context.close()
@@ -407,15 +451,20 @@ async def render_manifest_with_page(
     page_errors: list[str] = []
     page.on("pageerror", lambda err: page_errors.append(str(err)))
 
-    async with build_pinned_external_http_client(resolve_dns=resolve_dns) as http_client:
-        route_handler = make_ssrf_route_handler(
-            render_origin=settings.render_base_url,
-            allowed_external_hosts=settings.allowed_external_hosts,
-            resolve_dns=resolve_dns,
-            photo_assets=photo_assets,
-            tile_cache=resolved_cache,
-            http_client=http_client,
-        )
+    async with (
+        build_pinned_external_http_client(resolve_dns=resolve_dns) as http_client,
+        _external_route_scope(
+            page,
+            make_ssrf_route_handler(
+                render_origin=settings.render_base_url,
+                allowed_external_hosts=settings.allowed_external_hosts,
+                resolve_dns=resolve_dns,
+                photo_assets=photo_assets,
+                tile_cache=resolved_cache,
+                http_client=http_client,
+            ),
+        ) as route_handler,
+    ):
         total_frames = await _open_render_page(page, manifest, settings, route_handler)
 
         eff_start = max(0, frame_start)

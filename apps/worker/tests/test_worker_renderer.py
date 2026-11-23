@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from trip_telemetry import RenderSpecV2
 from trip_worker import (
@@ -101,6 +103,11 @@ class FakePage:
         self.visited_urls: list[str] = []
         self.frames_rendered: list[int] = []
         self.listeners: dict[str, Any] = {}
+        self.route_urls: list[str] = []
+        self.route_background = False
+        self.route_calls: list[FakeRoute] = []
+        self.route_tasks: list[asyncio.Task[None]] = []
+        self.unrouted: list[tuple[str, Any]] = []
 
     def on(self, event: str, handler: Any) -> None:
         self.listeners[event] = handler
@@ -108,11 +115,22 @@ class FakePage:
     async def route(self, pattern: str, handler: Any) -> None:
         self.routes.append((pattern, handler))
 
+    async def unroute(self, pattern: str, handler: Any) -> None:
+        self.unrouted.append((pattern, handler))
+
     async def add_init_script(self, script: str) -> None:
         self.init_scripts.append(script)
 
     async def goto(self, url: str, **_kwargs: Any) -> None:
         self.visited_urls.append(url)
+        handler = self.routes[-1][1]
+        for route_url in self.route_urls:
+            route = FakeRoute(route_url)
+            self.route_calls.append(route)
+            if self.route_background:
+                self.route_tasks.append(asyncio.ensure_future(handler(route)))
+            else:
+                await handler(route)
 
     async def wait_for_function(self, _expr: str, **_kwargs: Any) -> None:
         return None
@@ -914,3 +932,57 @@ async def test_ssrf_route_handler_does_not_raise_when_abort_raises_on_closed_pag
 
     assert route.continued is False
     assert route.fulfilled is None
+
+
+class _BlockingTransport(httpx.AsyncBaseTransport):
+    """Holds an external request open until released, then fails it like a torn-down connection."""
+
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+        self.closed = False
+        self.closed_when_released: bool | None = None
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        await self.release.wait()
+        self.closed_when_released = self.closed
+        raise httpx.ConnectError("connection reset", request=request)
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+async def test_render_waits_for_inflight_route_before_closing_pinned_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trip_worker import renderer
+
+    transport = _BlockingTransport()
+    monkeypatch.setattr(
+        renderer,
+        "build_pinned_external_http_client",
+        lambda *, resolve_dns=True, **_kwargs: httpx.AsyncClient(
+            transport=transport,
+            follow_redirects=False,
+            trust_env=False,
+        ),
+    )
+    manifest = _sample_manifest(total_frames=2)
+    settings = WorkerSettings(render_base_url="http://web:8080", lease_renew_interval_frames=1)
+    page = FakePage(js_frame_count=2)
+    page.route_urls = ["https://tiles.openfreemap.org/styles/liberty"]
+    page.route_background = True
+    asyncio.get_running_loop().call_later(0.05, transport.release.set)
+
+    await render_manifest_with_page(
+        page,  # type: ignore[arg-type]
+        manifest,
+        FakeEncoder(),  # type: ignore[arg-type]
+        settings,
+        is_cancelled=lambda: False,
+        resolve_dns=False,
+    )
+
+    assert page.route_tasks[0].done()
+    assert page.route_calls[0].aborted_reason == "failed"
+    assert transport.closed_when_released is False
+    assert [pattern for pattern, _handler in page.unrouted] == ["**/*"]
