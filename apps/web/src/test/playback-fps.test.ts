@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createDefaultRenderSpecV2, type RenderFps } from "../lib/api/types";
-import { computeJourneyDurationS } from "../lib/geo/photos";
+import { computePhotoStopTotalDurationS, computeJourneyDurationS } from "../lib/geo/photos";
 import {
   PREVIEW_RENDER_FPS,
   renderFpsForSpec,
@@ -33,6 +33,26 @@ describe("preview playback follows the render frame rate", () => {
       expect(renderFrameCount(durationS, fps), JSON.stringify(row)).toBe(row.frames);
     }
   });
+
+  it.each([true, false])(
+    "drives the dock grid from the toggle alone (toggle %s) to the worker frame count",
+    (previewWatermark) => {
+      const rows = GOLDEN_ROWS.filter((row) => row.is_preview === previewWatermark);
+      expect(rows.length).toBeGreaterThan(0);
+      for (const row of rows) {
+        // The dock must ignore spec.is_preview: the toggle is the single source of truth.
+        const spec = {
+          ...createDefaultRenderSpecV2(),
+          duration_seconds: row.duration_s,
+          fps: row.fps as RenderFps,
+          is_preview: !previewWatermark,
+        };
+        const dockDuration = computePhotoStopTotalDurationS(spec, [], [], previewWatermark);
+        const dockFps = renderFpsForSpec(spec, previewWatermark);
+        expect(renderFrameCount(dockDuration, dockFps), JSON.stringify(row)).toBe(row.frames);
+      }
+    },
+  );
 
   it("uses the spec fps for the film and 15 fps for a preview render", () => {
     expect(renderFpsForSpec({ fps: 15 }, false)).toBe(15);
