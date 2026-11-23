@@ -232,6 +232,30 @@ def test_userinfo_redaction_variants(raw: str, expected: str) -> None:
     assert _format(_record(raw))["message"] == expected
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ('{"password": "hunter2", "user": "trip"}', '{"password": "***", "user": "trip"}'),
+        ("password: hunter2", "password: ***"),
+        ("secret: abc", "secret: ***"),
+        ("x-api-key: VALUE", "x-api-key: ***"),
+        ('{"access_token": "VALUE"}', '{"access_token": "***"}'),
+        ("password=hunter2", "password=***"),
+    ],
+)
+def test_redacts_colon_and_json_key_value_forms(raw: str, expected: str) -> None:
+    assert _format(_record(raw))["message"] == expected
+
+
+def test_job_ids_timestamps_and_durations_are_not_redacted() -> None:
+    raw = (
+        "job_id=3f2c0a4e-1111-4222-8333-444455556666 "
+        "chunk_id: 9a8b7c6d-1111-4222-8333-444455556666 "
+        "duration_ms: 12.5 elapsed=3.2 ts: 2026-11-23T10:00:00.000+01:00 stage: chunk"
+    )
+    assert _format(_record(raw))["message"] == raw
+
+
 def test_level_env_var_controls_worker_loggers_only(
     restore_root_logging: None,
 ) -> None:

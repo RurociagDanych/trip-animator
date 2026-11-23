@@ -53,6 +53,16 @@ _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
         ),
         r"\1***",
     ),
+    # The rule above only sees `key=`; quoted JSON keys and `:` separators (YAML, header
+    # dumps) need their own pattern. Only the value is replaced so the key stays readable.
+    (
+        re.compile(
+            r"((?<![\w-])[\"']?[\w-]*(?:password|passwd|secret|token|api[_-]?key)[\w-]*"
+            r"[\"']?\s*[:=]\s*[\"']?)[^\s,;&}\"']+",
+            re.IGNORECASE,
+        ),
+        r"\1***",
+    ),
 )
 
 
