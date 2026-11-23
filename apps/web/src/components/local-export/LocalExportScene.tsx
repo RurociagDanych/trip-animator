@@ -29,28 +29,6 @@ export interface LocalExportSceneProps {
   signal: AbortSignal;
 }
 
-function waitForVisibleTab(signal: AbortSignal): Promise<void> {
-  signal.throwIfAborted();
-  if (!document.hidden) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    const cleanup = () => {
-      document.removeEventListener("visibilitychange", onVisibility);
-      signal.removeEventListener("abort", onAbort);
-    };
-    const onVisibility = () => {
-      if (document.hidden) return;
-      cleanup();
-      resolve();
-    };
-    const onAbort = () => {
-      cleanup();
-      reject(signal.reason);
-    };
-    document.addEventListener("visibilitychange", onVisibility);
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
 function copyComputedStyles(source: HTMLElement, target: HTMLElement) {
   const computed = window.getComputedStyle(source);
   for (let index = 0; index < computed.length; index += 1) {
@@ -113,6 +91,19 @@ async function paintDomOverlays(
   }
 }
 
+/** Return the timeline timestamp represented by a local export frame. */
+// eslint-disable-next-line react-refresh/only-export-components
+export function localExportFrameTimeS(
+  index: number,
+  frameCount: number,
+  durationS: number,
+  fps: number,
+  isPreview: boolean,
+): number {
+  if (isPreview) return index / fps;
+  return frameCount <= 1 ? 0 : (index / (frameCount - 1)) * durationS;
+}
+
 /** Keeps the editor renderer isolated while exposing deterministic composited frames. */
 export function LocalExportScene({
   spec,
@@ -132,19 +123,20 @@ export function LocalExportScene({
   const sceneRoot = useRef<HTMLDivElement | null>(null);
   const outputRef = useRef<HTMLCanvasElement | null>(null);
   const embeddedPhotos = useRef(new Map<string, Promise<string>>());
+  // The preview flag changes playback timing in the stage; a clip only changes its output length.
+  const fullTimelineSpec = useMemo(() => spec.is_preview ? { ...spec, is_preview: false } : spec, [spec]);
   const durationS = useMemo(
-    () => spec.photo_card_style === "cinematic_stop"
-      ? computePhotoStopTotalDurationS(spec, matchedPhotos, stages, spec.is_preview)
-      : computeJourneyDurationS(spec, spec.is_preview),
-    [matchedPhotos, spec, stages],
+    () => fullTimelineSpec.photo_card_style === "cinematic_stop"
+      ? computePhotoStopTotalDurationS(fullTimelineSpec, matchedPhotos, stages, false)
+      : computeJourneyDurationS(fullTimelineSpec, false),
+    [matchedPhotos, fullTimelineSpec, stages],
   );
-  // Cinematic photo holds can extend the schedule beyond the preview's output duration.
-  const outputDurationS = spec.is_preview ? computeJourneyDurationS(spec, true) : durationS;
+  const outputDurationS = spec.is_preview ? Math.min(durationS, 5) : durationS;
   const frameCount = Math.max(1, Math.round(outputDurationS * spec.fps));
-  const timeS = frameCount <= 1 ? 0 : (frameIndex / (frameCount - 1)) * durationS;
+  const timeS = localExportFrameTimeS(frameIndex, frameCount, durationS, spec.fps, spec.is_preview);
   const schedule = useMemo(
-    () => evaluateTimelineSchedule(stages, matchedPhotos, spec, timeS, durationS, spec.is_preview),
-    [durationS, matchedPhotos, spec, stages, timeS],
+    () => evaluateTimelineSchedule(stages, matchedPhotos, fullTimelineSpec, timeS, durationS, false),
+    [durationS, matchedPhotos, fullTimelineSpec, stages, timeS],
   );
   const totalStats = useMemo(() => ({
     distanceM: stages.reduce((sum, stage) => sum + stage.distanceM, 0),
@@ -154,7 +146,6 @@ export function LocalExportScene({
   }), [stages]);
 
   const renderFrame = useCallback(async (index: number) => {
-    await waitForVisibleTab(signal);
     if (!Number.isInteger(index) || index < 0 || index >= frameCount) {
       throw new RangeError(`Frame index must be between 0 and ${frameCount - 1}.`);
     }
@@ -162,12 +153,7 @@ export function LocalExportScene({
     frameIndexRef.current = index;
     if (changed) {
       flushSync(() => setFrameIndex(index));
-      await stageController.current?.waitForFrameSettle(true);
-      // Background tabs may suspend MapLibre's repaint before the settle timeout.
-      while (document.hidden) {
-        await waitForVisibleTab(signal);
-        await stageController.current?.waitForFrameSettle(true);
-      }
+      await stageController.current?.redrawForLocalExport(signal);
     }
     if (signal.aborted) throw new DOMException("Export aborted", "AbortError");
     const root = sceneRoot.current;
@@ -205,8 +191,7 @@ export function LocalExportScene({
         if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
           throw new RangeError("Export width and height must be positive integers.");
         }
-        await waitForVisibleTab(signal);
-        await stageController.current?.waitForReady();
+        await stageController.current?.redrawForLocalExport(signal, true);
         await renderFrame(0);
         if (!disposed && outputRef.current) onReady({ canvas: outputRef.current, frameCount, renderFrame });
       } catch (cause) {
@@ -224,11 +209,11 @@ export function LocalExportScene({
       <canvas ref={outputRef} width={width} height={height} style={{ display: "none" }} />
       <TripStageCanvas
         stages={stages}
-        spec={spec}
+        spec={fullTimelineSpec}
         progressRatio={schedule.progressRatio}
         durationS={durationS}
         travelDurationS={schedule.travelDurationS}
-        isPreview={spec.is_preview}
+        previewWatermark={spec.is_preview}
         renderMode="deterministic"
         exactSize={{ width, height }}
         controllerRef={stageController}

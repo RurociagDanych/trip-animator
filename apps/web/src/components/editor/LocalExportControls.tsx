@@ -40,7 +40,7 @@ export function LocalExportControls({ projectId, source, spec, disabled, onFlush
   const [progress, setProgress] = useState<number | null>(null);
   const [activeKind, setActiveKind] = useState<"full" | "preview" | null>(null);
   const [saving, setSaving] = useState(false);
-  const [hidden, setHidden] = useState(() => document.hidden);
+
   const [error, setError] = useState<string | null>(null);
   const [download, setDownload] = useState<string | null>(null);
   const running = useRef<AbortController | null>(null);
@@ -66,11 +66,6 @@ export function LocalExportControls({ projectId, source, spec, disabled, onFlush
     return () => { stale = true; };
   }, [fps, previewFps, probeKey, resolution]);
 
-  useEffect(() => {
-    const update = () => setHidden(document.hidden);
-    document.addEventListener("visibilitychange", update);
-    return () => document.removeEventListener("visibilitychange", update);
-  }, []);
 
   useEffect(() => () => {
     const controller = running.current;
@@ -185,7 +180,7 @@ export function LocalExportControls({ projectId, source, spec, disabled, onFlush
       <p id={hintId} className="text-[11px] text-ink-muted">{hint}</p>
       {progress !== null && (
         <div className="flex items-center justify-between gap-2">
-          <span role="status">{saving ? "Saving to render history…" : hidden ? "Local export resumes when you return to this browser tab." : progress === 0 ? "Preparing local export…" : `Exporting locally… ${progress}%`}</span>
+          <span role="status">{saving ? "Saving to render history…" : progress === 0 ? "Preparing local export…" : `Exporting locally… ${progress}%`}</span>
           {!saving && <button type="button" className="text-coral-accent underline" onClick={() => {
             if (running.current) finish(running.current);
           }}>Cancel local export</button>}

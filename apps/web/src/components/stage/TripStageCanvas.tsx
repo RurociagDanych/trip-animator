@@ -85,6 +85,8 @@ const EMPTY_CLIMBS: readonly (ClimbHighlightOut | ManifestClimb)[] = [];
 export interface TripStageCanvasHandle {
   waitForReady: () => Promise<void>;
   waitForFrameSettle: (cameraChanged?: boolean) => Promise<void>;
+  /** Settles a local export frame without waiting for browser animation callbacks. */
+  redrawForLocalExport: (signal: AbortSignal, initial?: boolean) => Promise<void>;
 }
 
 export interface CanvasGeometryStatus {
@@ -100,6 +102,7 @@ export interface TripStageCanvasProps {
   durationS?: number;
   travelDurationS?: number;
   isPreview?: boolean;
+  previewWatermark?: boolean;
   renderMode?: "interactive" | "deterministic";
   exactSize?: { width: number; height: number };
   jobId?: string;
@@ -706,6 +709,7 @@ export function TripStageCanvas({
   durationS,
   travelDurationS,
   isPreview = false,
+  previewWatermark = false,
   renderMode = "interactive",
   exactSize,
   jobId,
@@ -1713,6 +1717,22 @@ export function TripStageCanvas({
   useImperativeHandle(
     controllerRef,
     () => ({
+      redrawForLocalExport: async (signal, initial = false) => {
+        signal.throwIfAborted();
+        const photosReady = initial ? preloadAndDecodeImages(photoUrlsKey) : undefined;
+        const map = mapRef.current;
+        // Match the existing initial and per-frame tile budgets without relying on rAF.
+        const deadline = performance.now() + (initial ? 8000 : 1200);
+        while (map && mapRef.current === map) {
+          signal.throwIfAborted();
+          // MapLibre's scheduled repaints stop in hidden tabs; redraw runs synchronously.
+          map.redraw();
+          if ((map.loaded() && map.areTilesLoaded()) || performance.now() >= deadline) break;
+          await new Promise<void>((resolve) => window.setTimeout(resolve, 32));
+        }
+        await photosReady;
+        signal.throwIfAborted();
+      },
       waitForReady: async () => {
         await Promise.all([
           mapReadyPromiseRef.current,
@@ -2313,7 +2333,7 @@ export function TripStageCanvas({
           ))}
         </div>
       ) : null}
-      {isPreview || spec.is_preview ? (
+      {previewWatermark || isPreview || spec.is_preview ? (
         <div
           data-testid="preview-watermark"
           className="pointer-events-none absolute right-3 bottom-3 z-[60] rounded border border-amber-accent/40 bg-canvas/75 px-2.5 py-1 text-[11px] font-semibold tracking-wider text-amber-accent backdrop-blur-sm"

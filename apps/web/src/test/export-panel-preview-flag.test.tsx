@@ -85,7 +85,7 @@ describe("ExportPanel local preview", () => {
     const signal = vi.mocked(encodeLocalVideo).mock.calls[0]?.[0].signal;
     const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
     act(() => document.dispatchEvent(new Event("visibilitychange")));
-    expect(screen.getByRole("status")).toHaveTextContent("resumes when you return");
+    expect(screen.getByRole("status")).toHaveTextContent(/Preparing local export|Exporting locally/);
     expect(signal?.aborted).toBe(false);
     hidden.mockReturnValue(false);
     act(() => document.dispatchEvent(new Event("visibilitychange")));

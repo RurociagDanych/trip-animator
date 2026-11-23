@@ -26,6 +26,7 @@ const mockState = vi.hoisted(() => ({
   areTilesLoaded: true,
   moveOnCount: 0,
   idleOnceCount: 0,
+  redrawCount: 0,
   emit: null as ((event: string) => void) | null,
 }));
 
@@ -104,6 +105,10 @@ vi.mock("maplibre-gl", () => {
     }
     triggerRepaint() {
       requestAnimationFrame(() => mockState.emit?.("render"));
+    }
+    redraw() {
+      mockState.redrawCount += 1;
+      mockState.emit?.("render");
     }
     project(lngLat: [number, number]) {
       return {
@@ -523,6 +528,33 @@ describe("TripStageCanvas WebGL wiring (canvas.test.tsx)", () => {
     const stopPinAfter = screen.getByTestId("stop-marker-stage-canvas-1");
     const leftAfter = parseFloat(stopPinAfter.style.left);
     expect(leftAfter).not.toBeCloseTo(leftBefore, 1);
+  });
+
+  it("redraws the local export when the browser suspends animation callbacks", async () => {
+    const controllerRef = createRef<TripStageCanvasHandle | null>();
+    render(<TripStageCanvas stages={[makeStage()]} spec={createDefaultRenderSpecV2()}
+      progressRatio={0.5} durationS={20} travelDurationS={20} controllerRef={controllerRef}
+      renderMode="deterministic" exactSize={{ width: 1280, height: 720 }} />);
+
+    const raf = vi.spyOn(window, "requestAnimationFrame").mockReturnValue(0);
+    const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+    const before = mockState.redrawCount;
+    const signal = new AbortController().signal;
+    mockState.areTilesLoaded = false;
+    try {
+      const frame = controllerRef.current!.redrawForLocalExport(signal, true);
+      await vi.waitFor(() => expect(mockState.redrawCount).toBeGreaterThan(before));
+      mockState.areTilesLoaded = true;
+      await frame;
+      const next = mockState.redrawCount;
+      await controllerRef.current!.redrawForLocalExport(signal);
+      expect(mockState.redrawCount).toBeGreaterThan(next);
+      expect(raf).not.toHaveBeenCalled();
+    } finally {
+      mockState.areTilesLoaded = true;
+      raf.mockRestore();
+      hidden.mockRestore();
+    }
   });
 
   it("waits for a rendered frame and only waits for idle when tiles are not loaded", async () => {
