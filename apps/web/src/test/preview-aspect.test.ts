@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ResolutionPreset } from "../lib/api/types";
-import { fitResolutionPreset, parseResolutionPreset } from "../lib/geo/format";
+import { fitResolutionPreset, frameInteriorSize, parseResolutionPreset } from "../lib/geo/format";
 
 const PRESETS: ResolutionPreset[] = ["1920x1080", "1080x1080", "1080x1350", "1080x1920"];
 
@@ -43,5 +43,12 @@ describe("preview box follows the selected resolution", () => {
   it("returns null when sub-pixel space floors a dimension to zero", () => {
     expect(fitResolutionPreset("1080x1350", { width: 0.5, height: 100 })).toBeNull();
     expect(fitResolutionPreset("1920x1080", { width: 1.5, height: 1000 })).toBeNull();
+  });
+
+  it("sizes the map to the frame interior, excluding its border", () => {
+    expect(frameInteriorSize({ width: 480, height: 600 }, { width: 2, height: 2 })).toEqual({
+      width: 478,
+      height: 598,
+    });
   });
 });

@@ -41,6 +41,7 @@ import {
   formatElapsedTime,
   formatElevation,
   fitResolutionPreset,
+  frameInteriorSize,
   parseResolutionPreset,
 } from "../../lib/geo/format";
 import {
@@ -765,22 +766,28 @@ export function TripStageCanvas({
     // Fit the preview box to the dock, so a resolution change re-measures even when
     // the dock itself does not resize.
     const measure = () => {
-      if (el.clientWidth > 0 && el.clientHeight > 0) {
-        setObservedSize({ width: el.clientWidth, height: el.clientHeight });
-      }
       const parent = el.parentElement;
-      if (!parent) {
-        return;
-      }
-      const style = window.getComputedStyle(parent);
-      const available = {
-        width: parent.clientWidth - (Number.parseFloat(style.paddingLeft) || 0) - (Number.parseFloat(style.paddingRight) || 0),
-        height: parent.clientHeight - (Number.parseFloat(style.paddingTop) || 0) - (Number.parseFloat(style.paddingBottom) || 0),
-      };
-      const fit = fitResolutionPreset(spec.resolution, available);
+      const parentStyle = parent ? window.getComputedStyle(parent) : null;
+      const available = parent && parentStyle
+        ? {
+            width: parent.clientWidth - (Number.parseFloat(parentStyle.paddingLeft) || 0) - (Number.parseFloat(parentStyle.paddingRight) || 0),
+            height: parent.clientHeight - (Number.parseFloat(parentStyle.paddingTop) || 0) - (Number.parseFloat(parentStyle.paddingBottom) || 0),
+          }
+        : null;
+      const fit = available ? fitResolutionPreset(spec.resolution, available) : null;
       setContainerFit((prev) =>
         fit && (!prev || prev.width !== fit.width || prev.height !== fit.height) ? fit : prev,
       );
+      if (fit) {
+        const frameStyle = window.getComputedStyle(el);
+        const border = {
+          width: (Number.parseFloat(frameStyle.borderLeftWidth) || 0) + (Number.parseFloat(frameStyle.borderRightWidth) || 0),
+          height: (Number.parseFloat(frameStyle.borderTopWidth) || 0) + (Number.parseFloat(frameStyle.borderBottomWidth) || 0),
+        };
+        setObservedSize(frameInteriorSize(fit, border));
+      } else if (el.clientWidth > 0 && el.clientHeight > 0) {
+        setObservedSize({ width: el.clientWidth, height: el.clientHeight });
+      }
     };
     const observer = new ResizeObserver(measure);
     observer.observe(el);

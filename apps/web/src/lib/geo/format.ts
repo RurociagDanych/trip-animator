@@ -25,6 +25,18 @@ export function fitResolutionPreset(
   return fitted.width > 0 && fitted.height > 0 ? fitted : null;
 }
 
+// The frame's border is drawn inside its fitted box (border-box sizing), so the map
+// that fills the frame must be the frame size minus the border on each axis.
+export function frameInteriorSize(
+  frame: { width: number; height: number },
+  border: { width: number; height: number },
+): { width: number; height: number } {
+  return {
+    width: Math.max(0, frame.width - border.width),
+    height: Math.max(0, frame.height - border.height),
+  };
+}
+
 export function hexToRgbTuple(hex: string, fallback: [number, number, number] = [56, 189, 248]): [number, number, number] {
   const clean = hex.trim().replace(/^#/, "");
   if (!/^[0-9a-fA-F]{6}$/.test(clean)) {
