@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import sys
 from collections.abc import Iterator
 from datetime import datetime, timedelta
 from typing import Any
@@ -28,6 +29,7 @@ def restore_root_logging() -> Iterator[None]:
 def _record(
     msg: str,
     *,
+    args: tuple[Any, ...] = (),
     level: int = logging.INFO,
     name: str = "trip_worker.runner",
     exc_info: Any = None,
@@ -40,7 +42,7 @@ def _record(
         __file__,
         1,
         msg,
-        (),
+        args,
         exc_info,
         extra=extra or None,
     )
@@ -106,33 +108,105 @@ def test_json_formatter_renders_exc_info_as_string() -> None:
     assert "ValueError: boom" in out["exc_info"]
 
 
-def test_json_formatter_does_not_leak_secrets() -> None:
+def test_json_formatter_does_not_leak_secrets_from_args_traceback_or_extras() -> None:
     try:
         raise RuntimeError(
-            "connect failed for postgresql+psycopg://trip:hunter2@db.internal:5432/app"
+            "connect failed for postgresql+psycopg://trip:dsnsecret@db.internal:5432/app"
         )
     except RuntimeError:
-        import sys
-
         exc_info = sys.exc_info()
 
     record = _record(
-        "Fetch from https://user:s3cr3t@tiles.example.com/a.pbf and "
-        "https://bucket.s3.example.com/o.webp?X-Amz-Algorithm=AWS4&X-Amz-Signature=abc123&X-Amz-Credential=AKIAEXAMPLE",
+        "Fetch from %s and %s",
+        args=(
+            "https://user:s3cr3t@tiles.example.com/a.pbf",
+            "https://bucket.s3.example.com/o.webp?X-Amz-Algorithm=AWS4"
+            "&X-Amz-Signature=abc123&X-Amz-Credential=AKIAEXAMPLE",
+        ),
         exc_info=exc_info,
         event="probe_finish",
         password="p4ssw0rd",
-        db_dsn="postgresql://trip:dsnsecret@db/app",
+        db_dsn="postgresql://trip:hunter2@db/app",
     )
 
     line = JsonFormatter().format(record)
 
-    for secret in ("hunter2", "s3cr3t", "abc123", "AKIAEXAMPLE", "p4ssw0rd", "dsnsecret"):
+    for secret in ("dsnsecret", "s3cr3t", "abc123", "AKIAEXAMPLE", "p4ssw0rd", "hunter2"):
         assert secret not in line
     assert "tiles.example.com" in line
     assert "db.internal" in line
-    assert "password" not in json.loads(line)
-    assert "db_dsn" not in json.loads(line)
+    assert "bucket.s3.example.com/o.webp" in line
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "https://bucket.s3.us-east-1.amazonaws.com/o.webp?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+        "&X-Amz-Credential=AKIAEXAMPLE%2F20261123%2Fus-east-1%2Fs3%2Faws4_request"
+        "&X-Amz-Date=20261123T000000Z&X-Amz-Expires=300&X-Amz-SignedHeaders=host"
+        "&X-Amz-Signature=deadbeef1234",
+        "https://acct.blob.core.windows.net/c/b.mp4?sv=2024-11-04&sig=sasSig%2Bval%3D&se=2026-12-01",
+        "https://api.example.com/v1?api_key=ak-live-123",
+        "https://api.example.com/v1?apikey=ak-live-456",
+        "https://api.example.com/v1?x-api-key=ak-live-789",
+        "https://maps.example.com/t?key=gmapkey777",
+        "https://svc.example.com/x?auth=authtok999",
+        "https://svc.example.com/x?credential=credval555",
+        "https://svc.example.com/x?session=sessid444",
+        "https://svc.example.com/x?cookie=cookval333",
+        "https://svc.example.com/x?access_token=tokval222",
+        "Authorization: Bearer XYZtoken111",
+        "Authorization: Basic dXNlcjpwYXNz222",
+        "authorization: token ghp_tok333",
+        "Authorization: opaqueraw444",
+        "'Authorization': 'Bearer quoted555'",
+        "Cookie: session=sessck555; theme=dark",
+    ],
+)
+def test_redacts_secret_values_in_message(raw: str) -> None:
+    line = JsonFormatter().format(_record(raw))
+
+    for secret in (
+        "deadbeef1234",
+        "sasSig",
+        "ak-live-123",
+        "ak-live-456",
+        "ak-live-789",
+        "gmapkey777",
+        "authtok999",
+        "credval555",
+        "sessid444",
+        "cookval333",
+        "tokval222",
+        "XYZtoken111",
+        "dXNlcjpwYXNz222",
+        "ghp_tok333",
+        "opaqueraw444",
+        "quoted555",
+        "sessck555",
+        "theme=dark",
+    ):
+        assert secret not in line
+
+
+def test_bearer_header_keeps_scheme_and_masks_token() -> None:
+    out = _format(_record("Authorization: Bearer XYZ"))
+
+    assert out["message"] == "Authorization: Bearer ***"
+
+
+def test_presigned_s3_url_keeps_host_and_path_and_masks_signature() -> None:
+    out = _format(
+        _record(
+            "GET https://bucket.s3.us-east-1.amazonaws.com/a/o.webp"
+            "?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=deadbeef1234&X-Amz-Expires=300"
+        )
+    )
+
+    assert out["message"] == (
+        "GET https://bucket.s3.us-east-1.amazonaws.com/a/o.webp"
+        "?X-Amz-Algorithm=***&X-Amz-Signature=***&X-Amz-Expires=***"
+    )
 
 
 def test_level_env_var_controls_root_level(

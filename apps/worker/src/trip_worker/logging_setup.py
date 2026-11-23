@@ -25,9 +25,27 @@ _QUIET_LOGGERS = ("httpx", "httpcore")
 
 _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(\b[a-zA-Z][\w+.-]*://)[^/\s@]+@"), r"\1***@"),
+    # The header value may carry a scheme; keep the scheme so the log still shows which
+    # auth type was sent, and mask only the credential.
     (
         re.compile(
-            r"((?:[?&;]|\b)(?:X-Amz-[\w-]+|[\w-]*(?:signature|token|secret|password|passwd)[\w-]*)=)"
+            r"((?:proxy-)?authorization[\"']?\s*[:=]\s*[\"']?(?:(?:bearer|basic|token|digest)\s+)?)"
+            r"[^\s,;\"']+",
+            re.IGNORECASE,
+        ),
+        r"\1***",
+    ),
+    # Cookie values are `name=value; name=value`, so the mask runs to the end of the line
+    # or the closing quote of a repr'd header.
+    (
+        re.compile(r"(cookie[\"']?\s*[:=]\s*[\"']?)[^\r\n\"']+", re.IGNORECASE),
+        r"\1***",
+    ),
+    (
+        re.compile(
+            r"((?:[?&;]|\b)(?:X-Amz-[\w-]+|sig|"
+            r"[\w-]*(?:signature|token|secret|password|passwd|api[_-]?key|apikey|key|auth|"
+            r"credential|session|cookie)[\w-]*)=)"
             r"[^&\s\"']+",
             re.IGNORECASE,
         ),
