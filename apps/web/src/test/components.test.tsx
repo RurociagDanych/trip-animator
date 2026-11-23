@@ -101,6 +101,26 @@ describe("Component tests: InspectorPanel, StageSidebar, ExportPanel, Statistics
   });
 
   describe("InspectorPanel", () => {
+    it("warns in the Output section when a stored frame rate is invalid", () => {
+      const spec = createDefaultRenderSpecV2();
+      render(
+        <QueryClientProvider client={makeQueryClient()}>
+          <InspectorPanel
+            projectId="proj-1"
+            section="camera"
+            spec={spec}
+            stageCount={1}
+            onSelectSection={vi.fn()}
+            onUpdateSpec={vi.fn()}
+            onUpdateHud={vi.fn()}
+            onFlushSave={async () => true}
+            invalidSpecValues={[{ field: "fps", value: 24, fallback: spec.fps }]}
+          />
+        </QueryClientProvider>,
+      );
+      expect(screen.getByRole("alert").textContent).toContain('Frame rate "24" is not supported');
+    });
+
     it("updates track and marker color pickers in Route tab and text/panel color pickers in HUD tab", () => {
       const onUpdateSpec = vi.fn();
       const onUpdateHud = vi.fn();

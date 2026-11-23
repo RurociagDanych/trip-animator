@@ -15,6 +15,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ApiError } from "../../lib/api/client";
 import { projectsApi, rendersApi } from "../../lib/api/endpoints";
 import type { RenderJobOut, RenderSpecV2 } from "../../lib/api/types";
+import { useEditorStore } from "../../lib/state/editor-store";
 
 export interface ExportPanelProps {
   projectId: string;
@@ -27,6 +28,7 @@ const TERMINAL_STATES = new Set(["succeeded", "failed", "cancelled"]);
 
 export function ExportPanel({ projectId, spec, stageCount, onFlushSave }: ExportPanelProps) {
   const queryClient = useQueryClient();
+  const previewWatermark = useEditorStore((s) => s.previewWatermark);
   const [submittingKind, setSubmittingKind] = useState<"preview" | "export" | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
@@ -114,14 +116,19 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave }: Export
     };
   }, [trackedJobId, projectId, queryClient]);
 
-  async function startRender(isPreview: boolean) {
+  // The preview button renders what the dock shows, so its flag mirrors the toggle; the
+  // full export always sends false so a complete film is never clipped to the preview.
+  async function startRender(kind: "preview" | "export") {
+    if (kind === "preview" && !previewWatermark) {
+      return;
+    }
     if (stageCount === 0) {
       setExportError("Add at least one GPX or Strava stage before rendering.");
       return;
     }
 
     setExportError(null);
-    setSubmittingKind(isPreview ? "preview" : "export");
+    setSubmittingKind(kind);
 
     try {
       const saved = await onFlushSave();
@@ -132,7 +139,7 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave }: Export
 
       const payload: RenderSpecV2 = {
         ...spec,
-        is_preview: isPreview,
+        is_preview: kind === "preview" ? previewWatermark : false,
       };
       const job = await rendersApi.create(projectId, payload);
       setActiveJobId(job.id);
@@ -173,10 +180,12 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave }: Export
   return (
     <div className="space-y-4 text-xs">
       <div className="grid grid-cols-1 gap-2">
+        {/* A preview without the watermark toggle would render the full film, so the button is disabled instead of mislabelled. */}
         <button
           type="button"
-          disabled={submittingKind !== null}
-          onClick={() => void startRender(true)}
+          disabled={submittingKind !== null || !previewWatermark}
+          aria-describedby={previewWatermark ? undefined : "preview-clip-hint"}
+          onClick={() => void startRender("preview")}
           className="inline-flex w-full items-center justify-center gap-2 rounded-md border border-border bg-elevated px-3 py-2 text-xs font-medium text-ink hover:border-teal-accent/60 hover:text-teal-accent disabled:opacity-50 transition-colors"
         >
           {submittingKind === "preview" ? (
@@ -186,11 +195,16 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave }: Export
           )}
           <span>Preview clip (5s)</span>
         </button>
+        {previewWatermark ? null : (
+          <p id="preview-clip-hint" className="text-[11px] text-ink-muted">
+            Enable the preview watermark to render a 5 s preview clip
+          </p>
+        )}
 
         <button
           type="button"
           disabled={submittingKind !== null}
-          onClick={() => void startRender(false)}
+          onClick={() => void startRender("export")}
           className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-sky-accent px-3 py-2 text-xs font-semibold text-canvas hover:bg-sky-accent/90 disabled:opacity-50 transition-colors"
         >
           {submittingKind === "export" ? (

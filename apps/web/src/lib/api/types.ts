@@ -44,12 +44,18 @@ export interface VaultSyncStatusOut {
   last_synced_at: string | null; last_error: string | null;
 }
 
-export type ResolutionPreset =
-  | "1280x720"
-  | "1920x1080"
-  | "1080x1080"
-  | "1080x1350"
-  | "1080x1920";
+export const RESOLUTION_PRESETS = [
+  "1280x720",
+  "1920x1080",
+  "1080x1080",
+  "1080x1350",
+  "1080x1920",
+  "720x1280",
+  "720x900",
+  "720x720",
+] as const;
+
+export type ResolutionPreset = (typeof RESOLUTION_PRESETS)[number];
 
 export type MapStylePreset =
   | "liberty"
@@ -220,10 +226,14 @@ export interface CameraKeyframe {
   label: string;
 }
 
+export const RENDER_FPS_VALUES = [15, 30, 60] as const;
+
+export type RenderFps = (typeof RENDER_FPS_VALUES)[number];
+
 export interface RenderSpecV2 {
   version: 2;
   resolution: ResolutionPreset;
-  fps: 30 | 60;
+  fps: RenderFps;
   map_style: MapStylePreset;
   duration_seconds: number;
   timeline_mode: TimelineMode;
@@ -992,6 +1002,8 @@ export function createDefaultRenderSpecV2(): RenderSpecV2 {
   };
 }
 
+const VALID_FPS_SET = new Set<RenderFps>(RENDER_FPS_VALUES);
+const VALID_RESOLUTION_SET = new Set<ResolutionPreset>(RESOLUTION_PRESETS);
 const VALID_MAP_STYLE_SET = new Set<MapStylePreset>([
   "liberty",
   "positron",
@@ -1088,6 +1100,32 @@ function normalizeCameraKeyframe(raw: unknown): CameraKeyframe | null {
   };
 }
 
+export interface InvalidRenderSpecValue {
+  field: "resolution" | "fps";
+  value: unknown;
+  fallback: ResolutionPreset | RenderFps;
+}
+
+// Stored values that normalizeRenderSpecV2 replaces with defaults. The stored data is not
+// rewritten here; the Inspector lists these so the replacement is visible to the user.
+export function findInvalidRenderSpecValues(
+  raw?: Partial<RenderSpecV2> | null,
+): InvalidRenderSpecValue[] {
+  if (!raw || typeof raw !== "object") return [];
+  const defaults = createDefaultRenderSpecV2();
+  const invalid: InvalidRenderSpecValue[] = [];
+  if (
+    raw.resolution !== undefined &&
+    !(typeof raw.resolution === "string" && VALID_RESOLUTION_SET.has(raw.resolution))
+  ) {
+    invalid.push({ field: "resolution", value: raw.resolution, fallback: defaults.resolution });
+  }
+  if (raw.fps !== undefined && !(typeof raw.fps === "number" && VALID_FPS_SET.has(raw.fps))) {
+    invalid.push({ field: "fps", value: raw.fps, fallback: defaults.fps });
+  }
+  return invalid;
+}
+
 export function normalizeRenderSpecV2(raw?: Partial<RenderSpecV2> | null): RenderSpecV2 {
   const defaults = createDefaultRenderSpecV2();
   if (!raw || typeof raw !== "object") {
@@ -1095,6 +1133,14 @@ export function normalizeRenderSpecV2(raw?: Partial<RenderSpecV2> | null): Rende
   }
   const panelDefaults = defaults.statistics_panel;
   const rawPanel = raw.statistics_panel;
+  const fps: RenderFps =
+    typeof raw.fps === "number" && VALID_FPS_SET.has(raw.fps as RenderFps)
+      ? (raw.fps as RenderFps)
+      : defaults.fps;
+  const resolution: ResolutionPreset =
+    typeof raw.resolution === "string" && VALID_RESOLUTION_SET.has(raw.resolution as ResolutionPreset)
+      ? (raw.resolution as ResolutionPreset)
+      : defaults.resolution;
   const mapStyle: MapStylePreset =
     typeof raw.map_style === "string" && VALID_MAP_STYLE_SET.has(raw.map_style as MapStylePreset)
       ? (raw.map_style as MapStylePreset)
@@ -1174,6 +1220,8 @@ export function normalizeRenderSpecV2(raw?: Partial<RenderSpecV2> | null): Rende
     ...defaults,
     ...raw,
     version: 2,
+    resolution,
+    fps,
     map_style: mapStyle,
     duration_seconds: durationSeconds,
     camera_preset: cameraPreset,

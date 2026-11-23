@@ -16,6 +16,9 @@ ResolutionPreset = Literal[
     "1080x1080",
     "1080x1350",
     "1080x1920",
+    "720x1280",
+    "720x900",
+    "720x720",
 ]
 MapStylePreset = Literal[
     "liberty",
@@ -732,7 +735,7 @@ class RenderSpecV2(BaseModel):
 
     version: Literal[2] = 2
     resolution: ResolutionPreset = "1920x1080"
-    fps: Literal[30, 60] = 30
+    fps: Literal[15, 30, 60] = 30
     map_style: MapStylePreset = "liberty"
     duration_seconds: float = Field(default=20.0, ge=3.0, le=180.0)
     timeline_mode: TimelineMode = "distance"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -192,6 +193,64 @@ def test_build_render_manifest_multi_stage_with_trim_and_antimeridian(tmp_path: 
     assert second.color == "#F97316"
     assert second.transition == "none"
     assert [p.segment_idx for p in second.points] == [0, 1]
+
+
+@pytest.mark.parametrize(("fps", "expected_frames"), [(30, 300), (15, 150)])
+def test_build_render_manifest_720p_portrait_uses_preset_dimensions(
+    tmp_path: Path, fps: int, expected_frames: int
+) -> None:
+    store = LocalObjectStore(tmp_path)
+    project_id = uuid.uuid4()
+    stage_id = uuid.uuid4()
+    t0 = datetime(2001, 6, 2, 9, 0, 0, tzinfo=UTC)
+    points = [
+        TrackPoint(
+            lat=0.1 + i * 0.001,
+            lon=0.2 + i * 0.001,
+            elev_m=1200.0 + i,
+            ts_utc=t0 + timedelta(seconds=i * 5),
+            segment_idx=0,
+        )
+        for i in range(40)
+    ]
+    key, dist, gain = _write_stage_parquet(
+        store, project_id=project_id, stage_id=stage_id, points=points
+    )
+    stage = StageRecord(
+        id=stage_id,
+        project_id=project_id,
+        name="Fictional Portrait Stage",
+        stage_order=0,
+        day_index=1,
+        trim_start_s=None,
+        trim_end_s=None,
+        silver_object_key=key,
+        distance_m=dist,
+        elevation_gain_m=gain,
+        moving_seconds=195.0,
+        elapsed_seconds=195.0,
+        has_timestamps=True,
+    )
+
+    manifest = build_render_manifest(
+        job_id=uuid.uuid4(),
+        project_id=project_id,
+        project_title="Fictional Portrait Trip",
+        spec_json={
+            "version": 2,
+            "resolution": "720x1280",
+            "fps": fps,
+            "duration_seconds": 10.0,
+            "is_preview": False,
+        },
+        stages=[stage],
+        store=store,
+    )
+
+    assert manifest.width == 720
+    assert manifest.height == 1280
+    assert manifest.fps == fps
+    assert manifest.total_frames == expected_frames
 
 
 def test_build_render_manifest_preview_caps_duration_and_downsamples(tmp_path: Path) -> None:
@@ -1081,3 +1140,122 @@ def test_build_render_manifest_includes_climbs_and_respects_show_climb_callouts(
         store=store,
     )
     assert manifest_no_climbs.climbs == []
+
+
+GOLDEN_FRAME_TABLE = (
+    Path(__file__).resolve().parents[3] / "packages/telemetry/tests/golden/frame_counts.json"
+)
+
+
+def _golden_frame_rows() -> list[dict[str, object]]:
+    return json.loads(GOLDEN_FRAME_TABLE.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("row", _golden_frame_rows(), ids=lambda r: json.dumps(r, sort_keys=True))
+def test_build_render_manifest_matches_shared_golden_frame_table(
+    tmp_path: Path, row: dict[str, object]
+) -> None:
+    store = LocalObjectStore(tmp_path)
+    project_id = uuid.uuid4()
+    stage_id = uuid.uuid4()
+    t0 = datetime(2001, 6, 2, 9, 0, 0, tzinfo=UTC)
+    points = [
+        TrackPoint(
+            lat=0.1 + i * 0.001,
+            lon=0.2 + i * 0.001,
+            elev_m=1200.0 + i,
+            ts_utc=t0 + timedelta(seconds=i * 5),
+            segment_idx=0,
+        )
+        for i in range(40)
+    ]
+    key, dist, gain = _write_stage_parquet(
+        store, project_id=project_id, stage_id=stage_id, points=points
+    )
+    stage = StageRecord(
+        id=stage_id,
+        project_id=project_id,
+        name="Golden Stage",
+        stage_order=0,
+        day_index=1,
+        trim_start_s=None,
+        trim_end_s=None,
+        silver_object_key=key,
+        distance_m=dist,
+        elevation_gain_m=gain,
+        moving_seconds=195.0,
+        elapsed_seconds=195.0,
+        has_timestamps=True,
+    )
+
+    manifest = build_render_manifest(
+        job_id=uuid.uuid4(),
+        project_id=project_id,
+        project_title="Golden Trip",
+        spec_json={
+            "version": 2,
+            "resolution": "1280x720",
+            "fps": row["fps"],
+            "duration_seconds": row["duration_s"],
+            "is_preview": row["is_preview"],
+        },
+        stages=[stage],
+        store=store,
+    )
+
+    assert manifest.total_frames == row["frames"]
+
+
+def test_build_render_manifest_preview_forces_15_fps_grid_for_any_spec_fps(tmp_path: Path) -> None:
+    store = LocalObjectStore(tmp_path)
+    project_id = uuid.uuid4()
+    stage_id = uuid.uuid4()
+    t0 = datetime(2001, 6, 2, 9, 0, 0, tzinfo=UTC)
+    points = [
+        TrackPoint(
+            lat=0.1 + i * 0.001,
+            lon=0.2 + i * 0.001,
+            elev_m=1200.0 + i,
+            ts_utc=t0 + timedelta(seconds=i * 5),
+            segment_idx=0,
+        )
+        for i in range(40)
+    ]
+    key, dist, gain = _write_stage_parquet(
+        store, project_id=project_id, stage_id=stage_id, points=points
+    )
+    stage = StageRecord(
+        id=stage_id,
+        project_id=project_id,
+        name="Preview Stage",
+        stage_order=0,
+        day_index=1,
+        trim_start_s=None,
+        trim_end_s=None,
+        silver_object_key=key,
+        distance_m=dist,
+        elevation_gain_m=gain,
+        moving_seconds=195.0,
+        elapsed_seconds=195.0,
+        has_timestamps=True,
+    )
+
+    manifest = build_render_manifest(
+        job_id=uuid.uuid4(),
+        project_id=project_id,
+        project_title="Preview Trip",
+        spec_json={
+            "version": 2,
+            "resolution": "1280x720",
+            "fps": 60,
+            "duration_seconds": 10.0,
+            "is_preview": True,
+        },
+        stages=[stage],
+        store=store,
+    )
+
+    assert manifest.is_preview is True
+    assert manifest.fps == 15
+    assert manifest.duration_s == 5.0
+    assert manifest.total_frames == 75

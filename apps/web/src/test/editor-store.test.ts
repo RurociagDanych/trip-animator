@@ -55,6 +55,33 @@ function makeProject(overrides: Partial<ProjectDetailOut> = {}): ProjectDetailOu
   };
 }
 
+describe("stored render settings warnings", () => {
+  beforeEach(() => {
+    useEditorStore.getState().resetEditor();
+  });
+
+  it("keeps invalid stored resolution and fps until the user edits that field", () => {
+    const store = useEditorStore.getState();
+    store.hydrateProject(
+      makeProject({
+        settings: { ...createDefaultRenderSpecV2(), resolution: "640x480", fps: 24 } as never,
+      }),
+    );
+    expect(useEditorStore.getState().invalidSpecValues.map((v) => v.field)).toEqual([
+      "resolution",
+      "fps",
+    ]);
+
+    useEditorStore.getState().updateSpec({ fps: 30 });
+    expect(useEditorStore.getState().invalidSpecValues.map((v) => v.field)).toEqual([
+      "resolution",
+    ]);
+
+    useEditorStore.getState().updateSpec({ resolution: "720x720" });
+    expect(useEditorStore.getState().invalidSpecValues).toEqual([]);
+  });
+});
+
 describe("editor-store.ts", () => {
   beforeEach(() => {
     vi.useFakeTimers();

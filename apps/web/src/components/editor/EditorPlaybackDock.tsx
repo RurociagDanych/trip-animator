@@ -8,6 +8,7 @@ import type {
   TelemetryChartPoint,
 } from "../../lib/api/types";
 import { formatDistance, formatElapsedTime, formatElevation } from "../../lib/geo/format";
+import { renderFpsForSpec, snapRatioToRenderFrame } from "../../lib/geo/playback";
 import {
   evaluateTimelineSchedule,
   progressRatioToTimeRatio,
@@ -72,6 +73,7 @@ export const EditorPlaybackDock = memo(function EditorPlaybackDock({
   const togglePlaying = useEditorStore((s) => s.togglePlaying);
   const setPlaybackSpeed = useEditorStore((s) => s.setPlaybackSpeed);
   const resetPlayback = useEditorStore((s) => s.resetPlayback);
+  const fps = renderFpsForSpec(spec, previewWatermark);
 
   useEffect(() => {
     if (!isPlaying) {
@@ -80,24 +82,32 @@ export const EditorPlaybackDock = memo(function EditorPlaybackDock({
     let rafId = 0;
     let lastTs = performance.now();
     const durationMs = Math.max(1000, effectiveDurationS * 1000);
+    // The unsnapped ratio advances continuously; only the published ratio lands on the
+    // render frame grid, so slow frames do not stall at a snapped value.
+    let ratio = useEditorStore.getState().currentTimeRatio;
+    let published = ratio;
 
     const tick = (now: number) => {
       const dt = now - lastTs;
       lastTs = now;
-      const prev = useEditorStore.getState().currentTimeRatio;
-      const next = prev + (dt * playbackSpeed) / durationMs;
-      if (next >= 1) {
+      const stored = useEditorStore.getState().currentTimeRatio;
+      if (stored !== published) {
+        ratio = stored;
+      }
+      ratio += (dt * playbackSpeed) / durationMs;
+      if (ratio >= 1) {
         setCurrentTimeRatio(1);
         setPlaying(false);
         return;
       }
-      setCurrentTimeRatio(next);
+      published = snapRatioToRenderFrame(ratio, effectiveDurationS, fps);
+      setCurrentTimeRatio(published);
       rafId = window.requestAnimationFrame(tick);
     };
 
     rafId = window.requestAnimationFrame(tick);
     return () => window.cancelAnimationFrame(rafId);
-  }, [isPlaying, playbackSpeed, effectiveDurationS, setCurrentTimeRatio, setPlaying]);
+  }, [isPlaying, playbackSpeed, effectiveDurationS, fps, setCurrentTimeRatio, setPlaying]);
 
   const schedule = useMemo(
     () =>

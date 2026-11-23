@@ -6,9 +6,11 @@ import type {
   ColorByMode,
   DirectorPreset,
   FollowZoomMode,
+  InvalidRenderSpecValue,
   MapStylePreset,
   PanelPosition,
   PhotoCardStyle,
+  RenderFps,
   RenderSpecV2,
   ResolutionPreset,
   StatisticMetric,
@@ -90,7 +92,13 @@ export interface InspectorPanelProps {
   onUpdateHud: (patch: Partial<StatisticsPanelConfig>) => void;
   onApplyDirectorPreset?: (preset: DirectorPreset) => void;
   onFlushSave: () => Promise<boolean>;
+  invalidSpecValues?: InvalidRenderSpecValue[];
 }
+
+const INVALID_SPEC_FIELD_LABEL: Record<InvalidRenderSpecValue["field"], string> = {
+  resolution: "Output resolution",
+  fps: "Frame rate",
+};
 
 export function InspectorPanel({
   projectId,
@@ -105,6 +113,7 @@ export function InspectorPanel({
   onUpdateHud,
   onApplyDirectorPreset,
   onFlushSave,
+  invalidSpecValues = [],
 }: InspectorPanelProps) {
   const hud = spec.statistics_panel;
   const effectiveDays = Math.max(1, dayCount ?? stageCount);
@@ -569,6 +578,15 @@ export function InspectorPanel({
 
         {section === "camera" ? (
           <div className="space-y-4">
+            {invalidSpecValues.length > 0 ? (
+              <div role="alert" className="space-y-1 rounded-md border border-amber-500/60 bg-amber-500/10 px-2.5 py-2 text-xs text-ink">
+                {invalidSpecValues.map((value) => (
+                  <p key={value.field}>
+                    {INVALID_SPEC_FIELD_LABEL[value.field]} &quot;{String(value.value)}&quot; is not supported and shows as {String(value.fallback)} until you pick one.
+                  </p>
+                ))}
+              </div>
+            ) : null}
             <label className="block space-y-1.5">
               <span className="block font-medium text-ink-muted">Output aspect &amp; resolution</span>
               <select
@@ -583,6 +601,9 @@ export function InspectorPanel({
                 <option value="1080x1080">1080×1080 (1:1 Square)</option>
                 <option value="1080x1350">1080×1350 (4:5 Portrait)</option>
                 <option value="1080x1920">1080×1920 (9:16 Vertical)</option>
+                <option value="720x1280">720×1280 (9:16 HD Vertical)</option>
+                <option value="720x900">720×900 (4:5 Portrait)</option>
+                <option value="720x720">720×720 (1:1 Square)</option>
               </select>
             </label>
 
@@ -591,9 +612,10 @@ export function InspectorPanel({
                 <span className="block font-medium text-ink-muted">Frame rate</span>
                 <select
                   value={spec.fps}
-                  onChange={(e) => onUpdateSpec({ fps: Number(e.currentTarget.value) as 30 | 60 })}
+                  onChange={(e) => onUpdateSpec({ fps: Number(e.currentTarget.value) as RenderFps })}
                   className="w-full rounded-md border border-border bg-elevated px-2.5 py-2 text-xs text-ink focus:border-sky-accent focus:outline-none"
                 >
+                  <option value={15}>15 fps</option>
                   <option value={30}>30 fps</option>
                   <option value={60}>60 fps</option>
                 </select>
