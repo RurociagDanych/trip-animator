@@ -258,14 +258,17 @@ def make_ssrf_route_handler(
         try:
             resp = await _fetch_external(url, method=method, target=decision.target)
         except Exception as exc:
-            # Playwright does not settle a route whose callback raises, so any
-            # failure (including a client closed by the render scope) must abort here.
+            # Every route must end in fulfill or abort, so any failure of the external
+            # fetch aborts here instead of propagating out of the callback.
             logger.warning(
                 "External Playwright request failed error_type=%s host=%s",
                 type(exc).__name__,
-                parsed.netloc,
+                parsed.hostname,
             )
-            await route.abort("failed")
+            try:
+                await route.abort("failed")
+            except Exception:
+                logger.debug("Ignoring error aborting Playwright route", exc_info=True)
             return
 
         if 300 <= resp.status_code < 400:

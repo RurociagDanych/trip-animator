@@ -887,3 +887,30 @@ async def test_ssrf_route_handler_aborts_when_http_client_already_closed() -> No
     assert route.aborted_reason == "failed"
     assert route.continued is False
     assert route.fulfilled is None
+
+
+async def test_ssrf_route_handler_does_not_raise_when_abort_raises_on_closed_page() -> None:
+    import httpx
+
+    class ClosedPageRoute(FakeRoute):
+        async def abort(self, error_code: str = "failed") -> None:
+            raise RuntimeError("Target page, context or browser has been closed")
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=b"{}")),
+        follow_redirects=False,
+    )
+    await client.aclose()
+    handler = make_ssrf_route_handler(
+        render_origin="http://caddy",
+        allowed_external_hosts=frozenset({"tiles.openfreemap.org"}),
+        resolve_dns=False,
+        tile_cache=None,
+        http_client=client,
+    )
+
+    route = ClosedPageRoute("https://tiles.openfreemap.org/styles/liberty", method="GET")
+    await handler(route)  # type: ignore[arg-type]
+
+    assert route.continued is False
+    assert route.fulfilled is None
