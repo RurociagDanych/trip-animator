@@ -9,7 +9,8 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlparse
@@ -168,8 +169,13 @@ def make_ssrf_route_handler(
     photo_assets: Mapping[str, bytes] | None = None,
     tile_cache: TileCache | None = None,
     http_client: httpx.AsyncClient | None = None,
+    fetch_failures: list[str] | None = None,
 ) -> AsyncRouteHandler:
-    """Create a Playwright `page.route()` handler enforcing SSRF, virtual photos, and tile cache."""
+    """Create a Playwright `page.route()` handler enforcing SSRF, virtual photos, and tile cache.
+
+    When `fetch_failures` is given, the exception type name of each external fetch that
+    raised is appended to it, so the caller can fail a render that lost map data.
+    """
     owned_client: httpx.AsyncClient | None = None
 
     async def _fetch_external(
@@ -229,7 +235,7 @@ def make_ssrf_route_handler(
             logger.warning(
                 "Blocked disallowed Playwright request scheme=%s host=%s",
                 parsed.scheme,
-                parsed.netloc,
+                parsed.hostname,
             )
             await route.abort("blockedbyclient")
             return
@@ -243,7 +249,7 @@ def make_ssrf_route_handler(
             logger.warning(
                 "Blocked disallowed external HTTP method=%s host=%s",
                 method,
-                parsed.netloc,
+                parsed.hostname,
             )
             await route.abort("blockedbyclient")
             return
@@ -257,15 +263,27 @@ def make_ssrf_route_handler(
 
         try:
             resp = await _fetch_external(url, method=method, target=decision.target)
-        except httpx.HTTPError:
-            await route.abort("failed")
+        except Exception as exc:
+            # Every route must end in fulfill or abort, so any failure of the external
+            # fetch aborts here instead of propagating out of the callback.
+            logger.warning(
+                "External Playwright request failed error_type=%s host=%s",
+                type(exc).__name__,
+                parsed.hostname,
+            )
+            if fetch_failures is not None:
+                fetch_failures.append(type(exc).__name__)
+            try:
+                await route.abort("failed")
+            except Exception:
+                logger.debug("Ignoring error aborting Playwright route", exc_info=True)
             return
 
         if 300 <= resp.status_code < 400:
             logger.warning(
                 "Blocked redirect response status=%d for host=%s",
                 resp.status_code,
-                parsed.netloc,
+                parsed.hostname,
             )
             await route.abort("blockedbyclient")
             return
@@ -281,6 +299,44 @@ def make_ssrf_route_handler(
         )
 
     return _handle_route
+
+
+class _TrackedRouteHandler:
+    """Run each route callback as a task that the render scope can wait for."""
+
+    def __init__(self, handler: AsyncRouteHandler) -> None:
+        self._handler = handler
+        self._tasks: set[asyncio.Task[None]] = set()
+
+    async def __call__(self, route: Route) -> None:
+        task = asyncio.ensure_future(self._handler(route))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        await task
+
+    async def drain(self) -> None:
+        while self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+
+
+@asynccontextmanager
+async def _external_route_scope(
+    page: Page,
+    route_handler: AsyncRouteHandler,
+) -> AsyncIterator[AsyncRouteHandler]:
+    """Yield a tracked route handler, then unroute it and wait for in-flight calls on exit.
+
+    The pinned HTTP client used by the handler must be closed only after this scope exits.
+    """
+    tracked = _TrackedRouteHandler(route_handler)
+    try:
+        yield tracked
+    finally:
+        try:
+            await page.unroute("**/*", tracked)
+        except Exception:
+            logger.debug("Ignoring error removing Playwright route", exc_info=True)
+        await tracked.drain()
 
 
 async def _open_render_page(
@@ -343,14 +399,19 @@ async def probe_manifest_frame_count(
         try:
             page = await context.new_page()
             page.set_default_timeout(settings.render_frame_timeout_ms)
-            async with build_pinned_external_http_client(resolve_dns=resolve_dns) as http_client:
-                route_handler = make_ssrf_route_handler(
-                    render_origin=settings.render_base_url,
-                    allowed_external_hosts=settings.allowed_external_hosts,
-                    resolve_dns=resolve_dns,
-                    photo_assets={},
-                    http_client=http_client,
-                )
+            async with (
+                build_pinned_external_http_client(resolve_dns=resolve_dns) as http_client,
+                _external_route_scope(
+                    page,
+                    make_ssrf_route_handler(
+                        render_origin=settings.render_base_url,
+                        allowed_external_hosts=settings.allowed_external_hosts,
+                        resolve_dns=resolve_dns,
+                        photo_assets={},
+                        http_client=http_client,
+                    ),
+                ) as route_handler,
+            ):
                 return await _open_render_page(page, manifest, settings, route_handler)
         finally:
             await context.close()
@@ -397,15 +458,22 @@ async def render_manifest_with_page(
     page_errors: list[str] = []
     page.on("pageerror", lambda err: page_errors.append(str(err)))
 
-    async with build_pinned_external_http_client(resolve_dns=resolve_dns) as http_client:
-        route_handler = make_ssrf_route_handler(
-            render_origin=settings.render_base_url,
-            allowed_external_hosts=settings.allowed_external_hosts,
-            resolve_dns=resolve_dns,
-            photo_assets=photo_assets,
-            tile_cache=resolved_cache,
-            http_client=http_client,
-        )
+    external_fetch_failures: list[str] = []
+    async with (
+        build_pinned_external_http_client(resolve_dns=resolve_dns) as http_client,
+        _external_route_scope(
+            page,
+            make_ssrf_route_handler(
+                render_origin=settings.render_base_url,
+                allowed_external_hosts=settings.allowed_external_hosts,
+                resolve_dns=resolve_dns,
+                photo_assets=photo_assets,
+                tile_cache=resolved_cache,
+                http_client=http_client,
+                fetch_failures=external_fetch_failures,
+            ),
+        ) as route_handler,
+    ):
         total_frames = await _open_render_page(page, manifest, settings, route_handler)
 
         eff_start = max(0, frame_start)
@@ -502,6 +570,13 @@ async def render_manifest_with_page(
             encoder.abort()
             err_suffix = f" (pageerror: {page_errors[0]})" if page_errors else ""
             raise RenderError(f"Frame capture failed: {exc}{err_suffix}") from exc
+
+    if external_fetch_failures:
+        failed_types = ", ".join(sorted(set(external_fetch_failures)))
+        raise RenderError(
+            f"External map request failed {len(external_fetch_failures)} time(s) "
+            f"during render: {failed_types}"
+        )
 
     return frames_written
 

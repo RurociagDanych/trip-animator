@@ -1395,6 +1395,7 @@ def test_runner_loads_only_enabled_photos_into_manifest_and_ssrf_blocks_api(
 def test_chunked_job_fanout_render_concat_notifications_and_failure(
     tmp_path: Path,
     monkeypatch: Any,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     store = LocalObjectStore(tmp_path)
     db = InMemoryRenderDatabase()
@@ -1512,8 +1513,14 @@ def test_chunked_job_fanout_render_concat_notifications_and_failure(
     async def fail_first_chunk(*_a: Any, **_kw: Any) -> Path:
         raise ValueError("invalid chunk telemetry")
 
-    assert run_once(settings, conn_factory=cf, store=store, render_fn=fail_first_chunk) is True
+    with caplog.at_level("WARNING", logger="trip_worker.runner"):
+        assert run_once(settings, conn_factory=cf, store=store, render_fn=fail_first_chunk) is True
     assert db.jobs[fail_job_id]["status"] == "failed"
+    chunk_failure_records = [
+        r for r in caplog.records if "failed:" in r.getMessage() and r.name == "trip_worker.runner"
+    ]
+    assert chunk_failure_records
+    assert all(r.exc_info is not None for r in chunk_failure_records)
     fail_chunks = [ch for ch in db.chunks.values() if ch["render_job_id"] == fail_job_id]
     assert any(ch["status"] == "failed" for ch in fail_chunks)
     assert all(ch["status"] in {"failed", "cancelled"} for ch in fail_chunks)

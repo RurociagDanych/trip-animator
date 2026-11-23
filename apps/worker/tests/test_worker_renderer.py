@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from trip_telemetry import RenderSpecV2
 from trip_worker import (
@@ -101,6 +103,11 @@ class FakePage:
         self.visited_urls: list[str] = []
         self.frames_rendered: list[int] = []
         self.listeners: dict[str, Any] = {}
+        self.route_urls: list[str] = []
+        self.route_background = False
+        self.route_calls: list[FakeRoute] = []
+        self.route_tasks: list[asyncio.Task[None]] = []
+        self.unrouted: list[tuple[str, Any]] = []
 
     def on(self, event: str, handler: Any) -> None:
         self.listeners[event] = handler
@@ -108,11 +115,22 @@ class FakePage:
     async def route(self, pattern: str, handler: Any) -> None:
         self.routes.append((pattern, handler))
 
+    async def unroute(self, pattern: str, handler: Any) -> None:
+        self.unrouted.append((pattern, handler))
+
     async def add_init_script(self, script: str) -> None:
         self.init_scripts.append(script)
 
     async def goto(self, url: str, **_kwargs: Any) -> None:
         self.visited_urls.append(url)
+        handler = self.routes[-1][1]
+        for route_url in self.route_urls:
+            route = FakeRoute(route_url)
+            self.route_calls.append(route)
+            if self.route_background:
+                self.route_tasks.append(asyncio.ensure_future(handler(route)))
+            else:
+                await handler(route)
 
     async def wait_for_function(self, _expr: str, **_kwargs: Any) -> None:
         return None
@@ -863,3 +881,178 @@ async def test_ssrf_route_handler_external_without_tile_cache_blocks_redirects_a
         ("HEAD", "https://tiles.openfreemap.org/styles/liberty"),
         ("GET", "https://tiles.openfreemap.org/redir"),
     ]
+
+
+async def test_ssrf_route_handler_aborts_when_http_client_already_closed() -> None:
+    import httpx
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=b"{}")),
+        follow_redirects=False,
+    )
+    await client.aclose()
+    handler = make_ssrf_route_handler(
+        render_origin="http://caddy",
+        allowed_external_hosts=frozenset({"tiles.openfreemap.org"}),
+        resolve_dns=False,
+        tile_cache=None,
+        http_client=client,
+    )
+
+    route = FakeRoute("https://tiles.openfreemap.org/styles/liberty", method="GET")
+    await handler(route)  # type: ignore[arg-type]
+
+    assert route.aborted_reason == "failed"
+    assert route.continued is False
+    assert route.fulfilled is None
+
+
+async def test_ssrf_route_handler_does_not_raise_when_abort_raises_on_closed_page() -> None:
+    import httpx
+
+    class ClosedPageRoute(FakeRoute):
+        async def abort(self, error_code: str = "failed") -> None:
+            raise RuntimeError("Target page, context or browser has been closed")
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=b"{}")),
+        follow_redirects=False,
+    )
+    await client.aclose()
+    handler = make_ssrf_route_handler(
+        render_origin="http://caddy",
+        allowed_external_hosts=frozenset({"tiles.openfreemap.org"}),
+        resolve_dns=False,
+        tile_cache=None,
+        http_client=client,
+    )
+
+    route = ClosedPageRoute("https://tiles.openfreemap.org/styles/liberty", method="GET")
+    await handler(route)  # type: ignore[arg-type]
+
+    assert route.continued is False
+    assert route.fulfilled is None
+
+
+class _BlockingTransport(httpx.AsyncBaseTransport):
+    """Holds an external request open until released, then fails it like a torn-down connection."""
+
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+        self.closed = False
+        self.closed_when_released: bool | None = None
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        await self.release.wait()
+        self.closed_when_released = self.closed
+        raise httpx.ConnectError("connection reset", request=request)
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+async def test_render_waits_for_inflight_route_before_closing_pinned_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trip_worker import renderer
+
+    transport = _BlockingTransport()
+    monkeypatch.setattr(
+        renderer,
+        "build_pinned_external_http_client",
+        lambda *, resolve_dns=True, **_kwargs: httpx.AsyncClient(
+            transport=transport,
+            follow_redirects=False,
+            trust_env=False,
+        ),
+    )
+    manifest = _sample_manifest(total_frames=2)
+    settings = WorkerSettings(render_base_url="http://web:8080", lease_renew_interval_frames=1)
+    page = FakePage(js_frame_count=2)
+    page.route_urls = ["https://tiles.openfreemap.org/styles/liberty"]
+    page.route_background = True
+    asyncio.get_running_loop().call_later(0.05, transport.release.set)
+
+    with pytest.raises(RenderError, match="External map request failed"):
+        await render_manifest_with_page(
+            page,  # type: ignore[arg-type]
+            manifest,
+            FakeEncoder(),  # type: ignore[arg-type]
+            settings,
+            is_cancelled=lambda: False,
+            resolve_dns=False,
+        )
+
+    assert page.route_tasks[0].done()
+    assert page.route_calls[0].aborted_reason == "failed"
+    assert transport.closed_when_released is False
+    assert [pattern for pattern, _handler in page.unrouted] == ["**/*"]
+
+
+async def test_render_fails_when_external_tile_fetch_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from trip_worker import renderer
+
+    class _ConnectFailingTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused", request=request)
+
+    monkeypatch.setattr(
+        renderer,
+        "build_pinned_external_http_client",
+        lambda *, resolve_dns=True, **_kwargs: httpx.AsyncClient(
+            transport=_ConnectFailingTransport(),
+            follow_redirects=False,
+            trust_env=False,
+        ),
+    )
+    manifest = _sample_manifest(total_frames=2)
+    settings = WorkerSettings(render_base_url="http://web:8080", lease_renew_interval_frames=1)
+    page = FakePage(js_frame_count=2)
+    page.route_urls = ["https://tiles.openfreemap.org/styles/liberty"]
+    encoder = FakeEncoder()
+
+    with pytest.raises(RenderError, match="External map request failed"):
+        await render_manifest_with_page(
+            page,  # type: ignore[arg-type]
+            manifest,
+            encoder,  # type: ignore[arg-type]
+            settings,
+            is_cancelled=lambda: False,
+            resolve_dns=False,
+        )
+
+    assert page.route_calls[0].aborted_reason == "failed"
+    assert encoder.finished is True
+
+
+async def test_ssrf_route_handler_logs_hostname_without_userinfo_or_port(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import httpx
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=b"{}")),
+        follow_redirects=False,
+    )
+    handler = make_ssrf_route_handler(
+        render_origin="http://caddy",
+        allowed_external_hosts=frozenset({"tiles.openfreemap.org"}),
+        resolve_dns=False,
+        http_client=client,
+    )
+
+    with caplog.at_level("WARNING", logger="trip_worker.renderer"):
+        await handler(  # type: ignore[arg-type]
+            FakeRoute("http://user:s3cret@127.0.0.1:8081/render/job-1")
+        )
+        await client.aclose()
+        await handler(  # type: ignore[arg-type]
+            FakeRoute("https://user:s3cret@tiles.openfreemap.org:8443/styles/liberty")
+        )
+
+    assert "s3cret" not in caplog.text
+    assert ":8081" not in caplog.text
+    assert ":8443" not in caplog.text
+    assert "127.0.0.1" in caplog.text
