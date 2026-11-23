@@ -29,6 +29,27 @@ export interface LocalExportSceneProps {
   signal: AbortSignal;
 }
 
+function waitForVisibleTab(signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  if (!document.hidden) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      signal.removeEventListener("abort", onAbort);
+    };
+    const onVisibility = () => {
+      if (document.hidden) return;
+      cleanup();
+      resolve();
+    };
+    const onAbort = () => {
+      cleanup();
+      reject(signal.reason);
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 function copyComputedStyles(source: HTMLElement, target: HTMLElement) {
   const computed = window.getComputedStyle(source);
@@ -117,7 +138,9 @@ export function LocalExportScene({
       : computeJourneyDurationS(spec, spec.is_preview),
     [matchedPhotos, spec, stages],
   );
-  const frameCount = Math.max(1, Math.round(durationS * spec.fps));
+  // Cinematic photo holds can extend the schedule beyond the preview's output duration.
+  const outputDurationS = spec.is_preview ? computeJourneyDurationS(spec, true) : durationS;
+  const frameCount = Math.max(1, Math.round(outputDurationS * spec.fps));
   const timeS = frameCount <= 1 ? 0 : (frameIndex / (frameCount - 1)) * durationS;
   const schedule = useMemo(
     () => evaluateTimelineSchedule(stages, matchedPhotos, spec, timeS, durationS, spec.is_preview),
@@ -131,7 +154,7 @@ export function LocalExportScene({
   }), [stages]);
 
   const renderFrame = useCallback(async (index: number) => {
-    if (signal.aborted) throw new DOMException("Export aborted", "AbortError");
+    await waitForVisibleTab(signal);
     if (!Number.isInteger(index) || index < 0 || index >= frameCount) {
       throw new RangeError(`Frame index must be between 0 and ${frameCount - 1}.`);
     }
@@ -140,6 +163,11 @@ export function LocalExportScene({
     if (changed) {
       flushSync(() => setFrameIndex(index));
       await stageController.current?.waitForFrameSettle(true);
+      // Background tabs may suspend MapLibre's repaint before the settle timeout.
+      while (document.hidden) {
+        await waitForVisibleTab(signal);
+        await stageController.current?.waitForFrameSettle(true);
+      }
     }
     if (signal.aborted) throw new DOMException("Export aborted", "AbortError");
     const root = sceneRoot.current;
@@ -177,6 +205,7 @@ export function LocalExportScene({
         if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
           throw new RangeError("Export width and height must be positive integers.");
         }
+        await waitForVisibleTab(signal);
         await stageController.current?.waitForReady();
         await renderFrame(0);
         if (!disposed && outputRef.current) onReady({ canvas: outputRef.current, frameCount, renderFrame });

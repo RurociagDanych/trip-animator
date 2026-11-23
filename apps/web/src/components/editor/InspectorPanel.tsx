@@ -1245,7 +1245,7 @@ export function InspectorPanel({
           </div>
         ) : null}
 
-        {section === "export" ? (
+        <div hidden={section !== "export"}>
           <ExportPanel
             projectId={projectId}
             spec={spec}
@@ -1253,7 +1253,7 @@ export function InspectorPanel({
             onFlushSave={onFlushSave}
             localExportSource={localExportSource}
           />
-        ) : null}
+        </div>
       </div>
     </aside>
   );

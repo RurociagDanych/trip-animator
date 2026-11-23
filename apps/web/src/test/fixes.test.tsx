@@ -70,7 +70,7 @@ describe("Web UI & timeline fixes", () => {
     vi.restoreAllMocks();
   });
 
-  it("ExportPanel preserves spec.duration_seconds for 5s preview so holdScale stays proportional", async () => {
+  it("ExportPanel preserves the full timeline for server export even with preview enabled", async () => {
     useEditorStore.getState().setPreviewWatermark(true);
     const spec = createDefaultRenderSpecV2();
     spec.duration_seconds = 30;
@@ -111,13 +111,13 @@ describe("Web UI & timeline fixes", () => {
       </QueryClientProvider>,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /Preview clip \(5s\)/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Export MP4.*Server/i }));
 
     await waitFor(() => {
       expect(capturedBody).not.toBeNull();
     });
     expect(capturedBody).toMatchObject({
-      is_preview: true,
+      is_preview: false,
       duration_seconds: 30,
       intro_hold_seconds: 3,
       outro_hold_seconds: 3,
