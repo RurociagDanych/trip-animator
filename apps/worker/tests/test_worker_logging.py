@@ -22,8 +22,8 @@ def restore_root_logging() -> Iterator[None]:
         if handler not in saved_handlers:
             root.removeHandler(handler)
     root.setLevel(saved_level)
-    playwright_logger = logging.getLogger("playwright")
-    playwright_logger.setLevel(logging.NOTSET)
+    logging.getLogger("trip_worker").setLevel(logging.NOTSET)
+    logging.getLogger("playwright").setLevel(logging.NOTSET)
 
 
 def _record(
@@ -232,7 +232,7 @@ def test_userinfo_redaction_variants(raw: str, expected: str) -> None:
     assert _format(_record(raw))["message"] == expected
 
 
-def test_level_env_var_controls_root_level(
+def test_level_env_var_controls_worker_loggers_only(
     restore_root_logging: None,
 ) -> None:
     stream = io.StringIO()
@@ -246,15 +246,39 @@ def test_level_env_var_controls_root_level(
     assert [line["message"] for line in lines] == ["visible warning"]
 
 
-def test_level_defaults_to_info_and_ignores_unknown_values(
+def test_level_defaults_to_info_for_worker_and_warning_for_root(
     restore_root_logging: None,
 ) -> None:
     configure_logging(environ={}, stream=io.StringIO())
-    assert logging.getLogger().level == logging.INFO
-    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger().level == logging.WARNING
+    assert logging.getLogger("trip_worker.runner").getEffectiveLevel() == logging.INFO
 
-    configure_logging(environ={"TRIP_WORKER_LOG_LEVEL": "bogus"}, stream=io.StringIO())
-    assert logging.getLogger().level == logging.INFO
+
+@pytest.mark.parametrize(
+    "third_party",
+    [
+        "botocore.hooks",
+        "urllib3.connectionpool",
+        "boto3",
+        "s3transfer",
+        "psycopg",
+        "httpx",
+        "httpcore.connection",
+    ],
+)
+def test_third_party_debug_and_info_stay_hidden_when_worker_level_is_debug(
+    third_party: str,
+    restore_root_logging: None,
+) -> None:
+    stream = io.StringIO()
+    configure_logging(environ={"TRIP_WORKER_LOG_LEVEL": "DEBUG"}, stream=stream)
+
+    logging.getLogger(third_party).debug("third party debug", extra={"event": "x"})
+    logging.getLogger(third_party).info("third party info", extra={"event": "x"})
+    logging.getLogger("trip_worker.runner").debug("worker debug", extra={"event": "y"})
+
+    lines = [json.loads(line) for line in stream.getvalue().splitlines()]
+    assert [line["message"] for line in lines] == ["worker debug"]
 
 
 def test_configure_logging_installs_single_json_handler(
@@ -277,5 +301,5 @@ def test_playwright_debug_override_only_touches_playwright_logger(
     )
 
     assert logging.getLogger("playwright").level == logging.DEBUG
-    assert logging.getLogger().level == logging.INFO
+    assert logging.getLogger().level == logging.WARNING
     assert logging.getLogger("trip_worker.runner").getEffectiveLevel() == logging.INFO

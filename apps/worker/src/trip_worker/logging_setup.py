@@ -20,8 +20,9 @@ _HANDLER_MARKER = "_trip_worker_json_handler"
 # passwords or DSNs into Loki.
 _CONTEXT_FIELDS = ("job_id", "chunk_id", "stage", "status", "duration_ms", "rss_mb")
 
-# httpx logs every request URL at INFO, which would print presigned S3 links.
-_QUIET_LOGGERS = ("httpx", "httpcore")
+# Root stays at WARNING so third-party loggers (botocore, urllib3, httpx request URLs with
+# presigned signatures) cannot emit DEBUG or INFO; only trip_worker.* follows the level env var.
+_WORKER_LOGGER = "trip_worker"
 
 _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"((?:\b[a-zA-Z][\w+.-]*:)?//)[^\s/?#]*@"), r"\1***@"),
@@ -137,10 +138,10 @@ def configure_logging(
         handler = _StdoutJsonHandler(stream)
         setattr(handler, _HANDLER_MARKER, True)
         root.addHandler(handler)
-    root.setLevel(_parse_level(env.get(_LOG_LEVEL_ENV), default=logging.INFO))
-
-    for name in _QUIET_LOGGERS:
-        logging.getLogger(name).setLevel(logging.WARNING)
+    root.setLevel(logging.WARNING)
+    logging.getLogger(_WORKER_LOGGER).setLevel(
+        _parse_level(env.get(_LOG_LEVEL_ENV), default=logging.INFO)
+    )
 
     playwright_raw = env.get(_PLAYWRIGHT_LEVEL_ENV)
     if playwright_raw and playwright_raw.strip():
