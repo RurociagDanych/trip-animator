@@ -157,26 +157,30 @@ export const EditorPlaybackDock = memo(function EditorPlaybackDock({
       aria-label="Map preview and timeline dock"
       className="flex min-h-0 flex-col bg-canvas lg:col-span-6"
     >
-      <div className="flex min-h-[340px] flex-1 items-center justify-center overflow-hidden p-3 lg:min-h-0">
-        <TripStageCanvas
-          stages={timelineStages}
-          spec={spec}
-          progressRatio={schedule.progressRatio}
-          durationS={effectiveDurationS}
-          travelDurationS={schedule.travelDurationS}
-          isPreview={previewWatermark}
-          renderMode="interactive"
-          geometryStatus={geometryStatus}
-          matchedPhotos={matchedPhotos}
-          activePhoto={schedule.activePhoto}
-          cinematicMapZoom={schedule.cinematicMapZoom}
-          climbs={climbs}
-          pinModeActive={pinModeActive}
-          onMapPinClick={onMapPinClick}
-          onCancelPinMode={onCancelPinMode}
-          projectTitle={projectTitle}
-          totalStats={totalStats}
-        />
+      <div className="relative min-h-[340px] flex-1 overflow-hidden lg:min-h-0">
+        {/* Absolute so the preview's pixel size never feeds the row's min-content height;
+            a tall portrait fit would otherwise grow the row and then the next fit. */}
+        <div className="absolute inset-3 flex items-center justify-center">
+          <TripStageCanvas
+            stages={timelineStages}
+            spec={spec}
+            progressRatio={schedule.progressRatio}
+            durationS={effectiveDurationS}
+            travelDurationS={schedule.travelDurationS}
+            isPreview={previewWatermark}
+            renderMode="interactive"
+            geometryStatus={geometryStatus}
+            matchedPhotos={matchedPhotos}
+            activePhoto={schedule.activePhoto}
+            cinematicMapZoom={schedule.cinematicMapZoom}
+            climbs={climbs}
+            pinModeActive={pinModeActive}
+            onMapPinClick={onMapPinClick}
+            onCancelPinMode={onCancelPinMode}
+            projectTitle={projectTitle}
+            totalStats={totalStats}
+          />
+        </div>
       </div>
 
       <div className="shrink-0 space-y-2.5 border-t border-border bg-surface px-4 py-3">
