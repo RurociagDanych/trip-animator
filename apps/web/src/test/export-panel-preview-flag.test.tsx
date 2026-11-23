@@ -67,7 +67,10 @@ describe("ExportPanel local preview", () => {
     const video = new Blob(["video"], { type: "video/mp4" });
     let completeEncoding!: (video: Blob) => void;
     vi.mocked(encodeLocalVideo).mockReturnValue(new Promise((resolve) => { completeEncoding = resolve; }));
-    vi.mocked(listLocalRenders).mockResolvedValue([]);
+    let completeInitialHistoryRead!: () => void;
+    vi.mocked(listLocalRenders).mockImplementationOnce(() => new Promise((resolve) => {
+      completeInitialHistoryRead = () => resolve([]);
+    }));
     vi.mocked(saveLocalRender).mockImplementation(async (record) => {
       vi.mocked(listLocalRenders).mockResolvedValue([record]);
     });
@@ -95,6 +98,8 @@ describe("ExportPanel local preview", () => {
     fireEvent.click(exportTab);
 
     const row = await screen.findByRole("listitem");
+    await act(async () => completeInitialHistoryRead());
+    expect(row).toBeInTheDocument();
     const download = await within(row).findByRole("link", { name: "Download" });
     expect(download).toHaveAttribute("href", "blob:local-render");
     fireEvent.click(within(row).getByRole("button", { name: "Watch" }));
