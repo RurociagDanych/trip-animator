@@ -2,7 +2,7 @@
 
 > Purpose: Map Trip Animator trust boundaries and threats to the implemented security controls.
 > Audience: reviewers, contributors
-> Last reviewed: 2026-11-20
+> Last reviewed: 2026-11-24
 
 Sections:
 
@@ -18,10 +18,10 @@ This document establishes the security architecture for **Trip Animator**, align
 
 | Asset / Boundary | Sensitivity | Exposure | Primary Protection |
 | :--- | :--- | :--- | :--- |
-| **Session Cookies & Passwords** | Critical | Browser <-> Caddy <-> API | `Argon2id` hashes, SHA-256 hashed 256-bit opaque cookies (`HttpOnly`, `SameSite=Lax`, `Secure`), constant-time CSRF |
+| **Session Cookies & Passwords** | Critical | Browser <-> Caddy <-> API | `Argon2id` hashes, HMAC-SHA-256 digests of 256-bit opaque session tokens, cookies marked `HttpOnly`, `SameSite=Lax`, and `Secure` in production, constant-time CSRF |
 | **Strava OAuth2 Access/Refresh Tokens** | Critical | Postgres `oauth_connections` | Versioned AEAD (`AES-256-GCM`) with `TOKEN_ENCRYPTION_KEY` + PKCE `S256` + single-use `state` |
 | **Raw GPX Uploads & GPS Coordinates** | High (PII / Location) | Upload -> API -> Bronze/Silver | Streaming 25 MiB limit, `defusedxml` isolated subprocess, private coordinate redaction in logs |
-| **PostgreSQL 17 & MinIO S3** | High | Internal Docker network only | Loopback-bound dev ports, non-public credentials, least-privilege bucket/schema access |
+| **PostgreSQL 17 & RustFS S3** | High | Internal Docker network and loopback-bound ports | Non-public credentials, least-privilege bucket/schema access |
 | **Playwright Render Worker** | High (Untrusted input + network egress) | `worker` container | `page.route()` URL allowlist, private IP/DNS-rebinding filter, `read_only: true`, `cap_drop: ALL`, fixed-argv FFmpeg |
 
 ---
@@ -31,7 +31,7 @@ This document establishes the security architecture for **Trip Animator**, align
 | Threat ID | Threat Scenario (STRIDE / OWASP) | Attack Vector | Required Mitigation & Verification Control |
 | :--- | :--- | :--- | :--- |
 | **TM-01** | **Credential Stuffing / Weak Password Storage** (`A07: Identification & Authentication Failures`) | Brute-force login, leaked DB hashes | Hash passwords with **Argon2id** (`argon2-cffi`). Enforce persistent PostgreSQL-backed rate limiting on `/api/v1/auth/login`. Refuse API startup if `DEV_AUTH_ENABLED=true` when `APP_ENV=production` or if `SESSION_SECRET` < 32 bytes. |
-| **TM-02** | **Session Hijacking & CSRF** (`A01: Broken Access Control`, `A07`) | XSS cookie theft, cross-site state-changing form/fetch | Issue 256-bit cryptographically random opaque session tokens; store only `SHA-256(token)` in `sessions`. Set `HttpOnly`, `SameSite=Lax`, `Path=/`, and `Secure` (production). Require `X-CSRF-Token` header on all non-safe `/api/v1/*` routes verified via `hmac.compare_digest`. |
+| **TM-02** | **Session Hijacking & CSRF** (`A01: Broken Access Control`) | XSS cookie theft, cross-site state-changing form/fetch | Issue 256-bit cryptographically random opaque session tokens; store only their HMAC-SHA-256 digests in `sessions`. Set `HttpOnly`, `SameSite=Lax`, `Path=/`, and `Secure` (production). Require `X-CSRF-Token` header on all non-safe `/api/v1/*` routes verified via `hmac.compare_digest`. |
 | **TM-03** | **OAuth2 Authorization Code Interception / Token Leak** (`A02: Cryptographic Failures`, `A07`) | Redirect URI hijacking, CSRF on OAuth callback, DB dump exposing Strava tokens | Strava integration is **import-only** (requires active authenticated session). Enforce **PKCE (`S256`)** and single-use session-bound `state` stored server-side with short TTL. Encrypt Strava access/refresh tokens at rest with versioned **AEAD (`AES-256-GCM`)** bound to user/provider AAD. Support Strava deauthorization webhook + explicit disconnect purge. |
 | **TM-04** | **GPX XXE, Billion Laughs & Parser CPU/Memory DoS** (`A03: Injection`, `A05: Security Misconfiguration`) | Malicious `.gpx` containing `<!DOCTYPE>`, `<!ENTITY>`, deep XML nesting (10k levels), or 25 MiB stream stalls | Enforce `25MB` request limit at Caddy edge and streaming 25 MiB cap in FastAPI before buffering. Parse strictly with **`defusedxml`** (forbids DTDs, external entities, and entity expansion) inside an **isolated subprocess with hard 15s wall-clock timeout** and strict caps (depth <= 64, tracks <= 20, segments <= 1,000, points <= 500k/track). Sanitize all multipart/XML parse errors into generic JSON responses (`safeError`) with zero stack/path leaks. |
 | **TM-05** | **SSRF & DNS Rebinding via Tile URLs or Browser Rendering** (`A10: Server-Side Request Forgery`) | Crafted style/tile URLs, redirects to cloud metadata (`169.254.169.254`), or internal service probing (`postgres`, `minio`, `api`) from headless Chromium | Enforce explicit outbound allowlists (`https://www.strava.com` for OAuth/API; `MAP_TILE_ALLOWLIST` + internal `RENDER_BASE_URL` for worker). Resolve hostnames and block RFC1918, loopback, link-local, and ULA CIDRs (`10.0.0.0/8`, `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.168.0.0/16`, `::1`, `fc00::/7`, `fe80::/10`) before outbound connections (`httpx` transport hook) and inside Playwright **`page.route()`** (rejecting `file://`, `ws://`, non-allowlisted hosts, and unsafe redirects). |
@@ -44,6 +44,8 @@ This document establishes the security architecture for **Trip Animator**, align
 ---
 
 ## 3. Security Verification Checklist (CI & Pre-Release)
+
+GPU access is opt-in and expands the worker's trust boundary to the host graphics driver. Use only the selected DRM render node, keep the standard worker hardening in place, and keep host GPU drivers patched. See [worker GPU rendering](OPERATIONS.md#worker-gpu-rendering).
 
 - [x] **Unit & Security Tests (`pytest`)**:
   - XXE payload (`<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>`) rejected cleanly with 4xx.

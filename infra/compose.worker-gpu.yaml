@@ -1,0 +1,6 @@
+services:
+  worker:
+    devices:
+      - "${WORKER_GPU_DEVICE:-/dev/dri/renderD128}:/dev/dri/renderD128"
+    group_add:
+      - "${WORKER_GPU_RENDER_GID:?Set WORKER_GPU_RENDER_GID to the host render node group ID}"

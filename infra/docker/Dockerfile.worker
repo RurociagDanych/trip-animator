@@ -8,6 +8,8 @@ RUN apt-get update \
         ffmpeg \
         fonts-liberation \
         fonts-noto-core \
+        libvulkan1 \
+        mesa-vulkan-drivers \
     && rm -rf /var/lib/apt/lists/*
 
 ENV UV_COMPILE_BYTECODE=1 \

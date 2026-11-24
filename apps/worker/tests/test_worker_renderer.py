@@ -1,3 +1,5 @@
+"""Regression tests for worker browser rendering and request routing."""
+
 from __future__ import annotations
 
 import asyncio
@@ -426,6 +428,20 @@ async def test_ssrf_route_handler_blocks_bypass_vectors_and_nxdomain_allows_ipv6
         assert v6_route.continued is False
         assert v6_route.fulfilled is not None
         assert v6_route.fulfilled["status"] == 200
+
+
+@pytest.mark.parametrize(("enabled", "backend"), [("false", "swiftshader"), ("true", "vulkan")])
+def test_worker_dotenv_selects_chromium_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enabled: str, backend: str
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("WORKER_GPU_ENABLED", raising=False)
+    (tmp_path / ".env").write_text(f"WORKER_GPU_ENABLED={enabled}\n", encoding="utf-8")
+
+    args = build_chromium_launch_args(WorkerSettings())
+
+    assert [arg for arg in args if arg.startswith("--use-angle=")] == [f"--use-angle={backend}"]
+    assert ("--disable-software-rasterizer" in args) == (enabled == "true")
 
 
 async def test_render_manifest_with_page_png_cancellation_and_pageerror_handling() -> None:

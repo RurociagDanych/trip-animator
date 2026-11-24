@@ -2,7 +2,7 @@
 
 > Purpose: Describe the system containers, the Bronze/Silver/Gold telemetry pipeline, the render pipeline and the configuration contract.
 > Audience: contributors, reviewers
-> Last reviewed: 2026-11-20
+> Last reviewed: 2026-11-24
 
 Sections:
 
@@ -145,6 +145,8 @@ sequenceDiagram
     API-->>UI: SSE event (succeeded, download & inline video URL)
 ```
 
+Set `WORKER_GPU_ENABLED=true` to request Chromium ANGLE Vulkan hardware WebGL2; when disabled, Chromium uses SwiftShader. Docker deployments need a host/device override for GPU access. FFmpeg continues to encode H.264 with CPU `libx264`.
+
 ### Key v1 Fixes Incorporated by Design
 - **WYSIWYG 1:1 Parity**: Browser preview and server export share the exact same React + MapLibre GL JS v5 + Deck.gl + crisp HTML/SVG vector HUD components (`statisticsPanel` no longer uses the 5×5 pixel bitmap font missing `J/Q/X/Z/+/%,`).
 - **`fit-track` Base Frame Caching**: When the camera is stationary (`fit-track` and holds), MapLibre base tiles are frozen instead of re-rendering 900+ redundant tile passes.
@@ -163,7 +165,7 @@ sequenceDiagram
 | `migrate` | `infra/docker/Dockerfile.api` | — | Runs `alembic upgrade head` against PostgreSQL before `api`/`worker` start |
 | `worker` | `infra/docker/Dockerfile.worker` (`python:3.12-slim` + `uv` + Playwright + FFmpeg) | — | Polls `render_jobs` via `SKIP LOCKED`, drives `/render/:jobId`, encodes MP4; non-root UID `10001`, `read_only`, `tmpfs /tmp:size=2G`, `shm_size: 1gb`, `cap_drop: ALL` |
 | `postgres` | `postgres:17.6-bookworm` | `5432` (loopback) | Primary OLTP store and lease-based render queue with `pg_isready` healthcheck |
-| `minio` | `rustfs/rustfs:latest` | `9000`, `9001` (loopback) | S3-compatible Bronze/Silver/Gold/Output object storage in Compose |
+| `minio` | `rustfs/rustfs:1.0.5` | `9000`, `9001` (loopback) | S3-compatible Bronze/Silver/Gold/Output object storage in Compose |
 | `minio-init` | `infra/docker/Dockerfile.api` (`trip-animator-v2-api:local`) | — | Idempotently provisions `S3_BUCKET` via `boto3` on startup |
 | `airflow-init` | `infra/docker/Dockerfile.airflow` (`python:3.12-slim` + Airflow 3) | — | Idempotently creates dedicated `${AIRFLOW_DB:-airflow}` PostgreSQL database and runs `airflow db migrate` |
 | `airflow` | `infra/docker/Dockerfile.airflow` (supervised API server, scheduler, DAG processor, and triggerer) | `8081` (loopback) | Required Strava Vault sync orchestrator; also runs `trip_dbt_gold_pipeline` and `trip_platform_maintenance_and_audit`; non-root UID `10001`, `read_only`, `cap_drop: ALL`. Library browsing and GPX import remain independent of Airflow availability. |
@@ -178,7 +180,7 @@ All services derive runtime configuration from the repository root `.env` contra
 - **Security**: `SESSION_SECRET` (min 32 bytes), `TOKEN_ENCRYPTION_KEY` (base64 32-byte AES-256-GCM key), `ALLOWED_ORIGINS`
 - **Object Storage**: `OBJECT_STORE_BACKEND` (`local` or `s3`), `LOCAL_OBJECT_STORE_DIR`, `S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET`, `S3_REGION`
 - **Strava OAuth2**: `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`, `STRAVA_REDIRECT_URI`
-- **Rendering & Egress Allowlist**: `MAP_TILE_ALLOWLIST`, `RENDER_BASE_URL`, `WORKER_CONCURRENCY`
+- **Rendering & Egress Allowlist**: `MAP_TILE_ALLOWLIST`, `RENDER_BASE_URL`, `WORKER_CONCURRENCY`, `WORKER_GPU_ENABLED`
 - **Airflow Orchestration**: `AIRFLOW_PORT`, `AIRFLOW_DB`, `AIRFLOW_FERNET_KEY`, `AIRFLOW_API_SECRET_KEY`, `AIRFLOW_JWT_SECRET`, `AIRFLOW_SIMPLE_AUTH_USERS` (`username:role` entries, default `admin:admin`), `GOLD_OUTPUT_DIR`
 
 In Docker Compose (`infra/compose.yaml`), internal service discovery overrides host-oriented `localhost` URLs (`postgres:5432`, `http://minio:9000`, `http://caddy:80`) while preserving credential and secret injection from the root env file.
