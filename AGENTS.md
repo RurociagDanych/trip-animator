@@ -35,6 +35,7 @@ Repository guide for AI coding agents working on Trip Animator: a GPX/TCX and St
 - Formatters and linters: Ruff (`uv run ruff check` / `uv run ruff format --check` on `apps packages airflow infra/scripts`), mypy (`apps/api/src apps/worker/src packages/telemetry/src airflow/src`), ESLint and `tsc --noEmit` for `apps/web`.
 - Commit style: Conventional Commits (`feat:`, `fix:`, `docs:`, `ci:`, optional scope such as `feat(web):`).
 - PR branches: use `feat/`, `fix/`, `docs/`, or `chore/` followed by a short lowercase kebab-case description (for example, `fix/preview-aspect-matches-resolution`). Branch from current `origin/main` and open the PR against `main` unless the task specifies another base.
+- PR titles: use `type(scope): short imperative summary` in English (for example, `fix(web): fit preview to the selected aspect ratio`). Choose the type for the change and the scope for the affected component, regardless of the branch prefix.
 - Test locations: `apps/api/tests`, `apps/worker/tests`, `packages/telemetry/tests`, `airflow/tests`, `scripts/tests`, `infra/scripts/tests`, `dbt/tests`, and Vitest tests in `apps/web/src/test`.
 
 ### Code invariants
