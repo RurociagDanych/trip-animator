@@ -14,6 +14,7 @@ import {
   GripVertical,
   Layers,
   Loader2,
+  RotateCcw,
   Scissors,
   Sparkles,
   Tent,
@@ -145,6 +146,9 @@ export interface StageSidebarProps {
   onStageColorChange: (stageId: string, colorHex: string) => void;
   onStageTransitionChange: (stageId: string, transition: TransitionIcon) => void;
   onStageCameraOverrideChange?: (stageId: string, override: StageCameraOverride | null) => void;
+  suggestedUniformStageZoom?: number;
+  onApplyUniformStageZoom?: () => void;
+  onResetStageCameraOverrides?: () => void;
   onStageSettlementLabelModeChange?: (stageId: string, mode: SettlementLabelMode | null) => void;
   onOpenStravaModal: () => void;
 }
@@ -185,6 +189,9 @@ export function StageSidebar({
   onStageColorChange,
   onStageTransitionChange,
   onStageCameraOverrideChange,
+  suggestedUniformStageZoom,
+  onApplyUniformStageZoom,
+  onResetStageCameraOverrides,
   onStageSettlementLabelModeChange,
   onOpenStravaModal,
 }: StageSidebarProps) {
@@ -688,6 +695,42 @@ export function StageSidebar({
                     )}
                     <span>Auto-Organize Trip</span>
                   </button>
+                </div>
+              ) : null}
+
+              {visualStages.length > 0 && onApplyUniformStageZoom ? (
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    data-testid="stages-apply-uniform-zoom"
+                    disabled={busyAction !== null}
+                    onClick={onApplyUniformStageZoom}
+                    title="Apply the same adaptive target zoom to every stage, then fine-tune individual stages below"
+                    className="inline-flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md border border-sky-accent/50 bg-sky-accent/10 px-2.5 py-1.5 text-[11px] font-medium text-sky-accent hover:bg-sky-accent/20 disabled:opacity-50 transition-colors"
+                  >
+                    <Focus className="h-3 w-3 shrink-0" aria-hidden="true" />
+                    <span className="truncate">
+                      {typeof suggestedUniformStageZoom === "number"
+                        ? `Uniform zoom (${suggestedUniformStageZoom.toFixed(1)})`
+                        : "Apply uniform zoom"}
+                    </span>
+                  </button>
+                  {onResetStageCameraOverrides ? (
+                    <button
+                      type="button"
+                      data-testid="stages-reset-stage-zoom"
+                      disabled={
+                        busyAction !== null ||
+                        Object.keys(spec.stage_camera_overrides).length === 0
+                      }
+                      onClick={onResetStageCameraOverrides}
+                      title="Reset all stages back to Auto camera zoom and pace"
+                      className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border bg-elevated px-2 py-1.5 text-[11px] font-medium text-ink-muted hover:text-ink disabled:opacity-40 transition-colors"
+                    >
+                      <RotateCcw className="h-3 w-3" aria-hidden="true" />
+                      <span>Reset all</span>
+                    </button>
+                  ) : null}
                 </div>
               ) : null}
             </div>
@@ -1572,7 +1615,7 @@ function StageEditorForm({
             <input
               type="range"
               aria-label="Stage target zoom"
-              min={10}
+              min={5}
               max={17.5}
               step={0.1}
               value={targetZoom ?? 14.0}

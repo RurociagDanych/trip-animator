@@ -1,4 +1,14 @@
-import { ArrowDown, ArrowUp, Camera, Plus, Sliders, Sparkles, Trash2 } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  Camera,
+  Focus,
+  Plus,
+  RotateCcw,
+  Sliders,
+  Sparkles,
+  Trash2,
+} from "lucide-react";
 import type {
   CameraKeyframe,
   CameraMode,
@@ -92,6 +102,9 @@ export interface InspectorPanelProps {
   onUpdateSpec: (patch: Partial<RenderSpecV2>) => void;
   onUpdateHud: (patch: Partial<StatisticsPanelConfig>) => void;
   onApplyDirectorPreset?: (preset: DirectorPreset) => void;
+  suggestedUniformStageZoom?: number;
+  onApplyUniformStageZoom?: () => void;
+  onResetStageCameraOverrides?: () => void;
   onFlushSave: () => Promise<boolean>;
   localExportSource?: LocalExportSource;
   invalidSpecValues?: InvalidRenderSpecValue[];
@@ -114,6 +127,9 @@ export function InspectorPanel({
   onUpdateSpec,
   onUpdateHud,
   onApplyDirectorPreset,
+  suggestedUniformStageZoom,
+  onApplyUniformStageZoom,
+  onResetStageCameraOverrides,
   onFlushSave,
   localExportSource,
   invalidSpecValues = [],
@@ -761,6 +777,49 @@ export function InspectorPanel({
                     />
                   </label>
                 ) : null}
+              </div>
+            ) : null}
+
+            {stageCount > 0 && onApplyUniformStageZoom ? (
+              <div className="space-y-2 rounded-md border border-border/70 bg-canvas/50 p-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="inline-flex items-center gap-1.5 font-medium text-ink-muted">
+                    <Focus className="h-3.5 w-3.5 text-sky-accent" aria-hidden="true" />
+                    <span>Stage camera zoom</span>
+                  </span>
+                  {typeof suggestedUniformStageZoom === "number" ? (
+                    <span className="tabular-telemetry text-[11px] text-sky-accent">
+                      Zoom {suggestedUniformStageZoom.toFixed(1)}
+                    </span>
+                  ) : null}
+                </div>
+                <p className="text-[11px] leading-snug text-ink-muted">
+                  Apply one adaptive target zoom to every stage, then fine-tune individual stages in the Stages list.
+                </p>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    data-testid="camera-apply-uniform-zoom"
+                    onClick={onApplyUniformStageZoom}
+                    className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md border border-sky-accent/50 bg-sky-accent/10 px-2.5 py-1.5 text-[11px] font-medium text-sky-accent hover:bg-sky-accent/20 transition-colors"
+                  >
+                    <Focus className="h-3 w-3" aria-hidden="true" />
+                    <span>Apply uniform zoom to all stages</span>
+                  </button>
+                  {onResetStageCameraOverrides ? (
+                    <button
+                      type="button"
+                      data-testid="camera-reset-stage-zoom"
+                      disabled={Object.keys(spec.stage_camera_overrides).length === 0}
+                      onClick={onResetStageCameraOverrides}
+                      title="Reset all stages back to Auto camera zoom and pace"
+                      className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border bg-elevated px-2 py-1.5 text-[11px] font-medium text-ink-muted hover:text-ink disabled:opacity-40 transition-colors"
+                    >
+                      <RotateCcw className="h-3 w-3" aria-hidden="true" />
+                      <span>Reset all</span>
+                    </button>
+                  ) : null}
+                </div>
               </div>
             ) : null}
 

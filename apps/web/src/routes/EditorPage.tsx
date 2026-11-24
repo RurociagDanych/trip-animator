@@ -45,12 +45,18 @@ import type {
   TelemetryTimelineOut,
 } from "../lib/api/types";
 import { generateDirectorKeyframes } from "../lib/geo/director";
+import { parseResolutionPreset } from "../lib/geo/format";
 import {
+  computeJourneyDurationS,
   computePhotoStopTotalDurationS,
   evaluateTimelineSchedule,
   matchPhotosToTimeline,
 } from "../lib/geo/photos";
-import { buildTimelineFromProject } from "../lib/geo/timeline";
+import {
+  buildTimelineFromProject,
+  buildUniformStageCameraOverrides,
+  computeUniformAdaptiveZoom,
+} from "../lib/geo/timeline";
 import { useEditorStore } from "../lib/state/editor-store";
 
 const EMPTY_CLIMBS: readonly ClimbHighlightOut[] = [];
@@ -496,6 +502,35 @@ export function EditorPage() {
     [stages],
   );
 
+  const suggestedUniformStageZoom = useMemo(() => {
+    if (
+      geometryStatus.pendingCount > 0 ||
+      !timelineStages.some((stage) => stage.points.length >= 2)
+    ) {
+      return undefined;
+    }
+    const { width, height } = parseResolutionPreset(spec.resolution);
+    return computeUniformAdaptiveZoom(timelineStages, spec, {
+      viewportWidth: width,
+      viewportHeight: height,
+      durationS: computeJourneyDurationS(spec, false),
+      isPreview: false,
+    });
+  }, [geometryStatus.pendingCount, timelineStages, spec]);
+
+  const handleApplyUniformStageZoom = useCallback(() => {
+    if (stages.length === 0 || suggestedUniformStageZoom === undefined) {
+      return;
+    }
+    updateSpec({
+      stage_camera_overrides: buildUniformStageCameraOverrides(stages, suggestedUniformStageZoom),
+    });
+  }, [stages, suggestedUniformStageZoom, updateSpec]);
+
+  const handleResetStageCameraOverrides = useCallback(() => {
+    updateSpec({ stage_camera_overrides: {} });
+  }, [updateSpec]);
+
   const handleMapPinClick = useCallback(
     async ([lon, lat]: [number, number]) => {
       if (!pinModePhotoId) return;
@@ -825,6 +860,9 @@ export function EditorPage() {
           onStageColorChange={setStageColor}
           onStageTransitionChange={setStageTransition}
           onStageCameraOverrideChange={setStageCameraOverride}
+          suggestedUniformStageZoom={suggestedUniformStageZoom}
+          onApplyUniformStageZoom={handleApplyUniformStageZoom}
+          onResetStageCameraOverrides={handleResetStageCameraOverrides}
           onStageSettlementLabelModeChange={(stageId, mode) => {
             const stageModes = { ...useEditorStore.getState().spec.stage_settlement_label_modes };
             if (mode === null) delete stageModes[stageId];
@@ -874,6 +912,9 @@ export function EditorPage() {
           onUpdateSpec={updateSpec}
           onUpdateHud={updateStatisticsPanel}
           onApplyDirectorPreset={handleApplyDirectorPreset}
+          suggestedUniformStageZoom={suggestedUniformStageZoom}
+          onApplyUniformStageZoom={handleApplyUniformStageZoom}
+          onResetStageCameraOverrides={handleResetStageCameraOverrides}
           onFlushSave={flushSave}
           localExportSource={{
             stages: timelineStages,
