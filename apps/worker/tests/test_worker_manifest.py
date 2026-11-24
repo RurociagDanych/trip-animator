@@ -9,6 +9,7 @@ import pytest
 from trip_telemetry import (
     ActivityType,
     ParsedTrack,
+    RenderSpecV2,
     TrackPoint,
     build_silver_dataframe,
     write_silver_parquet,
@@ -27,6 +28,7 @@ from trip_worker.manifest import (
     _downsample_manifest_points,
     _fill_stride_indices,
     _format_ts_iso,
+    load_photo_asset,
     query_stage_manifest_points,
 )
 
@@ -705,7 +707,7 @@ def test_build_render_manifest_embeds_photo_data_uris_and_respects_show_photos(
         },
         stages=[stage],
         store=store,
-        photos=photos,
+        photos=photos[:1],
     )
     assert len(manifest.photos) == 1
     mp = manifest.photos[0]
@@ -893,6 +895,31 @@ def test_cinematic_stop_falls_back_to_thumbnail_without_full_object_key() -> Non
     )
     spec = RenderSpecV2(photo_card_style="cinematic_stop")
     assert photo_asset_key(spec, photo) == "photos/thumb.webp"
+
+
+def test_cinematic_photo_asset_falls_back_to_thumbnail_and_fails_if_both_missing(
+    tmp_path: Path,
+) -> None:
+    from trip_worker.manifest import photo_asset_key
+
+    store = LocalObjectStore(tmp_path)
+    photo = PhotoRecord(
+        id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        thumb_object_key="photos/thumb.webp",
+        object_key="photos/full.webp",
+        width=640,
+        height=480,
+    )
+    spec = RenderSpecV2(photo_card_style="cinematic_stop")
+    store.put_bytes(photo.thumb_object_key, b"THUMB", content_type="image/webp")
+
+    assert photo_asset_key(spec, photo) == photo.object_key
+    assert load_photo_asset(store, spec, photo) == b"THUMB"
+
+    store.delete(photo.thumb_object_key)
+    with pytest.raises(ValueError, match=f"Selected photo {photo.id} has no available render"):
+        load_photo_asset(store, spec, photo)
 
 
 def test_single_pass_fetchnumpy_kpis_virtual_photo_urls_and_color_segments(

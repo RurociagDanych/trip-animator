@@ -36,7 +36,7 @@ from trip_worker.manifest import (
     StageRecord,
     build_render_manifest,
     chunk_manifest_key,
-    photo_asset_key,
+    load_photo_asset,
 )
 from trip_worker.renderer import (
     RenderCancelledError,
@@ -1426,15 +1426,13 @@ def _load_pre_serialized_manifest_and_photo_assets(
             photo_id_str = str(photo.id)
             if photo_id_str not in needed_ids:
                 continue
-            asset_key = photo_asset_key(manifest.spec, photo)
-            try:
-                photo_assets[photo_id_str] = store.get_bytes(asset_key)
-            except FileNotFoundError:
-                logger.warning(
-                    "Photo asset %s missing for project %s; skipping",
-                    asset_key,
-                    project_id,
-                )
+            photo_assets[photo_id_str] = load_photo_asset(store, manifest.spec, photo)
+        loaded_ids = photo_assets.keys()
+        missing_ids = needed_ids - loaded_ids
+        if missing_ids:
+            raise ValueError(
+                "Selected photo metadata missing for render: " + ", ".join(sorted(missing_ids))
+            )
 
     return (False, manifest, photo_assets)
 

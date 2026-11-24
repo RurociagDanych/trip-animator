@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Protocol
 
 import boto3
+from botocore.exceptions import ClientError
 
 from trip_worker.config import WorkerSettings
 
@@ -92,7 +93,12 @@ class S3ObjectStore:
         self.client.put_object(Bucket=self.bucket, Key=key, Body=data, ContentType=content_type)
 
     def get_bytes(self, key: str) -> bytes:
-        resp = self.client.get_object(Bucket=self.bucket, Key=key)
+        try:
+            resp = self.client.get_object(Bucket=self.bucket, Key=key)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in {"NoSuchKey", "NotFound", "404"}:
+                raise FileNotFoundError(f"Object not found: {key!r}") from exc
+            raise
         body: bytes = resp["Body"].read()
         return body
 

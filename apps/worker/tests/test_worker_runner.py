@@ -1631,6 +1631,7 @@ def test_chunked_job_uses_pre_serialized_manifest_without_rebuilding(
             "id": photo_id,
             "project_id": project_id,
             "thumb_object_key": thumb_key,
+            "object_key": f"photos/{project_id}/{photo_id}.webp",
             "width": 640,
             "height": 480,
             "caption": "Summit",
@@ -1664,6 +1665,7 @@ def test_chunked_job_uses_pre_serialized_manifest_without_rebuilding(
         "created_at": datetime.now(UTC),
         "updated_at": datetime.now(UTC),
     }
+    db.jobs[job_id]["spec_json"]["photo_card_style"] = "cinematic_stop"
 
     build_calls: list[dict[str, Any]] = []
     orig_build = manifest_mod.build_render_manifest
@@ -1719,11 +1721,20 @@ def test_chunked_job_uses_pre_serialized_manifest_without_rebuilding(
         chunk_size_frames=150,
         chunk_preroll_frames=15,
     )
-    assert run_once(settings, conn_factory=cf, store=store, render_fn=fake_chunk_render) is True
+    assert (
+        run_once(
+            settings,
+            conn_factory=cf,
+            store=store,
+            render_fn=fake_chunk_render,
+            frame_count_fn=lambda *_args: 300,
+        )
+        is True
+    )
     assert db.jobs[job_id]["status"] == "succeeded"
 
-    assert len(build_calls) == 1
-    assert build_calls[0]["load_assets"] is False
+    # One manifest for the cinematic frame-count probe and one shared by both chunks.
+    assert [call["load_assets"] for call in build_calls] == [False, False]
     assert manifest_seen_in_chunks == [True, True]
     assert chunk_photo_assets == [
         {str(photo_id): b"RIFFwebp-thumb"},

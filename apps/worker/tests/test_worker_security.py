@@ -460,6 +460,21 @@ def test_s3_object_store_passes_none_for_empty_credentials(
     }
 
 
+@pytest.mark.parametrize("code", ["NoSuchKey", "404", "AccessDenied"])
+def test_s3_get_bytes_distinguishes_a_missing_object_from_access_denial(code: str) -> None:
+    from botocore.exceptions import ClientError
+    from botocore.stub import Stubber
+
+    store = S3ObjectStore(
+        access_key_id="test", secret_access_key="test", bucket="test-bucket", region="us-east-1"
+    )
+    with Stubber(store.client) as stub:
+        stub.add_client_error("get_object", service_error_code=code)
+        expected = ClientError if code == "AccessDenied" else FileNotFoundError
+        with pytest.raises(expected):
+            store.get_bytes("photos/a.webp")
+
+
 def test_ssrf_ipv4_ipv6_bypass_vectors_url_normalization_and_ipv6_allowlist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

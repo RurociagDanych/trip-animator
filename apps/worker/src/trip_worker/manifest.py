@@ -477,6 +477,30 @@ def photo_asset_key(spec: RenderSpecV2, photo: PhotoRecord) -> str:
     return photo.thumb_object_key
 
 
+def load_photo_asset(store: ObjectStore, spec: RenderSpecV2, photo: PhotoRecord) -> bytes:
+    """Load the selected photo rendition, falling back to its thumbnail if needed."""
+    asset_key = photo_asset_key(spec, photo)
+    try:
+        return store.get_bytes(asset_key)
+    except FileNotFoundError:
+        if asset_key != photo.thumb_object_key:
+            try:
+                data = store.get_bytes(photo.thumb_object_key)
+            except FileNotFoundError:
+                pass
+            else:
+                logger.warning(
+                    "Photo rendition %s missing; using thumbnail %s",
+                    asset_key,
+                    photo.thumb_object_key,
+                )
+                return data
+    raise ValueError(
+        f"Selected photo {photo.id} has no available render asset "
+        f"(tried {asset_key} and {photo.thumb_object_key})"
+    )
+
+
 def build_render_manifest(
     *,
     job_id: uuid.UUID,
@@ -646,16 +670,7 @@ def build_render_manifest(
         for photo in photos:
             photo_id_str = str(photo.id)
             if load_assets:
-                asset_key = photo_asset_key(spec, photo)
-                try:
-                    thumb_bytes = store.get_bytes(asset_key)
-                except FileNotFoundError:
-                    logger.warning(
-                        "Photo asset %s missing for project %s; skipping",
-                        asset_key,
-                        project_id,
-                    )
-                    continue
+                thumb_bytes = load_photo_asset(store, spec, photo)
                 if out_photo_assets is not None:
                     out_photo_assets[photo_id_str] = thumb_bytes
                 if embed_photo_data_uris:
