@@ -30,6 +30,11 @@ const mockState = vi.hoisted(() => ({
   emit: null as ((event: string) => void) | null,
 }));
 
+vi.mock("../lib/geo/settlement-labels", () => ({
+  loadSettlementLabels: async () => ({ type: "FeatureCollection", features: [] }),
+  installSettlementLabels: () => undefined,
+}));
+
 vi.mock("maplibre-gl", () => {
   class MockMap {
     private listeners = new Map<string, Set<(...args: unknown[]) => void>>();
