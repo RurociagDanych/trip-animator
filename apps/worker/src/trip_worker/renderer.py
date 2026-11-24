@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 # 300 frames is 10 s at 30 fps and equals the default chunk size, so a chunked render
 # logs roughly one progress line per chunk.
 PROGRESS_LOG_EVERY_FRAMES = 300
+VULKAN_ICD_DIR = Path("/usr/share/vulkan/icd.d")
 
 
 class RenderCancelledError(RuntimeError):
@@ -142,6 +143,12 @@ class TileCache:
             total_bytes -= size
 
 
+def _chromium_angle_backend(settings: WorkerSettings) -> str:
+    if settings.worker_gpu_enabled:
+        return "vulkan"
+    return "gl-egl" if settings.worker_cpu_renderer == "lavapipe" else "swiftshader"
+
+
 def build_chromium_launch_args(settings: WorkerSettings) -> list[str]:
     """Return headless Chromium launch arguments for WebGL MapLibre/Deck.gl rendering."""
     args = [
@@ -149,7 +156,7 @@ def build_chromium_launch_args(settings: WorkerSettings) -> list[str]:
         "--enable-webgl",
         "--ignore-gpu-blocklist",
         "--use-gl=angle",
-        "--use-angle=vulkan" if settings.worker_gpu_enabled else "--use-angle=swiftshader",
+        f"--use-angle={_chromium_angle_backend(settings)}",
         "--disable-features=WebRtcHideLocalIpsWithMdns",
         "--enforce-webrtc-ip-permission-check",
         "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
@@ -161,13 +168,30 @@ def build_chromium_launch_args(settings: WorkerSettings) -> list[str]:
     return args
 
 
+def _chromium_launch_env(settings: WorkerSettings) -> dict[str, str | float | bool] | None:
+    if _chromium_angle_backend(settings) != "gl-egl":
+        return None
+    manifests = sorted(p for p in VULKAN_ICD_DIR.glob("lvp_icd*.json") if p.is_file())
+    if not manifests:
+        raise RenderError(
+            f"Mesa Lavapipe Vulkan driver not found in {VULKAN_ICD_DIR}. "
+            "Install mesa-vulkan-drivers or set WORKER_CPU_RENDERER=swiftshader."
+        )
+    # Restrict only Chromium to the software driver, even on hosts with GPUs.
+    return {
+        **os.environ,
+        "VK_DRIVER_FILES": os.pathsep.join(map(str, manifests)),
+        "LIBGL_ALWAYS_SOFTWARE": "1",
+        "EGL_PLATFORM": "surfaceless",
+    }
+
+
 async def _launch_chromium(playwright: Playwright, settings: WorkerSettings) -> Browser:
     browser = await playwright.chromium.launch(
         headless=True,
         args=build_chromium_launch_args(settings),
+        env=_chromium_launch_env(settings),
     )
-    if not settings.worker_gpu_enabled:
-        return browser
 
     try:
         page = await browser.new_page()
@@ -180,15 +204,32 @@ async def _launch_chromium(playwright: Playwright, settings: WorkerSettings) -> 
         finally:
             await page.close()
         backend = renderer.lower()
-        if "vulkan" not in backend or any(
-            name in backend for name in ("swiftshader", "llvmpipe", "lavapipe", "software")
-        ):
-            raise RenderError(
-                "WORKER_GPU_ENABLED requires hardware Vulkan WebGL2; "
-                f"Chromium reported renderer={renderer or 'unavailable'!r}. "
-                "Check the render device, permissions and Vulkan driver."
-            )
-        logger.info("Worker GPU renderer: %s", renderer)
+        if settings.worker_gpu_enabled:
+            if "vulkan" not in backend or any(
+                name in backend for name in ("swiftshader", "llvmpipe", "lavapipe", "software")
+            ):
+                raise RenderError(
+                    "WORKER_GPU_ENABLED requires hardware Vulkan WebGL2; "
+                    f"Chromium reported renderer={renderer or 'unavailable'!r}. "
+                    "Check the render device, permissions and Vulkan driver."
+                )
+            logger.info("Worker GPU renderer: %s", renderer)
+        else:
+            if settings.worker_cpu_renderer == "lavapipe":
+                if "vulkan" not in backend or not any(
+                    name in backend for name in ("llvmpipe", "lavapipe")
+                ):
+                    raise RenderError(
+                        "Expected Mesa Lavapipe Vulkan WebGL2; "
+                        f"Chromium reported renderer={renderer or 'unavailable'!r}. "
+                        "Check the Mesa driver or set WORKER_CPU_RENDERER=swiftshader."
+                    )
+            elif "swiftshader" not in backend:
+                raise RenderError(
+                    "Expected SwiftShader WebGL2; "
+                    f"Chromium reported renderer={renderer or 'unavailable'!r}."
+                )
+            logger.info("Worker CPU renderer: %s", renderer)
     except BaseException:
         await browser.close()
         raise

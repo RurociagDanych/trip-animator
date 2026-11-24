@@ -430,24 +430,70 @@ async def test_ssrf_route_handler_blocks_bypass_vectors_and_nxdomain_allows_ipv6
         assert v6_route.fulfilled["status"] == 200
 
 
-@pytest.mark.parametrize(("enabled", "backend"), [("false", "swiftshader"), ("true", "vulkan")])
+@pytest.mark.parametrize(
+    ("dotenv", "backend"),
+    [
+        ("", "gl-egl"),
+        ("WORKER_GPU_ENABLED=false\nWORKER_CPU_RENDERER=swiftshader\n", "swiftshader"),
+        ("WORKER_GPU_ENABLED=true\n", "vulkan"),
+        ("WORKER_GPU_ENABLED=true\nWORKER_CPU_RENDERER=swiftshader\n", "vulkan"),
+    ],
+)
 def test_worker_dotenv_selects_chromium_backend(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enabled: str, backend: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dotenv: str, backend: str
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("WORKER_GPU_ENABLED", raising=False)
-    (tmp_path / ".env").write_text(f"WORKER_GPU_ENABLED={enabled}\n", encoding="utf-8")
+    monkeypatch.delenv("WORKER_CPU_RENDERER", raising=False)
+    (tmp_path / ".env").write_text(dotenv, encoding="utf-8")
 
     args = build_chromium_launch_args(WorkerSettings())
 
     assert [arg for arg in args if arg.startswith("--use-angle=")] == [f"--use-angle={backend}"]
-    assert ("--disable-software-rasterizer" in args) == (enabled == "true")
+    assert ("--disable-software-rasterizer" in args) == (backend == "vulkan")
+
+
+class _FakeLavapipeProbe:
+    async def evaluate(self, _script: str) -> str:
+        return "ANGLE (Mesa, Vulkan (llvmpipe), llvmpipe)"
+
+    async def close(self) -> None:
+        pass
+
+
+class _FakeLavapipeBrowser:
+    async def new_page(self) -> _FakeLavapipeProbe:
+        return _FakeLavapipeProbe()
+
+
+@pytest.fixture
+def lavapipe_icd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Provide a fake driver manifest without requiring Mesa in unit tests."""
+    from trip_worker import renderer
+
+    icd = tmp_path / "lvp_icd.x86_64.json"
+    icd.touch()
+    (tmp_path / "intel_icd.json").touch()
+    monkeypatch.setattr(renderer, "VULKAN_ICD_DIR", tmp_path)
+    return icd
+
+
+def test_missing_lavapipe_driver_only_blocks_lavapipe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from trip_worker import renderer
+
+    monkeypatch.setattr(renderer, "VULKAN_ICD_DIR", tmp_path)
+    with pytest.raises(RenderError, match="WORKER_CPU_RENDERER=swiftshader"):
+        renderer._chromium_launch_env(WorkerSettings(worker_cpu_renderer="lavapipe"))
+
+    assert renderer._chromium_launch_env(WorkerSettings(worker_cpu_renderer="swiftshader")) is None
+    assert renderer._chromium_launch_env(WorkerSettings(worker_gpu_enabled=True)) is None
 
 
 async def test_render_manifest_with_page_png_cancellation_and_pageerror_handling() -> None:
     args_default = build_chromium_launch_args(WorkerSettings(chromium_no_sandbox=False))
     assert "--no-sandbox" not in args_default
-    assert "--use-angle=swiftshader" in args_default
     assert "--disable-features=WebRtcHideLocalIpsWithMdns" in args_default
     assert "--enforce-webrtc-ip-permission-check" in args_default
     assert "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" in args_default
@@ -629,6 +675,7 @@ async def test_virtual_photo_route_and_ssrf_first_tile_cache(
 def test_warm_playwright_browser_reuses_browser_isolates_context_and_recycles_after_max_renders(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    lavapipe_icd: Path,
 ) -> None:
     from trip_worker import renderer as renderer_mod
     from trip_worker.renderer import WarmPlaywrightHost, render_manifest_to_mp4
@@ -653,7 +700,7 @@ def test_warm_playwright_browser_reuses_browser_isolates_context_and_recycles_af
         async def close(self) -> None:
             self.closed = True
 
-    class FakeWarmBrowser:
+    class FakeWarmBrowser(_FakeLavapipeBrowser):
         def __init__(self, browser_idx: int) -> None:
             self.browser_idx = browser_idx
             self.connected = True
@@ -684,6 +731,7 @@ def test_warm_playwright_browser_reuses_browser_isolates_context_and_recycles_af
             self.browsers: list[FakeWarmBrowser] = []
 
         async def launch(self, **kwargs: Any) -> FakeWarmBrowser:
+            assert kwargs["env"]["VK_DRIVER_FILES"] == str(lavapipe_icd)
             b = FakeWarmBrowser(len(self.browsers) + 1)
             self.browsers.append(b)
             launch_records.append({"browser_idx": b.browser_idx, "kwargs": kwargs, "browser": b})
@@ -738,6 +786,7 @@ def test_warm_playwright_browser_reuses_browser_isolates_context_and_recycles_af
     assert pw_stopped["count"] == 1
 
 
+@pytest.mark.usefixtures("lavapipe_icd")
 def test_warm_playwright_browser_crash_recovery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -750,7 +799,7 @@ def test_warm_playwright_browser_crash_recovery(
 
     launched_browsers: list[Any] = []
 
-    class FakeCrashBrowser:
+    class FakeCrashBrowser(_FakeLavapipeBrowser):
         def __init__(self, idx: int) -> None:
             self.idx = idx
             self.connected = True

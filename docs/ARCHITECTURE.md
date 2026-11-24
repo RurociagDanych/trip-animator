@@ -145,7 +145,7 @@ sequenceDiagram
     API-->>UI: SSE event (succeeded, download & inline video URL)
 ```
 
-Set `WORKER_GPU_ENABLED=true` to request Chromium ANGLE Vulkan hardware WebGL2; when disabled, Chromium uses SwiftShader. Docker deployments need a host/device override for GPU access. FFmpeg continues to encode H.264 with CPU `libx264`.
+With GPU mode disabled, Chromium uses Mesa Lavapipe for software Vulkan WebGL2 by default, or SwiftShader when `WORKER_CPU_RENDERER=swiftshader`. Set `WORKER_GPU_ENABLED=true` to request Chromium ANGLE Vulkan hardware WebGL2 instead; Docker deployments need a host/device override for GPU access. FFmpeg continues to encode H.264 with CPU `libx264` in all modes.
 
 ### Key v1 Fixes Incorporated by Design
 - **WYSIWYG 1:1 Parity**: Browser preview and server export share the exact same React + MapLibre GL JS v5 + Deck.gl + crisp HTML/SVG vector HUD components (`statisticsPanel` no longer uses the 5×5 pixel bitmap font missing `J/Q/X/Z/+/%,`).
@@ -180,7 +180,7 @@ All services derive runtime configuration from the repository root `.env` contra
 - **Security**: `SESSION_SECRET` (min 32 bytes), `TOKEN_ENCRYPTION_KEY` (base64 32-byte AES-256-GCM key), `ALLOWED_ORIGINS`
 - **Object Storage**: `OBJECT_STORE_BACKEND` (`local` or `s3`), `LOCAL_OBJECT_STORE_DIR`, `S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET`, `S3_REGION`
 - **Strava OAuth2**: `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`, `STRAVA_REDIRECT_URI`
-- **Rendering & Egress Allowlist**: `MAP_TILE_ALLOWLIST`, `RENDER_BASE_URL`, `WORKER_CONCURRENCY`, `WORKER_GPU_ENABLED`
+- **Rendering & Egress Allowlist**: `MAP_TILE_ALLOWLIST`, `RENDER_BASE_URL`, `WORKER_CONCURRENCY`, `WORKER_GPU_ENABLED`, `WORKER_CPU_RENDERER`
 - **Airflow Orchestration**: `AIRFLOW_PORT`, `AIRFLOW_DB`, `AIRFLOW_FERNET_KEY`, `AIRFLOW_API_SECRET_KEY`, `AIRFLOW_JWT_SECRET`, `AIRFLOW_SIMPLE_AUTH_USERS` (`username:role` entries, default `admin:admin`), `GOLD_OUTPUT_DIR`
 
 In Docker Compose (`infra/compose.yaml`), internal service discovery overrides host-oriented `localhost` URLs (`postgres:5432`, `http://minio:9000`, `http://caddy:80`) while preserving credential and secret injection from the root env file.

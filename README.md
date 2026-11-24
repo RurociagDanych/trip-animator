@@ -129,7 +129,7 @@ Copy [`.env.example`](.env.example) to `.env` (`make bootstrap` does this when `
 | Security and encryption | `SESSION_SECRET`, `TOKEN_ENCRYPTION_KEY`, `ALLOWED_ORIGINS` |
 | Object storage (`local` or `s3`) | `OBJECT_STORE_BACKEND`, `LOCAL_OBJECT_STORE_DIR`, `S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET`, `S3_REGION` |
 | Strava OAuth2 | `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`, `STRAVA_REDIRECT_URI` |
-| Map tiles and render worker | `MAP_TILE_ALLOWLIST`, `RENDER_BASE_URL`, `WORKER_CONCURRENCY`, `WORKER_GPU_ENABLED` |
+| Map tiles and render worker | `MAP_TILE_ALLOWLIST`, `RENDER_BASE_URL`, `WORKER_CONCURRENCY`, `WORKER_GPU_ENABLED`, `WORKER_CPU_RENDERER` |
 | Apache Airflow 3 | `AIRFLOW_PORT`, `AIRFLOW_DB`, `AIRFLOW_FERNET_KEY`, `AIRFLOW_API_SECRET_KEY`, `AIRFLOW_JWT_SECRET`, `AIRFLOW_SIMPLE_AUTH_USERS`, `GOLD_OUTPUT_DIR` |
 | Docker Compose and reverse proxy | `DOMAIN`, `COMPOSE_ALLOWED_ORIGINS`, `CADDY_HTTP_PUBLISH`, `CADDY_HTTPS_PUBLISH` |
 
@@ -159,14 +159,15 @@ Run `make check` for the full local gate (lint, format check, typecheck, tests, 
 
 ### Local worker benchmark
 
-Both modes rendered the same sample from a project export: 4 consecutive route stages out of 22 and 11 photos out of 56. With a warm tile cache, each run produced a 21-second H.264 clip (720 × 900, 15 fps) with a fit-track camera and cinematic photo stops. Times include rendering and FFmpeg encoding, but exclude Chromium startup. GPU mode accelerates WebGL, not encoding.
+All three modes rendered the same project sample: 4 consecutive route stages and 11 photos, with a fit-track camera and cinematic photo stops. Each run used the same worker build, a fresh copy of the same warm tile cache, and a local Docker container limited to 2 vCPUs and pinned to the same two logical CPUs. Only GPU mode had access to the hardware GPU. This was a local benchmark, not a measurement on the deployed VPS.
 
 | WebGL renderer | Wall time (one completed run per mode) |
 | :--- | ---: |
-| CPU (SwiftShader) | 206.97 s |
-| GPU (Intel UHD 620, Vulkan) | 29.13 s |
+| SwiftShader (CPU) | 304.82 s |
+| Mesa Lavapipe (default CPU renderer) | 85.54 s |
+| Intel UHD 620 (hardware Vulkan) | 20.67 s |
 
-Both exports decoded successfully, contained 315 frames, and loaded all 11 photos with no missing assets or tile-cache misses. GPU wall time was 86% lower in this paired run. The repeat did not complete within the overall time limit, so these are not averages or estimates for the full project.
+The WebGL2 backend was verified for each mode. Every export decoded successfully as a 21-second H.264 clip (315 frames, 720 × 900, 15 fps), loaded all 11 photos, and recorded 16 tile-cache hits with no misses. Wall time includes rendering and FFmpeg encoding but excludes Chromium startup. GPU mode accelerates WebGL, not encoding. These are single-run results for this sample, not averages or estimates for the full project. Set `WORKER_CPU_RENDERER=swiftshader` to use the previous CPU renderer.
 
 ## Deployment
 

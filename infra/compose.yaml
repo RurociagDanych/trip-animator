@@ -252,6 +252,7 @@ services:
       RENDER_BASE_URL: ${COMPOSE_RENDER_BASE_URL:-http://caddy}
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
       WORKER_GPU_ENABLED: ${WORKER_GPU_ENABLED:-false}
+      WORKER_CPU_RENDERER: ${WORKER_CPU_RENDERER:-lavapipe}
       TILE_CACHE_DIR: ${TILE_CACHE_DIR:-/data/tile_cache}
     volumes:
       - object_data:/data/objects
