@@ -30,9 +30,10 @@ const mockState = vi.hoisted(() => ({
   emit: null as ((event: string) => void) | null,
 }));
 
-vi.mock("../lib/geo/settlement-labels", () => ({
+vi.mock(import("../lib/geo/settlement-labels"), async (importOriginal) => ({
+  ...await importOriginal(),
   loadSettlementLabels: async () => ({ type: "FeatureCollection", features: [] }),
-  installSettlementLabels: () => undefined,
+  installSettlementLabels: () => () => {},
 }));
 
 vi.mock("maplibre-gl", () => {
@@ -599,6 +600,47 @@ describe("TripStageCanvas WebGL wiring (canvas.test.tsx)", () => {
     mockState.emit?.("idle");
     await settlePromise;
     expect(settled).toBe(true);
+  });
+
+  it("waits for the map at a settlement label mode boundary even with a fixed camera", async () => {
+    const first = makeStage();
+    const second = {
+      ...first,
+      id: "city-stage",
+      stageOrder: 1,
+      points: first.points.map((point) => ({
+        ...point,
+        globalDistM: point.globalDistM + first.distanceM,
+        globalElapsedS: point.globalElapsedS + first.elapsedSeconds,
+      })),
+    };
+    const spec = createDefaultRenderSpecV2();
+    spec.camera_mode = "fit-track";
+    spec.camera_preset = "flat";
+    spec.stage_settlement_label_modes = { [second.id]: "follow_zoom" };
+    const controllerRef = createRef<TripStageCanvasHandle | null>();
+    const props = { stages: [first, second], spec, durationS: 20, travelDurationS: 20, controllerRef };
+    const frame = (progressRatio: number) => (
+      <TripStageCanvas {...props} progressRatio={progressRatio} renderMode="deterministic" />
+    );
+    const { rerender } = render(frame(0.2));
+    await controllerRef.current!.waitForFrameSettle(false);
+
+    mockState.areTilesLoaded = false;
+    rerender(frame(0.8));
+    const idleCount = mockState.idleOnceCount;
+    let settled = false;
+    const pending = controllerRef.current!.waitForFrameSettle(false).then(() => {
+      settled = true;
+    });
+    await vi.waitFor(() => expect(mockState.idleOnceCount).toBe(idleCount + 1));
+    expect(settled).toBe(false);
+    mockState.emit?.("idle");
+    await pending;
+
+    rerender(frame(0.9));
+    await controllerRef.current!.waitForFrameSettle(false);
+    expect(mockState.idleOnceCount).toBe(idleCount + 1);
   });
 
   it("smoothly blends street-level zoom and pan across stage boundaries in both follow-marker and fit-track modes without bearing jumps", () => {

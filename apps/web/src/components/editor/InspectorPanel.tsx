@@ -240,6 +240,23 @@ export function InspectorPanel({
             </label>
 
             <label className="block space-y-1.5">
+              <span className="block font-medium text-ink-muted">Trip place labels</span>
+              <select
+                value={spec.settlement_label_mode}
+                onChange={(e) => onUpdateSpec({
+                  settlement_label_mode: e.currentTarget.value === "follow_zoom" ? "follow_zoom" : "uniform",
+                })}
+                className="w-full rounded-md border border-border bg-elevated px-2.5 py-2 text-xs text-ink focus:border-sky-accent focus:outline-none"
+              >
+                <option value="uniform">Uniform across zoom levels</option>
+                <option value="follow_zoom">Follow map zoom</option>
+              </select>
+              <span className="block text-ink-muted">
+                Uniform shows selected settlements along the route on supported vector maps. Other map labels follow zoom.
+              </span>
+            </label>
+
+            <label className="block space-y-1.5">
               <span className="block font-medium text-ink-muted">Color route by</span>
               <select
                 aria-label="Color route by"

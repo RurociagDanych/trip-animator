@@ -33,6 +33,7 @@ function cloneSpec(spec: RenderSpecV2): RenderSpecV2 {
     stage_camera_overrides: Object.fromEntries(
       Object.entries(spec.stage_camera_overrides ?? {}).map(([k, v]) => [k, { ...v }]),
     ),
+    stage_settlement_label_modes: { ...spec.stage_settlement_label_modes },
     camera_keyframes: (spec.camera_keyframes ?? []).map((kf) => ({ ...kf })),
     statistics_panel: {
       ...spec.statistics_panel,
@@ -353,6 +354,9 @@ export const useEditorStore = create<EditorState>((set) => ({
           stage_colors: cleanColors,
           stage_transitions: cleanTransitions,
           stage_camera_overrides: cleanOverrides,
+          stage_settlement_label_modes: Object.fromEntries(
+            Object.entries(state.spec.stage_settlement_label_modes ?? {}).filter(([id]) => validIds.has(id)),
+          ),
         },
       };
     }),

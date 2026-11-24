@@ -764,6 +764,10 @@ class RenderSpecV2(BaseModel):
     stage_colors: dict[str, str] = Field(default_factory=dict)
     stage_transitions: dict[str, TransitionIcon] = Field(default_factory=dict)
     stage_camera_overrides: dict[str, StageCameraOverride] = Field(default_factory=dict)
+    settlement_label_mode: Literal["uniform", "follow_zoom"] = "uniform"
+    stage_settlement_label_modes: dict[str, Literal["uniform", "follow_zoom"]] = Field(
+        default_factory=dict
+    )
     statistics_panel: StatisticsPanelConfig = Field(default_factory=StatisticsPanelConfig)
     is_preview: bool = False
 

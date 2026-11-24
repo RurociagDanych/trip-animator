@@ -3,6 +3,7 @@ import { VectorTile } from "@mapbox/vector-tile";
 import Pbf from "pbf";
 import type { FeatureCollection, Point } from "geojson";
 import type { FilterSpecification, Map as MapLibreMap, SymbolLayerSpecification } from "maplibre-gl";
+import type { RenderSpecV2, SettlementLabelMode } from "../api/types";
 
 const TILEJSON_URL = "https://tiles.openfreemap.org/planet";
 const DETAIL_ZOOM = 11;
@@ -18,6 +19,11 @@ const BASE_LAYERS = new Set(["label_town", "label_village", "label_other", "plac
 type RoutePoint = { lat: number; lon: number };
 type Tile = { x: number; y: number; point: RoutePoint };
 export type SettlementLabels = FeatureCollection<Point, { name: string; label: string }>;
+
+/** Resolves using the playback stage; stages without an override inherit the trip mode. */
+export function resolveSettlementLabelMode(spec: RenderSpecV2, stageId?: string): SettlementLabelMode {
+  return (stageId ? spec.stage_settlement_label_modes[stageId] : undefined) ?? spec.settlement_label_mode;
+}
 
 function routeTiles(stages: readonly { points: readonly RoutePoint[] }[]): Tile[] {
   const tiles = new Map<string, Tile>();
@@ -103,7 +109,9 @@ export async function loadSettlementLabels(
 /** Installs fixed route labels and hides their corresponding basemap labels until cleanup. */
 export function installSettlementLabels(map: MapLibreMap, labels: SettlementLabels): (() => void) | undefined {
   if (!labels.features.length || map.getLayer(LABEL_LAYER)) return undefined;
-  const nativeLayers = map.getStyle()?.layers.filter((layer): layer is SymbolLayerSpecification =>
+  const style = map.getStyle();
+  if (!style?.glyphs) return undefined;
+  const nativeLayers = style.layers.filter((layer): layer is SymbolLayerSpecification =>
     layer.type === "symbol" && layer["source-layer"] === "place" && BASE_LAYERS.has(layer.id),
   );
   if (!nativeLayers?.length) return undefined;

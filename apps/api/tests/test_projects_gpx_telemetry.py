@@ -82,6 +82,16 @@ def test_project_crud_optimistic_locking_and_bola(harness: AppHarness) -> None:
     )
     assert bad_settings.status_code == 422
 
+    bad_label_override = alice.patch(
+        f"/api/v1/projects/{project_id}",
+        json={
+            "revision": 2,
+            "settings": {"stage_settlement_label_modes": {foreign_stage_id: "follow_zoom"}},
+        },
+        headers={"X-CSRF-Token": alice_csrf},
+    )
+    assert bad_label_override.status_code == 422
+
 
 def test_gpx_upload_stages_reorder_trim_and_duckdb_telemetry(
     harness: AppHarness, sample_gpx: bytes
@@ -126,6 +136,11 @@ def test_gpx_upload_stages_reorder_trim_and_duckdb_telemetry(
             "settings": {
                 "stage_colors": {stage1["id"]: "#22C55E", stage2["id"]: "#3B82F6"},
                 "stage_transitions": {stage1["id"]: "bed", stage2["id"]: "none"},
+                "settlement_label_mode": "follow_zoom",
+                "stage_settlement_label_modes": {
+                    stage1["id"]: "follow_zoom",
+                    stage2["id"]: "uniform",
+                },
             },
         },
         headers={"X-CSRF-Token": csrf},
@@ -199,6 +214,8 @@ def test_gpx_upload_stages_reorder_trim_and_duckdb_telemetry(
     detail = client.get(f"/api/v1/projects/{project_id}").json()
     assert len(detail["stages"]) == 1
     assert stage1["id"] not in detail["settings"]["stage_colors"]
+    assert detail["settings"]["settlement_label_mode"] == "follow_zoom"
+    assert detail["settings"]["stage_settlement_label_modes"] == {stage2["id"]: "uniform"}
 
 
 def test_gpx_security_xxe_size_cap_magic_bytes_and_malformed_multipart(
