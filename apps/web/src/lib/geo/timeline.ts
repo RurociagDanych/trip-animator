@@ -1780,3 +1780,49 @@ export function computeAdaptiveFollowCamera(
     courseBearingDeg,
   };
 }
+
+const UNIFORM_ZOOM_MIN = 5.0;
+const UNIFORM_ZOOM_MAX = 17.5;
+const UNIFORM_ZOOM_SAMPLES = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9] as const;
+
+export function computeUniformAdaptiveZoom(
+  stages: readonly TimelineStage[],
+  spec: RenderSpecV2,
+  options?: AdaptiveFollowCameraOptions,
+): number {
+  const adaptiveSpec: RenderSpecV2 =
+    spec.follow_zoom_mode === "adaptive"
+      ? spec
+      : { ...spec, follow_zoom_mode: "adaptive" };
+  const samples = UNIFORM_ZOOM_SAMPLES.map(
+    (p) => computeAdaptiveFollowCamera(stages, adaptiveSpec, p, options).zoom,
+  )
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
+  const median = samples.length > 0 ? samples[Math.floor(samples.length / 2)]! : 10.5;
+  const clamped = Math.min(UNIFORM_ZOOM_MAX, Math.max(UNIFORM_ZOOM_MIN, median));
+  const rounded = Math.round(clamped * 10) / 10;
+  if (Math.abs(rounded - Math.round(rounded)) < 1e-6) {
+    return Math.min(UNIFORM_ZOOM_MAX, Math.round((rounded + 0.1) * 10) / 10);
+  }
+  return rounded;
+}
+
+export function buildUniformStageCameraOverrides(
+  stages: readonly { id: string }[],
+  targetZoom: number,
+): RenderSpecV2["stage_camera_overrides"] {
+  const safeZoom = Number.isFinite(targetZoom)
+    ? Math.min(UNIFORM_ZOOM_MAX, Math.max(UNIFORM_ZOOM_MIN, Math.round(targetZoom * 10) / 10))
+    : 10.5;
+  const overrides: RenderSpecV2["stage_camera_overrides"] = {};
+  for (const stage of stages) {
+    overrides[stage.id] = {
+      focus_mode: "custom",
+      target_zoom: safeZoom,
+      speed_multiplier: 1.0,
+      transition_margin: 0.02,
+    };
+  }
+  return overrides;
+}
