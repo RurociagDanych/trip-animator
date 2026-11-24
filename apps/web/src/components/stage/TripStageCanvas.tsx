@@ -1771,7 +1771,6 @@ export function TripStageCanvas({
         await Promise.all([
           mapReadyPromiseRef.current,
           settlementLabelsReadyRef.current,
-          preloadAndDecodeImages(photoUrlsKey),
         ]);
         await awaitNextAnimationFrames(2);
       },

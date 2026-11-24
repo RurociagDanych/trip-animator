@@ -426,10 +426,15 @@ async def _open_render_page(
     manifest: RenderManifest,
     settings: WorkerSettings,
     route_handler: AsyncRouteHandler,
+    *,
+    frame_count_only: bool = False,
 ) -> int:
     """Load the render harness and return the frame count reported by the browser."""
     await page.route("**/*", route_handler)
-    await page.add_init_script(build_manifest_init_script(manifest))
+    init_script = build_manifest_init_script(manifest)
+    if frame_count_only:
+        init_script += "\nwindow.__TRIP_RENDER_FRAME_COUNT_ONLY__ = true;"
+    await page.add_init_script(init_script)
 
     target_url = f"{settings.render_base_url.rstrip('/')}/render/{manifest.job_id}"
     await page.goto(
@@ -494,7 +499,9 @@ async def probe_manifest_frame_count(
                     ),
                 ) as route_handler,
             ):
-                return await _open_render_page(page, manifest, settings, route_handler)
+                return await _open_render_page(
+                    page, manifest, settings, route_handler, frame_count_only=True
+                )
         finally:
             await context.close()
 

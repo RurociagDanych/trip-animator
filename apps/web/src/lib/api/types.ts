@@ -933,6 +933,7 @@ export interface TripRendererApi {
 declare global {
   interface Window {
     __TRIP_RENDER_MANIFEST__?: RenderManifest;
+    __TRIP_RENDER_FRAME_COUNT_ONLY__?: boolean;
     __TRIP_RENDERER__?: TripRendererApi;
   }
 }
