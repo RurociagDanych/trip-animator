@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import httpx
 from playwright.async_api import Browser, Page, Playwright, Route, async_playwright
@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 # logs roughly one progress line per chunk.
 PROGRESS_LOG_EVERY_FRAMES = 300
 VULKAN_ICD_DIR = Path("/usr/share/vulkan/icd.d")
+_PHOTO_ASSET_PATH = "/render-assets/photos/"
 
 
 class RenderCancelledError(RuntimeError):
@@ -238,7 +239,12 @@ async def _launch_chromium(playwright: Playwright, settings: WorkerSettings) -> 
 
 def build_manifest_init_script(manifest: RenderManifest) -> str:
     """Return JS init script safely assigning `window.__TRIP_RENDER_MANIFEST__`."""
-    raw_json = json.dumps(manifest.model_dump(mode="json"), separators=(",", ":"))
+    payload = manifest.model_dump(mode="json")
+    # Keep stored manifests compatible while allowing Chromium's img-src 'self' check to pass.
+    for photo in payload["photos"]:
+        if photo["asset_url"] == f"https://render-assets.local/{photo['id']}":
+            photo["asset_url"] = f"{_PHOTO_ASSET_PATH}{quote(photo['id'], safe='')}"
+    raw_json = json.dumps(payload, separators=(",", ":"))
     escaped_json_string = json.dumps(raw_json)
     return f"window.__TRIP_RENDER_MANIFEST__ = JSON.parse({escaped_json_string});"
 
@@ -281,31 +287,6 @@ def make_ssrf_route_handler(
         parsed = urlparse(url)
         method = str(getattr(route.request, "method", "GET")).upper()
 
-        if (
-            photo_assets is not None
-            and method == "GET"
-            and parsed.scheme.lower() == "https"
-            and (parsed.hostname or "").lower() == "render-assets.local"
-            and not parsed.username
-            and not parsed.password
-            and parsed.port in (None, 443)
-        ):
-            asset_id = parsed.path.lstrip("/")
-            asset_bytes = photo_assets.get(asset_id)
-            if asset_bytes is not None:
-                await route.fulfill(
-                    status=200,
-                    content_type=_detect_image_content_type(asset_bytes),
-                    body=asset_bytes,
-                )
-            else:
-                await route.fulfill(
-                    status=404,
-                    content_type="text/plain",
-                    body=b"Photo asset not found",
-                )
-            return
-
         # Always evaluate SSRF policy and pin DNS BEFORE consulting tile_cache or fetching
         decision = await resolve_and_validate_external_target_async(
             url,
@@ -320,6 +301,25 @@ def make_ssrf_route_handler(
                 parsed.hostname,
             )
             await route.abort("blockedbyclient")
+            return
+
+        if decision.kind == "render_origin" and parsed.path.startswith(_PHOTO_ASSET_PATH):
+            asset_id = unquote(parsed.path.removeprefix(_PHOTO_ASSET_PATH))
+            asset_bytes = (
+                photo_assets.get(asset_id) if photo_assets is not None and method == "GET" else None
+            )
+            if asset_bytes is not None:
+                await route.fulfill(
+                    status=200,
+                    content_type=_detect_image_content_type(asset_bytes),
+                    body=asset_bytes,
+                )
+            else:
+                await route.fulfill(
+                    status=404,
+                    content_type="text/plain",
+                    body=b"Photo asset not found",
+                )
             return
 
         if decision.kind in {"data_or_blob", "render_origin"}:
