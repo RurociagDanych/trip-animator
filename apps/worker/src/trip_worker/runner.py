@@ -2412,8 +2412,8 @@ def run_once(
     render_fn: RenderCallable = render_manifest_to_mp4,
     browser_host: WarmPlaywrightHost | None = None,
     frame_count_fn: FrameCountCallable = probe_film_frame_count,
+    on_requeued: Callable[[], None] | None = None,
 ) -> bool:
-    """Reap expired leases, claim a ready chunk or render job (or finalize), and process it."""
     cfg = settings or WorkerSettings()
     cf = conn_factory or default_conn_factory(cfg)
     obj_store = store or build_object_store(cfg)
@@ -2442,7 +2442,7 @@ def run_once(
             job = None
 
     if chunk is not None:
-        process_claimed_chunk(
+        chunk_status = process_claimed_chunk(
             cf,
             chunk,
             cfg,
@@ -2450,6 +2450,8 @@ def run_once(
             render_fn=render_fn,
             browser_host=browser_host,
         )
+        if chunk_status == "queued" and on_requeued is not None:
+            on_requeued()
         return True
 
     if finalize_job is not None:
@@ -2459,7 +2461,7 @@ def run_once(
     if job is None:
         return False
 
-    process_claimed_job(
+    job_status = process_claimed_job(
         cf,
         job,
         cfg,
@@ -2468,6 +2470,8 @@ def run_once(
         browser_host=browser_host,
         frame_count_fn=frame_count_fn,
     )
+    if job_status == "queued" and on_requeued is not None:
+        on_requeued()
     return True
 
 
@@ -2477,20 +2481,32 @@ def _worker_thread_loop(
     worker_idx: int,
 ) -> None:
     logger.debug("Worker thread %d started", worker_idx)
-    accepts_browser_host = "browser_host" in inspect.signature(run_once).parameters
+    run_once_params = inspect.signature(run_once).parameters
+    accepts_browser_host = "browser_host" in run_once_params
+    accepts_on_requeued = "on_requeued" in run_once_params
     with WarmPlaywrightHost(cfg) as browser_host:
         while not stop_event.is_set():
+            requeued = False
+
+            def _mark_requeued() -> None:
+                nonlocal requeued
+                requeued = True
+
             try:
-                did_work = (
-                    run_once(cfg, browser_host=browser_host)
-                    if accepts_browser_host
-                    else run_once(cfg)
-                )
+                kwargs: dict[str, Any] = {}
+                if accepts_browser_host:
+                    kwargs["browser_host"] = browser_host
+                if accepts_on_requeued:
+                    kwargs["on_requeued"] = _mark_requeued
+                did_work = run_once(cfg, **kwargs)
             except Exception:
                 logger.exception("Worker loop iteration failed (worker=%d)", worker_idx)
                 did_work = False
 
-            if not did_work and not stop_event.is_set():
+            if requeued and not stop_event.is_set():
+                if cfg.retry_backoff_seconds > 0:
+                    stop_event.wait(timeout=cfg.retry_backoff_seconds)
+            elif not did_work and not stop_event.is_set():
                 stop_event.wait(timeout=cfg.poll_interval_seconds)
 
 

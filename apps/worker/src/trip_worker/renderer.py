@@ -37,6 +37,21 @@ logger = logging.getLogger(__name__)
 PROGRESS_LOG_EVERY_FRAMES = 300
 VULKAN_ICD_DIR = Path("/usr/share/vulkan/icd.d")
 _PHOTO_ASSET_PATH = "/render-assets/photos/"
+_TRANSIENT_NAV_ERROR_MARKERS = (
+    "ERR_NAME_NOT_RESOLVED",
+    "ERR_CONNECTION_REFUSED",
+    "ERR_CONNECTION_RESET",
+    "ERR_CONNECTION_CLOSED",
+    "ERR_CONNECTION_ABORTED",
+    "ERR_EMPTY_RESPONSE",
+    "ERR_NETWORK_CHANGED",
+    "ERR_INTERNET_DISCONNECTED",
+    "ERR_ADDRESS_UNREACHABLE",
+    "ERR_SOCKET_NOT_CONNECTED",
+    "ERR_TIMED_OUT",
+)
+_TRANSIENT_NAV_STATUS_CODES = frozenset({502, 503, 504})
+_MAX_NAV_RETRY_DELAY_SECONDS = 5.0
 
 
 class RenderCancelledError(RuntimeError):
@@ -421,6 +436,81 @@ async def _external_route_scope(
         await tracked.drain()
 
 
+def _is_transient_nav_error(exc: Exception) -> bool:
+    if isinstance(exc, RenderCancelledError):
+        return False
+    msg = str(exc)
+    return any(marker in msg for marker in _TRANSIENT_NAV_ERROR_MARKERS)
+
+
+async def _goto_render_page_with_retry(
+    page: Page,
+    target_url: str,
+    manifest: RenderManifest,
+    settings: WorkerSettings,
+    *,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> None:
+    deadline = time.monotonic() + settings.render_nav_retry_timeout_seconds
+    attempt = 0
+    while True:
+        if attempt > 0 and is_cancelled is not None and await asyncio.to_thread(is_cancelled):
+            raise RenderCancelledError(
+                f"Render job {manifest.job_id} was cancelled before navigation retry"
+            )
+        attempt += 1
+        try:
+            response = await page.goto(
+                target_url,
+                wait_until="domcontentloaded",
+                timeout=settings.render_ready_timeout_ms,
+            )
+        except Exception as exc:
+            if not _is_transient_nav_error(exc):
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            delay = min(
+                settings.render_nav_retry_base_delay_seconds * (2 ** (attempt - 1)),
+                _MAX_NAV_RETRY_DELAY_SECONDS,
+                remaining,
+            )
+            logger.warning(
+                "Transient navigation error loading render page (attempt=%d, retry_in=%.2fs): %s",
+                attempt,
+                delay,
+                exc,
+                extra={"event": "render_nav_retry", "job_id": manifest.job_id, "stage": "render"},
+            )
+            await asyncio.sleep(delay)
+            continue
+
+        status = getattr(response, "status", None)
+        if isinstance(status, int) and status in _TRANSIENT_NAV_STATUS_CODES:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RenderError(
+                    f"Render origin returned HTTP {status} for {target_url} "
+                    f"after {attempt} attempts"
+                )
+            delay = min(
+                settings.render_nav_retry_base_delay_seconds * (2 ** (attempt - 1)),
+                _MAX_NAV_RETRY_DELAY_SECONDS,
+                remaining,
+            )
+            logger.warning(
+                "Render origin returned HTTP %d (attempt=%d, retry_in=%.2fs)",
+                status,
+                attempt,
+                delay,
+                extra={"event": "render_nav_retry", "job_id": manifest.job_id, "stage": "render"},
+            )
+            await asyncio.sleep(delay)
+            continue
+        return
+
+
 async def _open_render_page(
     page: Page,
     manifest: RenderManifest,
@@ -428,8 +518,8 @@ async def _open_render_page(
     route_handler: AsyncRouteHandler,
     *,
     frame_count_only: bool = False,
+    is_cancelled: Callable[[], bool] | None = None,
 ) -> int:
-    """Load the render harness and return the frame count reported by the browser."""
     await page.route("**/*", route_handler)
     init_script = build_manifest_init_script(manifest)
     if frame_count_only:
@@ -437,10 +527,12 @@ async def _open_render_page(
     await page.add_init_script(init_script)
 
     target_url = f"{settings.render_base_url.rstrip('/')}/render/{manifest.job_id}"
-    await page.goto(
+    await _goto_render_page_with_retry(
+        page,
         target_url,
-        wait_until="domcontentloaded",
-        timeout=settings.render_ready_timeout_ms,
+        manifest,
+        settings,
+        is_cancelled=is_cancelled,
     )
 
     await page.wait_for_function(
@@ -560,7 +652,13 @@ async def render_manifest_with_page(
             ),
         ) as route_handler,
     ):
-        total_frames = await _open_render_page(page, manifest, settings, route_handler)
+        total_frames = await _open_render_page(
+            page,
+            manifest,
+            settings,
+            route_handler,
+            is_cancelled=is_cancelled,
+        )
 
         eff_start = max(0, frame_start)
         eff_end = total_frames if frame_end is None else min(total_frames, frame_end)

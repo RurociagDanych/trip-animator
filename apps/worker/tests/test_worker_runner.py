@@ -2043,3 +2043,85 @@ def test_chunked_job_logs_chunk_start_and_finish_with_rss(
     assert first.status == "succeeded"  # type: ignore[attr-defined]
     assert first.duration_ms >= 0  # type: ignore[attr-defined]
     assert first.rss_mb is None or first.rss_mb > 0  # type: ignore[attr-defined]
+
+
+def test_run_once_signals_requeue_and_worker_loop_waits_backoff(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    import threading
+
+    from trip_worker.runner import _worker_thread_loop
+
+    db = InMemoryRenderDatabase()
+    store = LocalObjectStore(tmp_path / "objects")
+    owner_id, project_id, _ = _seed_project_and_stage(db, store)
+    cf = db.conn_factory()
+    job_id = uuid.uuid4()
+    db.jobs[job_id] = {
+        "id": job_id,
+        "project_id": project_id,
+        "owner_user_id": owner_id,
+        "spec_json": {"version": 2, "resolution": "1280x720", "fps": 30, "duration_seconds": 10.0},
+        "status": "queued",
+        "progress_pct": 0,
+        "attempt_count": 0,
+        "lease_expires_at": None,
+        "output_object_key": None,
+        "thumbnail_key": None,
+        "expires_at": None,
+        "error_message": None,
+        "is_chunked": False,
+        "total_frames": None,
+        "created_at": datetime.now(UTC),
+        "updated_at": datetime.now(UTC),
+    }
+
+    async def fail_render(*_args: Any, **_kwargs: Any) -> Path:
+        raise RuntimeError("Page.goto: net::ERR_NAME_NOT_RESOLVED at http://caddy/render/test")
+
+    requeued_calls = 0
+
+    def _on_requeued() -> None:
+        nonlocal requeued_calls
+        requeued_calls += 1
+
+    settings = WorkerSettings(chunk_threshold_frames=10**9, max_attempts=3)
+    did_work = run_once(
+        settings,
+        conn_factory=cf,
+        store=store,
+        render_fn=fail_render,
+        on_requeued=_on_requeued,
+    )
+    assert did_work is True
+    assert requeued_calls == 1
+    assert db.jobs[job_id]["status"] == "queued"
+
+    waits: list[float | None] = []
+    stop_event = threading.Event()
+    original_wait = stop_event.wait
+
+    def recording_wait(timeout: float | None = None) -> bool:
+        waits.append(timeout)
+        stop_event.set()
+        return original_wait(timeout=0)
+
+    monkeypatch.setattr(stop_event, "wait", recording_wait)
+
+    def fake_run_once(
+        _cfg: WorkerSettings,
+        *,
+        browser_host: Any = None,
+        on_requeued: Any = None,
+    ) -> bool:
+        _ = browser_host
+        if on_requeued is not None:
+            on_requeued()
+        return True
+
+    monkeypatch.setattr("trip_worker.runner.run_once", fake_run_once)
+
+    loop_cfg = WorkerSettings(poll_interval_seconds=2.0, retry_backoff_seconds=7.5)
+    _worker_thread_loop(loop_cfg, stop_event, 0)
+    assert waits == [7.5]
