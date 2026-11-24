@@ -23,6 +23,8 @@ from trip_worker import (
     make_ssrf_route_handler,
     render_manifest_with_page,
 )
+from trip_worker.manifest import ManifestPhoto
+from trip_worker.renderer import build_manifest_init_script
 
 
 def _sample_manifest(
@@ -78,6 +80,25 @@ def _sample_manifest(
             )
         ],
     )
+
+
+def test_manifest_init_uses_same_origin_for_virtual_photos_only() -> None:
+    manifest = _sample_manifest()
+    manifest.photos = [
+        ManifestPhoto(
+            id="stored", width=32, height=32, asset_url="https://render-assets.local/stored"
+        ),
+        ManifestPhoto(id="inline", width=32, height=32, data_uri="data:image/png;base64,AAAA"),
+    ]
+
+    script = build_manifest_init_script(manifest)
+    encoded_json = script.split("JSON.parse(", 1)[1].removesuffix(");")
+    photos = json.loads(json.loads(encoded_json))["photos"]
+
+    assert photos[0]["asset_url"] == "/render-assets/photos/stored"
+    assert photos[1]["asset_url"] is None
+    assert photos[1]["data_uri"] == "data:image/png;base64,AAAA"
+    assert manifest.photos[0].asset_url == "https://render-assets.local/stored"
 
 
 class FakeRoute:
@@ -630,16 +651,21 @@ async def test_virtual_photo_route_and_ssrf_first_tile_cache(
             http_client=client,
         )
 
-        photo_ok = FakeRoute("https://render-assets.local/photo-1")
+        photo_ok = FakeRoute("http://caddy/render-assets/photos/photo-1")
         await handler(photo_ok)  # type: ignore[arg-type]
         assert photo_ok.fulfilled is not None
         assert photo_ok.fulfilled["status"] == 200
         assert photo_ok.fulfilled["content_type"] == "image/webp"
 
-        photo_missing = FakeRoute("https://render-assets.local/unknown")
+        photo_missing = FakeRoute("http://caddy/render-assets/photos/unknown")
         await handler(photo_missing)  # type: ignore[arg-type]
         assert photo_missing.fulfilled is not None
         assert photo_missing.fulfilled["status"] == 404
+
+        off_origin_photo = FakeRoute("http://caddy:8080/render-assets/photos/photo-1")
+        await handler(off_origin_photo)  # type: ignore[arg-type]
+        assert off_origin_photo.fulfilled is None
+        assert off_origin_photo.aborted_reason == "blockedbyclient"
 
         # SSRF runs BEFORE tile_cache: pre-seed cache for rebind host and verify block
         cache.put("https://rebind.openfreemap.org/tile.pbf", b"secret", "application/octet-stream")
