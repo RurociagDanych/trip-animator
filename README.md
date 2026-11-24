@@ -157,6 +157,17 @@ pnpm --filter @trip-animator/web build
 
 Run `make check` for the full local gate (lint, format check, typecheck, tests, Airflow tests, dbt build, Compose config).
 
+### Local worker benchmark
+
+Both modes rendered the same sample from a project export: 4 consecutive route stages out of 22 and 11 photos out of 56. With a warm tile cache, each run produced a 21-second H.264 clip (720 × 900, 15 fps) with a fit-track camera and cinematic photo stops. Times include rendering and FFmpeg encoding, but exclude Chromium startup. GPU mode accelerates WebGL, not encoding.
+
+| WebGL renderer | Wall time (one completed run per mode) |
+| :--- | ---: |
+| CPU (SwiftShader) | 206.97 s |
+| GPU (Intel UHD 620, Vulkan) | 29.13 s |
+
+Both exports decoded successfully, contained 315 frames, and loaded all 11 photos with no missing assets or tile-cache misses. GPU wall time was 86% lower in this paired run. The repeat did not complete within the overall time limit, so these are not averages or estimates for the full project.
+
 ## Deployment
 
 A VPS deployment exists.
