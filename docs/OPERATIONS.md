@@ -2,7 +2,7 @@
 
 > Purpose: Explain how to set up, run, integrate and maintain a self-hosted Trip Animator deployment.
 > Audience: operators
-> Last reviewed: 2026-11-20
+> Last reviewed: 2026-11-24
 
 Sections:
 
@@ -85,7 +85,7 @@ uv run python -c "from trip_worker.runner import run_worker_loop; run_worker_loo
 
 ## Docker Compose deployment
 
-`infra/compose.yaml` orchestrates the complete hardened stack (`postgres`, `minio`, `minio-init`, `migrate`, `api`, `worker`, `web`, `caddy`).
+`infra/compose.yaml` orchestrates PostgreSQL, RustFS (under the service name `minio`), initialization and migrations, the API, ingestion, the render worker, the web app, Caddy, and Airflow.
 
 ```bash
 # Validate Compose configuration
@@ -96,6 +96,26 @@ docker compose -f infra/compose.yaml --env-file .env up -d --build
 ```
 
 For production (`APP_ENV=production`), ensure `.env` overrides all secrets (`POSTGRES_PASSWORD`, `SESSION_SECRET`, `TOKEN_ENCRYPTION_KEY`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `METRICS_TOKEN`), sets `DEV_AUTH_ENABLED=false`, and sets `DOMAIN` + `ALLOWED_ORIGINS` for Caddy automatic TLS.
+
+### Worker GPU rendering
+
+The worker defaults to software WebGL (SwiftShader). `WORKER_GPU_ENABLED=true` enables hardware WebGL2 through Chromium ANGLE/Vulkan on a compatible Linux host. It does not change local browser exports or FFmpeg encoding (`libx264` on the CPU). If Chromium cannot use hardware WebGL2, the worker logs an error when it tries to launch Chromium instead of silently using a software renderer.
+
+For a native worker, set `WORKER_GPU_ENABLED=true` in the repository root `.env` and run the worker as a user with access to the host's Vulkan render device and drivers. For Docker Compose, use a Linux host with a Mesa Vulkan-capable DRM render node, such as a compatible Intel or AMD GPU. Set these values in `.env`:
+
+- `WORKER_GPU_ENABLED=true`
+- `WORKER_GPU_DEVICE=/dev/dri/renderD128` (choose the appropriate host render node if different)
+- `WORKER_GPU_RENDER_GID` to the numeric group ID printed by `stat -c '%g' /dev/dri/renderD128` (use the same device path as above)
+
+From the repository root, start the stack with the GPU override. If the stack is already running, add `--no-deps worker` to the `up` command to rebuild and recreate only the worker.
+
+```bash
+docker compose --env-file .env -f infra/compose.yaml -f infra/compose.worker-gpu.yaml config --quiet
+docker compose --env-file .env -f infra/compose.yaml -f infra/compose.worker-gpu.yaml up -d --build
+docker compose --env-file .env -f infra/compose.yaml -f infra/compose.worker-gpu.yaml logs worker
+```
+
+Submit a server render and look for `Worker GPU renderer:` in the logs. The override grants only the worker access to the selected render node. The standard VPS workflow does not apply it; keep the flag disabled there unless the deployment is configured to pass through a compatible GPU. To return to CPU rendering, set `WORKER_GPU_ENABLED=false`, omit the override and recreate the worker.
 
 ### Observability and retention reaper
 

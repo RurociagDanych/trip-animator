@@ -149,14 +149,50 @@ def build_chromium_launch_args(settings: WorkerSettings) -> list[str]:
         "--enable-webgl",
         "--ignore-gpu-blocklist",
         "--use-gl=angle",
-        "--use-angle=swiftshader",
+        "--use-angle=vulkan" if settings.worker_gpu_enabled else "--use-angle=swiftshader",
         "--disable-features=WebRtcHideLocalIpsWithMdns",
         "--enforce-webrtc-ip-permission-check",
         "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
     ]
+    if settings.worker_gpu_enabled:
+        args.append("--disable-software-rasterizer")
     if settings.chromium_no_sandbox:
         args.append("--no-sandbox")
     return args
+
+
+async def _launch_chromium(playwright: Playwright, settings: WorkerSettings) -> Browser:
+    browser = await playwright.chromium.launch(
+        headless=True,
+        args=build_chromium_launch_args(settings),
+    )
+    if not settings.worker_gpu_enabled:
+        return browser
+
+    try:
+        page = await browser.new_page()
+        try:
+            renderer: str = await page.evaluate("""() => {
+                const gl = document.createElement('canvas').getContext('webgl2');
+                const info = gl?.getExtension('WEBGL_debug_renderer_info');
+                return info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : '';
+            }""")
+        finally:
+            await page.close()
+        backend = renderer.lower()
+        if "vulkan" not in backend or any(
+            name in backend for name in ("swiftshader", "llvmpipe", "lavapipe", "software")
+        ):
+            raise RenderError(
+                "WORKER_GPU_ENABLED requires hardware Vulkan WebGL2; "
+                f"Chromium reported renderer={renderer or 'unavailable'!r}. "
+                "Check the render device, permissions and Vulkan driver."
+            )
+        logger.info("Worker GPU renderer: %s", renderer)
+    except BaseException:
+        await browser.close()
+        raise
+    return browser
 
 
 def build_manifest_init_script(manifest: RenderManifest) -> str:
@@ -424,10 +460,7 @@ async def probe_manifest_frame_count(
     if browser is not None:
         return await _probe(browser)
     async with async_playwright() as pw:
-        launched = await pw.chromium.launch(
-            headless=True,
-            args=build_chromium_launch_args(settings),
-        )
+        launched = await _launch_chromium(pw, settings)
         try:
             return await _probe(launched)
         finally:
@@ -660,10 +693,7 @@ class WarmPlaywrightHost:
             self._playwright = await async_playwright().start()
 
         if self._browser is None:
-            self._browser = await self._playwright.chromium.launch(
-                headless=True,
-                args=build_chromium_launch_args(self._settings),
-            )
+            self._browser = await _launch_chromium(self._playwright, self._settings)
             self._render_count = 0
 
         self._render_count += 1
@@ -785,10 +815,7 @@ async def render_manifest_to_mp4(
         return output_mp4_path
 
     async with async_playwright() as pw:
-        launched = await pw.chromium.launch(
-            headless=True,
-            args=build_chromium_launch_args(settings),
-        )
+        launched = await _launch_chromium(pw, settings)
         try:
             await _render_with_browser(
                 launched,

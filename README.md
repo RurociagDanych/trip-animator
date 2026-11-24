@@ -14,7 +14,7 @@ Basemap: [OpenFreeMap](https://openfreemap.org), © [OpenMapTiles](https://openm
 
 ## Status
 
-Active, self-hosted. Last substantive change: 2026-11-23. See [docs/OPERATIONS.md](docs/OPERATIONS.md) for what has and has not been validated.
+Active, self-hosted. Last substantive change: 2026-11-24. See [docs/OPERATIONS.md](docs/OPERATIONS.md) for what has and has not been validated.
 
 ## Architecture
 
@@ -26,7 +26,7 @@ flowchart TB
     API["FastAPI API (:8000 — Argon2id, CSRF, PKCE, DuckDB)"]
     Worker["Render Worker (SKIP LOCKED, Playwright Chromium, FFmpeg)"]
     PG[("PostgreSQL 17 (OLTP + Render Lease Queue)")]
-    Store[("ObjectStore (MinIO S3 / Local FS — Bronze, Silver, Outputs)")]
+    Store[("ObjectStore (RustFS S3 / Local FS — Bronze, Silver, Outputs)")]
 
     Browser -->|"HTTPS / Cookie + X-CSRF-Token"| Caddy
     Caddy -->|"/*"| Web
@@ -38,7 +38,7 @@ flowchart TB
     Worker -->|"Load /render/:jobId"| Caddy
 ```
 
-Data flows Bronze (raw GPX/Strava payloads) → Silver (Parquet via Polars) → Gold (dbt-duckdb marts). Details in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Details in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Data flows Bronze (raw GPX/Strava payloads) → Silver (Parquet via Polars) → Gold (dbt-duckdb marts). Details in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ### Key design decisions
 
@@ -115,6 +115,8 @@ In the editor’s **Export** tab, choose **Export MP4 locally (GPU)** to render 
 
 Keep the editor’s Export panel and browser tab open until the download link appears. Local files are not added to server render history. You can still export on the server if local export is unavailable or fails.
 
+For server-side hardware rendering, see [worker GPU setup](docs/OPERATIONS.md#worker-gpu-rendering).
+
 ## Configuration
 
 Copy [`.env.example`](.env.example) to `.env` (`make bootstrap` does this when `.env` is absent) and set the values locally. Never commit `.env`. The full contract is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#5-configuration-contract-envexample).
@@ -127,7 +129,7 @@ Copy [`.env.example`](.env.example) to `.env` (`make bootstrap` does this when `
 | Security and encryption | `SESSION_SECRET`, `TOKEN_ENCRYPTION_KEY`, `ALLOWED_ORIGINS` |
 | Object storage (`local` or `s3`) | `OBJECT_STORE_BACKEND`, `LOCAL_OBJECT_STORE_DIR`, `S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET`, `S3_REGION` |
 | Strava OAuth2 | `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`, `STRAVA_REDIRECT_URI` |
-| Map tiles and render worker | `MAP_TILE_ALLOWLIST`, `RENDER_BASE_URL`, `WORKER_CONCURRENCY` |
+| Map tiles and render worker | `MAP_TILE_ALLOWLIST`, `RENDER_BASE_URL`, `WORKER_CONCURRENCY`, `WORKER_GPU_ENABLED` |
 | Apache Airflow 3 | `AIRFLOW_PORT`, `AIRFLOW_DB`, `AIRFLOW_FERNET_KEY`, `AIRFLOW_API_SECRET_KEY`, `AIRFLOW_JWT_SECRET`, `AIRFLOW_SIMPLE_AUTH_USERS`, `GOLD_OUTPUT_DIR` |
 | Docker Compose and reverse proxy | `DOMAIN`, `COMPOSE_ALLOWED_ORIGINS`, `CADDY_HTTP_PUBLISH`, `CADDY_HTTPS_PUBLISH` |
 
@@ -170,8 +172,9 @@ A VPS deployment exists.
 - [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md): trust boundaries, threats and control matrix.
 - [docs/DEPLOY_VPS.md](docs/DEPLOY_VPS.md): manual VPS deployment through GitHub Actions.
 - [docs/specs/ACTIVITY_LIBRARY_SPEC.md](docs/specs/ACTIVITY_LIBRARY_SPEC.md): Activity Library specification.
-- [GLOSSARY.md](GLOSSARY.md): Activity Library domain language.
-- [docs/demo/](docs/demo/): README screenshot and synthetic GPX generator.
+- [docs/specs/CINEMATIC_PHOTOS_SPEC.md](docs/specs/CINEMATIC_PHOTOS_SPEC.md): cinematic photo-stop specification.
+- [GLOSSARY.md](GLOSSARY.md): Activity Library and trip playback terminology.
+- [docs/demo/generate_synthetic_gpx.py](docs/demo/generate_synthetic_gpx.py): generates a synthetic GPX demo track.
 
 ## Known gaps
 
