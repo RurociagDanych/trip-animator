@@ -13,8 +13,39 @@ import {
   computePhotoStopTotalDurationS,
   evaluateTimelineSchedule,
   matchPhotosToTimeline,
+  type MatchedPhoto,
 } from "../lib/geo/photos";
 import { buildTimelineFromManifest } from "../lib/geo/timeline";
+
+async function waitForRenderPhotos(photos: readonly MatchedPhoto[]): Promise<void> {
+  // jsdom does not implement image decoding; the render worker uses Chromium.
+  if (typeof Image.prototype.decode !== "function") return;
+
+  // Worker-local assets should decode quickly, but CPU renders may share a busy host.
+  const decodeTimeoutMs = 10_000;
+  const sources = new Map(
+    photos.filter(({ src, matchedProgress }) => src && matchedProgress !== null)
+      .map(({ src, id }) => [src, id]),
+  );
+  await Promise.all(Array.from(sources, ([src, id]) => new Promise<void>((resolve, reject) => {
+    const image = new Image();
+    const timeout = window.setTimeout(
+      () => reject(new Error(`Photo ${id} did not decode within ${decodeTimeoutMs} ms`)),
+      decodeTimeoutMs,
+    );
+    image.src = src;
+    void image.decode().then(
+      () => {
+        window.clearTimeout(timeout);
+        resolve();
+      },
+      () => {
+        window.clearTimeout(timeout);
+        reject(new Error(`Photo ${id} could not be decoded`));
+      },
+    );
+  })));
+}
 
 function createFallbackManifest(jobId: string): RenderManifest {
   const spec = createDefaultRenderSpecV2();
@@ -174,10 +205,15 @@ export function RenderHarnessPage() {
   useEffect(() => {
     const readyPromise = (async () => {
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
-      if (canvasControllerRef.current) {
-        await canvasControllerRef.current.waitForReady();
-      }
+      await Promise.all([
+        canvasControllerRef.current?.waitForReady(),
+        manifest.spec.show_photos && !window.__TRIP_RENDER_FRAME_COUNT_ONLY__
+          ? waitForRenderPhotos(matchedPhotos)
+          : undefined,
+      ]);
     })();
+    // The worker may attach to the promise after an image has already failed.
+    void readyPromise.catch(() => {});
 
     window.__TRIP_RENDERER__ = {
       ready: readyPromise,
@@ -208,6 +244,8 @@ export function RenderHarnessPage() {
     };
   }, [
     totalFrames,
+    matchedPhotos,
+    manifest.spec.show_photos,
     manifest.spec.camera_mode,
     manifest.spec.camera_preset,
     manifest.spec.camera_keyframes?.length,

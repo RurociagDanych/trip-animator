@@ -342,7 +342,8 @@ describe("ActivityLibraryView", () => {
     await waitFor(() => expect(list).toHaveBeenLastCalledWith(expect.objectContaining({ area: "-2,48,3,52", name: "ridge", offset: 0 }), expect.anything()));
 
     map.layerHandlers["activity-routes-line"]!({ features: [{ properties: { id: "1" } }] });
-    await screen.findByRole("dialog", { name: "Activity details" });
+    const dialog = await screen.findByRole("dialog", { name: "Activity details" });
+    expect(await within(dialog).findByRole("heading", { name: "Map Route" })).toBeInTheDocument();
     expect(get).toHaveBeenCalledWith("1", expect.anything());
     expect(screen.getByRole("button", { name: "Map Route" })).toHaveAttribute("aria-pressed", "true");
     expect(map.setPaintProperty).toHaveBeenCalledWith("activity-routes-line", "line-width", expect.any(Array));

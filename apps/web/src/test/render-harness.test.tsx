@@ -9,8 +9,10 @@ import { createAppRouter } from "../router";
 describe("Deterministic Render Harness (/render/$jobId)", () => {
   afterEach(() => {
     delete window.__TRIP_RENDER_MANIFEST__;
+    delete window.__TRIP_RENDER_FRAME_COUNT_ONLY__;
     delete window.__TRIP_RENDERER__;
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("reads window.__TRIP_RENDER_MANIFEST__, renders exact dimensions, and advances frames via window.__TRIP_RENDERER__", async () => {
@@ -434,7 +436,6 @@ describe("Deterministic Render Harness (/render/$jobId)", () => {
       const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
       render(<App router={router} queryClient={queryClient} />);
       await screen.findByTestId("render-harness-root");
-      await window.__TRIP_RENDERER__!.ready;
       return window.__TRIP_RENDERER__!;
     }
 
@@ -444,11 +445,33 @@ describe("Deterministic Render Harness (/render/$jobId)", () => {
       ["grouped photos", [0.5, 0.52], 153],
     ])("reports the web film frame count for %s", async (_name, progresses, frames) => {
       const renderer = await mountHarness(buildManifest("job-film-count", progresses));
+      await renderer.ready;
       expect(renderer.getFrameCount()).toBe(frames);
+    });
+
+    it.each([
+      { frameCountOnly: false, jobId: "job-broken-photo" },
+      { frameCountOnly: true, jobId: "job-probe-without-photo-bytes" },
+    ])("handles unavailable photo bytes with frameCountOnly=$frameCountOnly", async ({ frameCountOnly, jobId }) => {
+      const decode = vi.fn().mockRejectedValue(new Error("Image request failed"));
+      vi.stubGlobal("Image", class {
+        decode() { return decode(); }
+      });
+      window.__TRIP_RENDER_FRAME_COUNT_ONLY__ = frameCountOnly;
+      const renderer = await mountHarness(buildManifest(jobId, [0.5]));
+      if (frameCountOnly) {
+        await renderer.ready;
+        expect(renderer.getFrameCount()).toBe(130);
+        expect(decode).not.toHaveBeenCalled();
+      } else {
+        await expect(renderer.ready).rejects.toThrow("Photo photo-0 could not be decoded");
+        expect(decode).toHaveBeenCalledOnce();
+      }
     });
 
     it("shows both photos of a group while crossfading between them", async () => {
       const renderer = await mountHarness(buildManifest("job-film-fade", [0.5, 0.52]));
+      await renderer.ready;
       await act(async () => {
         await renderer.setFrame(76);
       });

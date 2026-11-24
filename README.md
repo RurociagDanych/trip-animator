@@ -167,7 +167,7 @@ All three modes rendered the same project sample: 4 consecutive route stages and
 | Mesa Lavapipe (default CPU renderer) | 85.54 s |
 | Intel UHD 620 (hardware Vulkan) | 20.67 s |
 
-The WebGL2 backend was verified for each mode. Every export decoded successfully as a 21-second H.264 clip (315 frames, 720 × 900, 15 fps), loaded all 11 photos, and recorded 16 tile-cache hits with no misses. Wall time includes rendering and FFmpeg encoding but excludes Chromium startup. GPU mode accelerates WebGL, not encoding. These are single-run results for this sample, not averages or estimates for the full project. Set `WORKER_CPU_RENDERER=swiftshader` to use the previous CPU renderer.
+The WebGL2 backend was verified for each mode. Every export decoded successfully as a 21-second H.264 clip (315 frames, 720 × 900, 15 fps) and recorded 16 tile-cache hits with no misses. All 11 photos were visible in sampled frames from each clip. The benchmark supplied photo bytes from a local fixture, so it did not exercise production photo storage. Wall time includes rendering and FFmpeg encoding but excludes Chromium startup. GPU mode accelerates WebGL, not encoding. These are single-run results for this sample, not averages or estimates for the full project. Set `WORKER_CPU_RENDERER=swiftshader` to use the previous CPU renderer.
 
 ## Deployment
 

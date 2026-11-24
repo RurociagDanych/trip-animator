@@ -66,6 +66,7 @@ import {
   type ActivePhotoDisplay,
   type MatchedPhoto,
 } from "../../lib/geo/photos";
+import { installSettlementLabels, loadSettlementLabels, type SettlementLabels } from "../../lib/geo/settlement-labels";
 import {
   computeAdaptiveFollowCamera,
   evaluateTimeline,
@@ -731,6 +732,7 @@ export function TripStageCanvas({
   const overlayRef = useRef<MapboxOverlay | null>(null);
   const loadedStyleRef = useRef<string | null>(null);
   const mapReadyPromiseRef = useRef<Promise<void>>(Promise.resolve());
+  const settlementLabelsReadyRef = useRef<Promise<void>>(Promise.resolve());
   const fitAppliedBoundsRef = useRef<string | null>(null);
   const fitCameraRef = useRef<FitCameraSnapshot | null>(null);
   const fitFocusAppliedRef = useRef(false);
@@ -1409,6 +1411,37 @@ export function TripStageCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [webglAvailable, renderMode]);
 
+  useLayoutEffect(() => {
+    const map = mapRef.current;
+    if (!map) {
+      settlementLabelsReadyRef.current = Promise.resolve();
+      return;
+    }
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 5000);
+    let labels: SettlementLabels | undefined;
+    let uninstall: (() => void) | undefined;
+    const install = () => {
+      if (labels) uninstall = installSettlementLabels(map, labels) ?? uninstall;
+    };
+    map.on("style.load", install);
+    settlementLabelsReadyRef.current = loadSettlementLabels(stages, controller.signal)
+      .then((loaded) => {
+        if (controller.signal.aborted) return;
+        labels = loaded;
+        install();
+      })
+      // Basemap labels remain available when the extra detail tiles cannot be fetched.
+      .catch(() => {})
+      .finally(() => window.clearTimeout(timeout));
+    return () => {
+      controller.abort();
+      window.clearTimeout(timeout);
+      map.off("style.load", install);
+      if (mapRef.current === map) uninstall?.();
+    };
+  }, [stages, webglAvailable, renderMode]);
+
   useEffect(() => {
     const map = mapRef.current;
     if (!map || loadedStyleRef.current === spec.map_style) {
@@ -1720,6 +1753,7 @@ export function TripStageCanvas({
       redrawForLocalExport: async (signal, initial = false) => {
         signal.throwIfAborted();
         const photosReady = initial ? preloadAndDecodeImages(photoUrlsKey) : undefined;
+        if (initial) await settlementLabelsReadyRef.current;
         const map = mapRef.current;
         // Match the existing initial and per-frame tile budgets without relying on rAF.
         const deadline = performance.now() + (initial ? 8000 : 1200);
@@ -1736,7 +1770,7 @@ export function TripStageCanvas({
       waitForReady: async () => {
         await Promise.all([
           mapReadyPromiseRef.current,
-          preloadAndDecodeImages(photoUrlsKey),
+          settlementLabelsReadyRef.current,
         ]);
         await awaitNextAnimationFrames(2);
       },
