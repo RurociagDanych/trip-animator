@@ -34,7 +34,7 @@ Repository guide for AI coding agents working on Trip Animator: a GPX/TCX and St
 - Public modules, classes and functions have docstrings. Comments explain why, not what. Tool directives such as # noqa are allowed.
 - Formatters and linters: Ruff (`uv run ruff check` / `uv run ruff format --check` on `apps packages airflow infra/scripts`), mypy (`apps/api/src apps/worker/src packages/telemetry/src airflow/src`), ESLint and `tsc --noEmit` for `apps/web`.
 - Commit style: Conventional Commits (`feat:`, `fix:`, `docs:`, `ci:`, optional scope such as `feat(web):`).
-- Branch naming: short prefixed branches such as `feat/...`, `fix/...`, `docs/...`, `chore/...`.
+- PR branches: use `feat/`, `fix/`, `docs/`, or `chore/` followed by a short lowercase kebab-case description (for example, `fix/preview-aspect-matches-resolution`). Branch from current `origin/main` and open the PR against `main` unless the task specifies another base.
 - Test locations: `apps/api/tests`, `apps/worker/tests`, `packages/telemetry/tests`, `airflow/tests`, `scripts/tests`, `infra/scripts/tests`, `dbt/tests`, and Vitest tests in `apps/web/src/test`.
 
 ### Code invariants

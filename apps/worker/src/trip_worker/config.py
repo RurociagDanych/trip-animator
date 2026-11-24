@@ -40,6 +40,7 @@ class WorkerSettings(BaseSettings):
 
     worker_concurrency: int = Field(default=1, ge=1, le=32, alias="WORKER_CONCURRENCY")
     worker_gpu_enabled: bool = False
+    worker_cpu_renderer: Literal["lavapipe", "swiftshader"] = "lavapipe"
     worker_browser_max_renders: int = Field(default=50, ge=1, le=5000)
     tile_cache_dir: str | None = None
     tile_cache_max_bytes: int = Field(default=512 * 1024 * 1024, ge=0)

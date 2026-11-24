@@ -99,7 +99,9 @@ For production (`APP_ENV=production`), ensure `.env` overrides all secrets (`POS
 
 ### Worker GPU rendering
 
-The worker defaults to software WebGL (SwiftShader). `WORKER_GPU_ENABLED=true` enables hardware WebGL2 through Chromium ANGLE/Vulkan on a compatible Linux host. It does not change local browser exports or FFmpeg encoding (`libx264` on the CPU). If Chromium cannot use hardware WebGL2, the worker logs an error when it tries to launch Chromium instead of silently using a software renderer.
+The worker defaults to software WebGL2 using Mesa Lavapipe (`WORKER_CPU_RENDERER=lavapipe`). The worker image includes the driver. For a native Linux worker, install `mesa-vulkan-drivers` on Debian or Ubuntu, or the equivalent Mesa Vulkan package providing a Lavapipe ICD under `/usr/share/vulkan/icd.d`. To use SwiftShader instead, set `WORKER_CPU_RENDERER=swiftshader` in `.env` and restart the native worker or recreate the Compose worker. Look for `Worker CPU renderer:` in the logs.
+
+`WORKER_GPU_ENABLED=true` takes precedence over `WORKER_CPU_RENDERER` and enables hardware WebGL2 through Chromium ANGLE/Vulkan on a compatible Linux host. These settings do not change local browser exports or FFmpeg encoding (`libx264` on the CPU). If Chromium cannot use the requested renderer, the worker reports an error instead of silently switching backends.
 
 For a native worker, set `WORKER_GPU_ENABLED=true` in the repository root `.env` and run the worker as a user with access to the host's Vulkan render device and drivers. For Docker Compose, use a Linux host with a Mesa Vulkan-capable DRM render node, such as a compatible Intel or AMD GPU. Set these values in `.env`:
 
