@@ -85,6 +85,8 @@ export type PalettePreset = "alpine-dawn" | "topo-emerald" | "stage-by-stage";
 export type ClimbCategory = "HC" | "Cat 1" | "Cat 2" | "Cat 3" | "Cat 4";
 export type StageFocusMode = "auto" | "close" | "street" | "custom";
 
+export type SettlementLabelMode = "uniform" | "follow_zoom";
+
 export interface StageCameraOverride {
   focus_mode: StageFocusMode;
   target_zoom: number | null;
@@ -262,6 +264,8 @@ export interface RenderSpecV2 {
   stage_colors: Record<string, string>;
   stage_transitions: Record<string, TransitionIcon>;
   stage_camera_overrides: Record<string, StageCameraOverride>;
+  settlement_label_mode: SettlementLabelMode;
+  stage_settlement_label_modes: Record<string, SettlementLabelMode>;
   statistics_panel: StatisticsPanelConfig;
   is_preview: boolean;
   color_by: ColorByMode;
@@ -986,6 +990,8 @@ export function createDefaultRenderSpecV2(): RenderSpecV2 {
     stage_colors: {},
     stage_transitions: {},
     stage_camera_overrides: {},
+    settlement_label_mode: "uniform",
+    stage_settlement_label_modes: {},
     statistics_panel: createDefaultStatisticsPanelConfig(),
     is_preview: false,
     color_by: "stage",
@@ -1266,6 +1272,12 @@ export function normalizeRenderSpecV2(raw?: Partial<RenderSpecV2> | null): Rende
     stage_colors: raw.stage_colors ? { ...raw.stage_colors } : {},
     stage_transitions: raw.stage_transitions ? { ...raw.stage_transitions } : {},
     stage_camera_overrides: stageCameraOverrides,
+    settlement_label_mode: raw.settlement_label_mode === "follow_zoom" ? "follow_zoom" : "uniform",
+    stage_settlement_label_modes: Object.fromEntries(
+      Object.entries(raw.stage_settlement_label_modes ?? {}).filter(
+        ([, mode]) => mode === "uniform" || mode === "follow_zoom",
+      ),
+    ),
     statistics_panel: {
       ...panelDefaults,
       ...(rawPanel ?? {}),

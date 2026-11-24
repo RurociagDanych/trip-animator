@@ -31,6 +31,7 @@ import type {
   PalettePreset,
   ProjectPhotoOut,
   RenderSpecV2,
+  SettlementLabelMode,
   StageCameraOverride,
   StageFocusMode,
   StageOut,
@@ -144,6 +145,7 @@ export interface StageSidebarProps {
   onStageColorChange: (stageId: string, colorHex: string) => void;
   onStageTransitionChange: (stageId: string, transition: TransitionIcon) => void;
   onStageCameraOverrideChange?: (stageId: string, override: StageCameraOverride | null) => void;
+  onStageSettlementLabelModeChange?: (stageId: string, mode: SettlementLabelMode | null) => void;
   onOpenStravaModal: () => void;
 }
 
@@ -183,6 +185,7 @@ export function StageSidebar({
   onStageColorChange,
   onStageTransitionChange,
   onStageCameraOverrideChange,
+  onStageSettlementLabelModeChange,
   onOpenStravaModal,
 }: StageSidebarProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -1126,6 +1129,7 @@ export function StageSidebar({
                 onStageColorChange={onStageColorChange}
                 onStageTransitionChange={onStageTransitionChange}
                 onStageCameraOverrideChange={onStageCameraOverrideChange}
+                onStageSettlementLabelModeChange={onStageSettlementLabelModeChange}
               />
             </div>
           ) : null}
@@ -1166,6 +1170,7 @@ interface StageEditorFormProps {
   onStageColorChange: (stageId: string, colorHex: string) => void;
   onStageTransitionChange: (stageId: string, transition: TransitionIcon) => void;
   onStageCameraOverrideChange?: (stageId: string, override: StageCameraOverride | null) => void;
+  onStageSettlementLabelModeChange?: (stageId: string, mode: SettlementLabelMode | null) => void;
 }
 
 function StageEditorForm({
@@ -1181,6 +1186,7 @@ function StageEditorForm({
   onStageColorChange,
   onStageTransitionChange,
   onStageCameraOverrideChange,
+  onStageSettlementLabelModeChange,
 }: StageEditorFormProps) {
   const [draftName, setDraftName] = useState(stage.name);
   const [draftDay, setDraftDay] = useState(String(stage.day_index));
@@ -1450,6 +1456,24 @@ function StageEditorForm({
           />
         </div>
       </div>
+
+      {onStageSettlementLabelModeChange && (
+        <label className="flex items-center justify-between gap-2 text-[11px] text-ink-muted">
+          Stage place labels
+          <select
+            className="rounded border border-border bg-elevated px-2 py-1 text-ink"
+            value={spec.stage_settlement_label_modes[stage.id] ?? "inherit"}
+            onChange={(e) => {
+              const mode = e.currentTarget.value;
+              onStageSettlementLabelModeChange(stage.id, mode === "uniform" || mode === "follow_zoom" ? mode : null);
+            }}
+          >
+            <option value="inherit">Use trip setting</option>
+            <option value="uniform">Uniform across zoom levels</option>
+            <option value="follow_zoom">Follow map zoom</option>
+          </select>
+        </label>
+      )}
 
       <div
         data-testid="stage-camera-focus-section"

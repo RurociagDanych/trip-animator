@@ -66,7 +66,7 @@ import {
   type ActivePhotoDisplay,
   type MatchedPhoto,
 } from "../../lib/geo/photos";
-import { installSettlementLabels, loadSettlementLabels, type SettlementLabels } from "../../lib/geo/settlement-labels";
+import { installSettlementLabels, loadSettlementLabels, resolveSettlementLabelMode, type SettlementLabels } from "../../lib/geo/settlement-labels";
 import {
   computeAdaptiveFollowCamera,
   evaluateTimeline,
@@ -733,6 +733,7 @@ export function TripStageCanvas({
   const loadedStyleRef = useRef<string | null>(null);
   const mapReadyPromiseRef = useRef<Promise<void>>(Promise.resolve());
   const settlementLabelsReadyRef = useRef<Promise<void>>(Promise.resolve());
+  const setUniformLabelsRef = useRef<((enabled: boolean) => void) | null>(null);
   const fitAppliedBoundsRef = useRef<string | null>(null);
   const fitCameraRef = useRef<FitCameraSnapshot | null>(null);
   const fitFocusAppliedRef = useRef(false);
@@ -823,6 +824,9 @@ export function TripStageCanvas({
     () => evaluateTimeline(stages, spec, progressRatio, { durationS: journeyDurationS, isPreview }),
     [stages, spec, progressRatio, journeyDurationS, isPreview],
   );
+  const uniformLabels = resolveSettlementLabelMode(spec, evaluated.activeStage?.id) === "uniform";
+  const needsUniformLabels = spec.settlement_label_mode === "uniform"
+    || stages.some(({ id }) => spec.stage_settlement_label_modes[id] === "uniform");
 
   const mappedClimbs = useMemo(
     () => mapClimbsToTimelineProgress(climbs, stages, spec, evaluated.progressRatio),
@@ -1413,7 +1417,7 @@ export function TripStageCanvas({
 
   useLayoutEffect(() => {
     const map = mapRef.current;
-    if (!map) {
+    if (!map || !needsUniformLabels) {
       settlementLabelsReadyRef.current = Promise.resolve();
       return;
     }
@@ -1421,15 +1425,30 @@ export function TripStageCanvas({
     const timeout = window.setTimeout(() => controller.abort(), 5000);
     let labels: SettlementLabels | undefined;
     let uninstall: (() => void) | undefined;
-    const install = () => {
-      if (labels) uninstall = installSettlementLabels(map, labels) ?? uninstall;
+    let enabled = false;
+    const sync = () => {
+      if (!enabled) {
+        uninstall?.();
+        uninstall = undefined;
+      } else if (labels && !uninstall) {
+        uninstall = installSettlementLabels(map, labels);
+      }
     };
-    map.on("style.load", install);
+    const onStyleLoad = () => {
+      // Full style reload replaces the overlay and restores the new style's own filters.
+      uninstall = undefined;
+      sync();
+    };
+    setUniformLabelsRef.current = (next) => {
+      enabled = next;
+      sync();
+    };
+    map.on("style.load", onStyleLoad);
     settlementLabelsReadyRef.current = loadSettlementLabels(stages, controller.signal)
       .then((loaded) => {
         if (controller.signal.aborted) return;
         labels = loaded;
-        install();
+        sync();
       })
       // Basemap labels remain available when the extra detail tiles cannot be fetched.
       .catch(() => {})
@@ -1437,10 +1456,15 @@ export function TripStageCanvas({
     return () => {
       controller.abort();
       window.clearTimeout(timeout);
-      map.off("style.load", install);
+      setUniformLabelsRef.current = null;
+      map.off("style.load", onStyleLoad);
       if (mapRef.current === map) uninstall?.();
     };
-  }, [stages, webglAvailable, renderMode]);
+  }, [stages, webglAvailable, renderMode, needsUniformLabels]);
+
+  useLayoutEffect(() => {
+    setUniformLabelsRef.current?.(uniformLabels);
+  }, [uniformLabels, stages, webglAvailable, renderMode, needsUniformLabels]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -1449,6 +1473,7 @@ export function TripStageCanvas({
     }
     loadedStyleRef.current = spec.map_style;
     map.setStyle(resolveMapStyleUrl(spec.map_style), {
+      diff: false,
       transformStyle: (_prev, next) => sanitizeMapStyle(next, spec.map_style),
     });
   }, [spec.map_style]);

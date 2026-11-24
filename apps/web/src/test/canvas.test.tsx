@@ -30,7 +30,8 @@ const mockState = vi.hoisted(() => ({
   emit: null as ((event: string) => void) | null,
 }));
 
-vi.mock("../lib/geo/settlement-labels", () => ({
+vi.mock(import("../lib/geo/settlement-labels"), async (importOriginal) => ({
+  ...await importOriginal(),
   loadSettlementLabels: async () => ({ type: "FeatureCollection", features: [] }),
   installSettlementLabels: () => undefined,
 }));

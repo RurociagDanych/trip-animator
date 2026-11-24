@@ -825,6 +825,12 @@ export function EditorPage() {
           onStageColorChange={setStageColor}
           onStageTransitionChange={setStageTransition}
           onStageCameraOverrideChange={setStageCameraOverride}
+          onStageSettlementLabelModeChange={(stageId, mode) => {
+            const stageModes = { ...useEditorStore.getState().spec.stage_settlement_label_modes };
+            if (mode === null) delete stageModes[stageId];
+            else stageModes[stageId] = mode;
+            updateSpec({ stage_settlement_label_modes: stageModes });
+          }}
           onOpenStravaModal={() => {
             void sessionQuery.refetch();
             setStravaModalOpen(true);

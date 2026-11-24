@@ -838,11 +838,13 @@ def validate_stage_maps_against_project(spec: RenderSpecV2, valid_stage_ids: set
     bad_colors = set(spec.stage_colors.keys()) - valid_stage_ids
     bad_transitions = set(spec.stage_transitions.keys()) - valid_stage_ids
     bad_overrides = set(spec.stage_camera_overrides.keys()) - valid_stage_ids
-    if bad_colors or bad_transitions or bad_overrides:
+    bad_label_modes = set(spec.stage_settlement_label_modes) - valid_stage_ids
+    if bad_colors or bad_transitions or bad_overrides or bad_label_modes:
         raise HTTPException(
             status_code=422,
             detail=(
-                "stage_colors, stage_transitions, or stage_camera_overrides "
+                "stage_colors, stage_transitions, stage_camera_overrides, "
+                "or stage_settlement_label_modes "
                 "contain stage IDs not in this project"
             ),
         )

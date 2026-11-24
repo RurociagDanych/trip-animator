@@ -2,7 +2,8 @@
 import type { Map as MapLibreMap, SymbolLayerSpecification } from "maplibre-gl";
 import Pbf from "pbf";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { installSettlementLabels, loadSettlementLabels } from "../lib/geo/settlement-labels";
+import { normalizeRenderSpecV2 } from "../lib/api/types";
+import { installSettlementLabels, loadSettlementLabels, resolveSettlementLabelMode } from "../lib/geo/settlement-labels";
 
 const tileUrl = "https://tiles.openfreemap.org/planet/test/{z}/{x}/{y}.pbf";
 
@@ -29,6 +30,24 @@ function placeTile(): ArrayBuffer {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("stable route settlement labels", () => {
+  it("preserves uniform labels for old trips and resolves only the active stage's override", () => {
+    expect(resolveSettlementLabelMode(normalizeRenderSpecV2({}), "city")).toBe("uniform");
+    const spec = normalizeRenderSpecV2({
+      settlement_label_mode: "uniform",
+      stage_settlement_label_modes: { city: "follow_zoom" },
+    });
+    expect(resolveSettlementLabelMode(spec, "departure")).toBe("uniform");
+    expect(resolveSettlementLabelMode(spec, "city")).toBe("follow_zoom");
+    expect(resolveSettlementLabelMode(spec, "arrival")).toBe("uniform");
+    expect(resolveSettlementLabelMode(spec, undefined)).toBe("uniform");
+    const zoomSpec = normalizeRenderSpecV2({
+      settlement_label_mode: "follow_zoom",
+      stage_settlement_label_modes: { city: "uniform" },
+    });
+    expect(resolveSettlementLabelMode(zoomSpec, "departure")).toBe("follow_zoom");
+    expect(resolveSettlementLabelMode(zoomSpec, "city")).toBe("uniform");
+  });
+
   it("loads each detailed route tile once and uses a zoom-independent label layer", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(Response.json({ tiles: [tileUrl] }))
@@ -50,7 +69,7 @@ describe("stable route settlement labels", () => {
     };
     let overlay: SymbolLayerSpecification | undefined;
     const map = {
-      getStyle: () => ({ layers: [nativeLayer] }),
+      getStyle: () => ({ layers: [nativeLayer], glyphs: "https://example.com/{fontstack}/{range}.pbf" }),
       getLayer: (id: string) => id === nativeLayer.id ? nativeLayer : overlay,
       setFilter: vi.fn(), addSource: vi.fn(), removeSource: vi.fn(), removeLayer: vi.fn(),
       addLayer: vi.fn((layer: SymbolLayerSpecification) => { overlay = layer; }),
@@ -62,7 +81,10 @@ describe("stable route settlement labels", () => {
     expect(map.addSource).toHaveBeenCalledWith("trip-settlement-labels", { type: "geojson", data: labels });
     expect(map.setFilter.mock.calls[0]?.[1]).not.toEqual(nativeLayer.filter);
     expect(installSettlementLabels(map as unknown as MapLibreMap, labels)).toBeUndefined();
+    expect(uninstall).toBeTypeOf("function");
     uninstall?.();
+    expect(map.removeLayer).toHaveBeenCalledWith("trip-settlement-labels");
+    expect(map.removeSource).toHaveBeenCalledWith("trip-settlement-labels");
     expect(map.setFilter).toHaveBeenLastCalledWith(nativeLayer.id, nativeLayer.filter);
   });
 
