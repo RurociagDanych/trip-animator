@@ -733,6 +733,7 @@ export function TripStageCanvas({
   const loadedStyleRef = useRef<string | null>(null);
   const mapReadyPromiseRef = useRef<Promise<void>>(Promise.resolve());
   const settlementLabelsReadyRef = useRef<Promise<void>>(Promise.resolve());
+  const settlementLayersChangedRef = useRef(false);
   const setUniformLabelsRef = useRef<((enabled: boolean) => void) | null>(null);
   const fitAppliedBoundsRef = useRef<string | null>(null);
   const fitCameraRef = useRef<FitCameraSnapshot | null>(null);
@@ -1427,11 +1428,13 @@ export function TripStageCanvas({
     let uninstall: (() => void) | undefined;
     let enabled = false;
     const sync = () => {
-      if (!enabled) {
-        uninstall?.();
+      if (!enabled && uninstall) {
+        uninstall();
         uninstall = undefined;
-      } else if (labels && !uninstall) {
+        settlementLayersChangedRef.current = true;
+      } else if (enabled && labels && !uninstall) {
         uninstall = installSettlementLabels(map, labels);
+        if (uninstall) settlementLayersChangedRef.current = true;
       }
     };
     const onStyleLoad = () => {
@@ -1820,6 +1823,8 @@ export function TripStageCanvas({
         });
         map.triggerRepaint();
         await rendered;
+        const settlementLayersChanged = settlementLayersChangedRef.current;
+        settlementLayersChangedRef.current = false;
         const tilesCached =
           typeof map.loaded === "function" &&
           typeof map.areTilesLoaded === "function" &&
@@ -1830,6 +1835,7 @@ export function TripStageCanvas({
         }
         if (
           cameraChanged ||
+          settlementLayersChanged ||
           spec.camera_mode === "follow-marker" ||
           spec.camera_preset !== "flat" ||
           (spec.camera_keyframes?.length ?? 0) > 0 ||
