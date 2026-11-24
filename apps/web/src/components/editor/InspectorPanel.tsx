@@ -252,7 +252,7 @@ export function InspectorPanel({
                 <option value="follow_zoom">Follow map zoom</option>
               </select>
               <span className="block text-ink-muted">
-                Uniform shows selected settlements along the route on supported vector maps. Other map labels follow zoom.
+                Uniform keeps town and village labels consistent across zoom changes on supported vector maps.
               </span>
             </label>
 

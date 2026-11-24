@@ -66,7 +66,12 @@ import {
   type ActivePhotoDisplay,
   type MatchedPhoto,
 } from "../../lib/geo/photos";
-import { installSettlementLabels, loadSettlementLabels, resolveSettlementLabelMode, type SettlementLabels } from "../../lib/geo/settlement-labels";
+import {
+  createSettlementLabelController,
+  pickSettlementDetailZoom,
+  resolveSettlementLabelMode,
+  type SettlementLabelController,
+} from "../../lib/geo/settlement-labels";
 import {
   computeAdaptiveFollowCamera,
   evaluateTimeline,
@@ -732,9 +737,8 @@ export function TripStageCanvas({
   const overlayRef = useRef<MapboxOverlay | null>(null);
   const loadedStyleRef = useRef<string | null>(null);
   const mapReadyPromiseRef = useRef<Promise<void>>(Promise.resolve());
-  const settlementLabelsReadyRef = useRef<Promise<void>>(Promise.resolve());
+  const settlementControllerRef = useRef<SettlementLabelController | null>(null);
   const settlementLayersChangedRef = useRef(false);
-  const setUniformLabelsRef = useRef<((enabled: boolean) => void) | null>(null);
   const fitAppliedBoundsRef = useRef<string | null>(null);
   const fitCameraRef = useRef<FitCameraSnapshot | null>(null);
   const fitFocusAppliedRef = useRef(false);
@@ -826,8 +830,58 @@ export function TripStageCanvas({
     [stages, spec, progressRatio, journeyDurationS, isPreview],
   );
   const uniformLabels = resolveSettlementLabelMode(spec, evaluated.activeStage?.id) === "uniform";
-  const needsUniformLabels = spec.settlement_label_mode === "uniform"
-    || stages.some(({ id }) => spec.stage_settlement_label_modes[id] === "uniform");
+  const needsUniformLabels =
+    spec.settlement_label_mode === "uniform" ||
+    stages.some(({ id }) => spec.stage_settlement_label_modes[id] === "uniform");
+  const settlementDetailZoom = useMemo(() => {
+    if (!needsUniformLabels || stages.length === 0) {
+      return pickSettlementDetailZoom();
+    }
+    if (spec.camera_mode === "follow-marker") {
+      const zooms = [0.1, 0.3, 0.5, 0.7, 0.9]
+        .map(
+          (p) =>
+            computeAdaptiveFollowCamera(stages, spec, p, {
+              viewportWidth: viewportSize.width,
+              viewportHeight: viewportSize.height,
+              durationS: journeyDurationS,
+              travelDurationS,
+              isPreview,
+            }).zoom,
+        )
+        .filter(Number.isFinite)
+        .sort((a, b) => a - b);
+      const medianZoom = zooms[Math.floor(zooms.length / 2)];
+      return pickSettlementDetailZoom(medianZoom);
+    }
+    let minLon = Infinity;
+    let maxLon = -Infinity;
+    let minLat = Infinity;
+    let maxLat = -Infinity;
+    for (const stage of stages) {
+      for (const point of stage.points) {
+        if (!Number.isFinite(point.lon) || !Number.isFinite(point.lat)) continue;
+        if (point.lon < minLon) minLon = point.lon;
+        if (point.lon > maxLon) maxLon = point.lon;
+        if (point.lat < minLat) minLat = point.lat;
+        if (point.lat > maxLat) maxLat = point.lat;
+      }
+    }
+    if (!Number.isFinite(minLon)) {
+      return pickSettlementDetailZoom();
+    }
+    const maxSpan = Math.max(maxLon - minLon, maxLat - minLat, 0.005);
+    return pickSettlementDetailZoom(Math.log2(360 / maxSpan) - 1);
+  }, [
+    needsUniformLabels,
+    stages,
+    spec,
+    viewportSize.width,
+    viewportSize.height,
+    journeyDurationS,
+    travelDurationS,
+    isPreview,
+  ]);
 
   const mappedClimbs = useMemo(
     () => mapClimbsToTimelineProgress(climbs, stages, spec, evaluated.progressRatio),
@@ -1416,59 +1470,6 @@ export function TripStageCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [webglAvailable, renderMode]);
 
-  useLayoutEffect(() => {
-    const map = mapRef.current;
-    if (!map || !needsUniformLabels) {
-      settlementLabelsReadyRef.current = Promise.resolve();
-      return;
-    }
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 5000);
-    let labels: SettlementLabels | undefined;
-    let uninstall: (() => void) | undefined;
-    let enabled = false;
-    const sync = () => {
-      if (!enabled && uninstall) {
-        uninstall();
-        uninstall = undefined;
-        settlementLayersChangedRef.current = true;
-      } else if (enabled && labels && !uninstall) {
-        uninstall = installSettlementLabels(map, labels);
-        if (uninstall) settlementLayersChangedRef.current = true;
-      }
-    };
-    const onStyleLoad = () => {
-      // Full style reload replaces the overlay and restores the new style's own filters.
-      uninstall = undefined;
-      sync();
-    };
-    setUniformLabelsRef.current = (next) => {
-      enabled = next;
-      sync();
-    };
-    map.on("style.load", onStyleLoad);
-    settlementLabelsReadyRef.current = loadSettlementLabels(stages, controller.signal)
-      .then((loaded) => {
-        if (controller.signal.aborted) return;
-        labels = loaded;
-        sync();
-      })
-      // Basemap labels remain available when the extra detail tiles cannot be fetched.
-      .catch(() => {})
-      .finally(() => window.clearTimeout(timeout));
-    return () => {
-      controller.abort();
-      window.clearTimeout(timeout);
-      setUniformLabelsRef.current = null;
-      map.off("style.load", onStyleLoad);
-      if (mapRef.current === map) uninstall?.();
-    };
-  }, [stages, webglAvailable, renderMode, needsUniformLabels]);
-
-  useLayoutEffect(() => {
-    setUniformLabelsRef.current?.(uniformLabels);
-  }, [uniformLabels, stages, webglAvailable, renderMode, needsUniformLabels]);
-
   useEffect(() => {
     const map = mapRef.current;
     if (!map || loadedStyleRef.current === spec.map_style) {
@@ -1720,6 +1721,7 @@ export function TripStageCanvas({
       suppressMoveEventRef.current = false;
     }
 
+    settlementControllerRef.current?.syncViewport();
     map.triggerRepaint();
   }, [
     boundsKey,
@@ -1750,6 +1752,45 @@ export function TripStageCanvas({
     viewportSize.height,
   ]);
 
+  useLayoutEffect(() => {
+    const map = mapRef.current;
+    if (!map || !needsUniformLabels) {
+      settlementControllerRef.current = null;
+      return;
+    }
+    const controller = createSettlementLabelController({
+      map,
+      stages,
+      detailZoom: settlementDetailZoom,
+      onLayersChanged: () => {
+        settlementLayersChangedRef.current = true;
+      },
+    });
+    settlementControllerRef.current = controller;
+    const onStyleLoad = () => {
+      controller.handleStyleLoad();
+    };
+    const onMoveEnd = () => {
+      void controller.syncViewport();
+    };
+    map.on("style.load", onStyleLoad);
+    map.on("moveend", onMoveEnd);
+    return () => {
+      map.off("style.load", onStyleLoad);
+      map.off("moveend", onMoveEnd);
+      if (settlementControllerRef.current === controller) {
+        settlementControllerRef.current = null;
+      }
+      if (mapRef.current === map) {
+        controller.dispose();
+      }
+    };
+  }, [stages, webglAvailable, renderMode, needsUniformLabels, settlementDetailZoom]);
+
+  useLayoutEffect(() => {
+    settlementControllerRef.current?.setEnabled(uniformLabels);
+  }, [uniformLabels, stages, webglAvailable, renderMode, needsUniformLabels, settlementDetailZoom]);
+
   useEffect(() => {
     const map = mapRef.current;
     const container = mapContainerRef.current;
@@ -1774,20 +1815,18 @@ export function TripStageCanvas({
 
   const hasStageCameraOverrides = Object.keys(spec.stage_camera_overrides ?? {}).length > 0;
 
-  // Expose deterministic settlement controller for window.__TRIP_RENDERER__
   useImperativeHandle(
     controllerRef,
     () => ({
       redrawForLocalExport: async (signal, initial = false) => {
         signal.throwIfAborted();
         const photosReady = initial ? preloadAndDecodeImages(photoUrlsKey) : undefined;
-        if (initial) await settlementLabelsReadyRef.current;
+        await settlementControllerRef.current?.waitForSync(initial ? 5000 : 1200);
+        signal.throwIfAborted();
         const map = mapRef.current;
-        // Match the existing initial and per-frame tile budgets without relying on rAF.
         const deadline = performance.now() + (initial ? 8000 : 1200);
         while (map && mapRef.current === map) {
           signal.throwIfAborted();
-          // MapLibre's scheduled repaints stop in hidden tabs; redraw runs synchronously.
           map.redraw();
           if ((map.loaded() && map.areTilesLoaded()) || performance.now() >= deadline) break;
           await new Promise<void>((resolve) => window.setTimeout(resolve, 32));
@@ -1798,17 +1837,17 @@ export function TripStageCanvas({
       waitForReady: async () => {
         await Promise.all([
           mapReadyPromiseRef.current,
-          settlementLabelsReadyRef.current,
+          settlementControllerRef.current?.waitForSync(5000),
         ]);
         await awaitNextAnimationFrames(2);
       },
       waitForFrameSettle: async (cameraChanged = true) => {
         const map = mapRef.current;
         if (!map) {
-          // Await 1 rAF so useLayoutEffect's jumpTo/fitBounds commits and MapLibre's _render() updates _inViewTiles
           await awaitNextAnimationFrames(1);
           return;
         }
+        await settlementControllerRef.current?.waitForSync(4000);
         await awaitNextAnimationFrames(1);
         const rendered = new Promise<void>((resolve) => {
           const onRender = () => {
