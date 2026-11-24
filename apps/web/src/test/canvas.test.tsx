@@ -31,9 +31,22 @@ const mockState = vi.hoisted(() => ({
 }));
 
 vi.mock(import("../lib/geo/settlement-labels"), async (importOriginal) => ({
-  ...await importOriginal(),
-  loadSettlementLabels: async () => ({ type: "FeatureCollection", features: [] }),
-  installSettlementLabels: () => () => {},
+  ...(await importOriginal()),
+  createSettlementLabelController: (options: { onLayersChanged?: () => void }) => {
+    let enabled = false;
+    return {
+      setEnabled: (next: boolean) => {
+        if (next !== enabled) {
+          enabled = next;
+          options.onLayersChanged?.();
+        }
+      },
+      syncViewport: async () => {},
+      waitForSync: async () => {},
+      handleStyleLoad: () => {},
+      dispose: () => {},
+    };
+  },
 }));
 
 vi.mock("maplibre-gl", () => {
