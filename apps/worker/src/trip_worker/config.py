@@ -52,10 +52,13 @@ class WorkerSettings(BaseSettings):
     lease_heartbeat_interval_seconds: float = Field(default=10.0, gt=0.0, le=600.0)
     max_attempts: int = Field(default=3, ge=1, le=20)
     poll_interval_seconds: float = Field(default=2.0, gt=0.0, le=60.0)
+    retry_backoff_seconds: float = Field(default=5.0, ge=0.0, le=300.0)
     lease_renew_interval_frames: int = Field(default=5, ge=1, le=300)
     output_ttl_hours: int = Field(default=168, ge=1, le=8760)
     frame_format: Literal["png", "jpeg"] = "jpeg"
     render_ready_timeout_ms: int = Field(default=30_000, ge=1000, le=300_000)
+    render_nav_retry_timeout_seconds: float = Field(default=45.0, ge=0.0, le=300.0)
+    render_nav_retry_base_delay_seconds: float = Field(default=1.0, gt=0.0, le=30.0)
     render_frame_timeout_ms: int = Field(default=60_000, ge=500, le=120_000)
     ffmpeg_timeout_seconds: float = Field(default=300.0, gt=0.0, le=3600.0)
     ffprobe_timeout_seconds: float = Field(default=30.0, gt=0.0, le=300.0)

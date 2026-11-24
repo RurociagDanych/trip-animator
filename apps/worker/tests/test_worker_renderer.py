@@ -1147,3 +1147,135 @@ async def test_ssrf_route_handler_logs_hostname_without_userinfo_or_port(
     assert ":8081" not in caplog.text
     assert ":8443" not in caplog.text
     assert "127.0.0.1" in caplog.text
+
+
+async def test_render_retries_transient_navigation_errors_and_gateway_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _sample_manifest(total_frames=2)
+    settings = WorkerSettings(
+        render_base_url="http://caddy",
+        render_nav_retry_timeout_seconds=10.0,
+        render_nav_retry_base_delay_seconds=0.05,
+        lease_renew_interval_frames=1,
+    )
+    sleep_delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_delays.append(delay)
+
+    monkeypatch.setattr("trip_worker.renderer.asyncio.sleep", fake_sleep)
+
+    class FlakyNavPage(FakePage):
+        def __init__(self) -> None:
+            super().__init__(js_frame_count=2)
+            self.attempts = 0
+
+        async def goto(self, url: str, **_kwargs: Any) -> Any:
+            self.visited_urls.append(url)
+            self.attempts += 1
+            if self.attempts == 1:
+                raise RuntimeError(f"Page.goto: net::ERR_NAME_NOT_RESOLVED at {url}")
+            if self.attempts == 2:
+                return type("Resp", (), {"status": 502})()
+            return type("Resp", (), {"status": 200})()
+
+    page = FlakyNavPage()
+    encoder = FakeEncoder()
+    rendered = await render_manifest_with_page(
+        page,  # type: ignore[arg-type]
+        manifest,
+        encoder,  # type: ignore[arg-type]
+        settings,
+        is_cancelled=lambda: False,
+        resolve_dns=False,
+    )
+
+    assert rendered == 2
+    assert len(page.visited_urls) == 3
+    assert len(page.routes) == 1
+    assert len(page.init_scripts) == 1
+    assert len(sleep_delays) == 2
+    assert sleep_delays[0] == pytest.approx(0.05)
+    assert sleep_delays[1] == pytest.approx(0.1)
+    assert encoder.finished is True
+
+
+async def test_render_navigation_retry_stops_on_non_transient_cancel_or_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _sample_manifest(total_frames=2)
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("trip_worker.renderer.asyncio.sleep", fake_sleep)
+
+    class NonTransientNavPage(FakePage):
+        async def goto(self, url: str, **_kwargs: Any) -> Any:
+            self.visited_urls.append(url)
+            raise RuntimeError(f"Page.goto: net::ERR_CERT_AUTHORITY_INVALID at {url}")
+
+    page_non_transient = NonTransientNavPage(js_frame_count=2)
+    with pytest.raises(RuntimeError, match="ERR_CERT_AUTHORITY_INVALID"):
+        await render_manifest_with_page(
+            page_non_transient,  # type: ignore[arg-type]
+            manifest,
+            FakeEncoder(),  # type: ignore[arg-type]
+            WorkerSettings(
+                render_base_url="http://caddy",
+                render_nav_retry_timeout_seconds=10.0,
+                render_nav_retry_base_delay_seconds=0.05,
+            ),
+            is_cancelled=lambda: False,
+            resolve_dns=False,
+        )
+    assert len(page_non_transient.visited_urls) == 1
+
+    cancel_checks = {"count": 0}
+
+    def cancel_after_first_attempt() -> bool:
+        cancel_checks["count"] += 1
+        return cancel_checks["count"] >= 2
+
+    class AlwaysDnsFailPage(FakePage):
+        async def goto(self, url: str, **_kwargs: Any) -> Any:
+            self.visited_urls.append(url)
+            raise RuntimeError(f"Page.goto: net::ERR_NAME_NOT_RESOLVED at {url}")
+
+    page_cancelled = AlwaysDnsFailPage(js_frame_count=2)
+    with pytest.raises(RenderCancelledError):
+        await render_manifest_with_page(
+            page_cancelled,  # type: ignore[arg-type]
+            manifest,
+            FakeEncoder(),  # type: ignore[arg-type]
+            WorkerSettings(
+                render_base_url="http://caddy",
+                render_nav_retry_timeout_seconds=10.0,
+                render_nav_retry_base_delay_seconds=0.05,
+            ),
+            is_cancelled=cancel_after_first_attempt,
+            resolve_dns=False,
+        )
+    assert len(page_cancelled.visited_urls) == 1
+
+    class Always503Page(FakePage):
+        async def goto(self, url: str, **_kwargs: Any) -> Any:
+            self.visited_urls.append(url)
+            return type("Resp", (), {"status": 503})()
+
+    page_503 = Always503Page(js_frame_count=2)
+    with pytest.raises(RenderError, match="HTTP 503"):
+        await render_manifest_with_page(
+            page_503,  # type: ignore[arg-type]
+            manifest,
+            FakeEncoder(),  # type: ignore[arg-type]
+            WorkerSettings(
+                render_base_url="http://caddy",
+                render_nav_retry_timeout_seconds=0.0,
+                render_nav_retry_base_delay_seconds=0.05,
+            ),
+            is_cancelled=lambda: False,
+            resolve_dns=False,
+        )
+    assert len(page_503.visited_urls) == 1

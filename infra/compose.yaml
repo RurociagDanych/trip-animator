@@ -265,7 +265,7 @@ services:
       api:
         condition: service_healthy
       caddy:
-        condition: service_started
+        condition: service_healthy
     shm_size: "1gb"
     read_only: true
     tmpfs:
@@ -329,6 +329,16 @@ services:
         condition: service_healthy
       web:
         condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O /dev/null http://127.0.0.1/nginx-health && wget -q -O /dev/null http://127.0.0.1/health",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
     cap_drop:
       - ALL
     cap_add:
