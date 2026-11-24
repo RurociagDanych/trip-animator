@@ -33,9 +33,10 @@ Repository guide for AI coding agents working on Trip Animator: a GPX/TCX and St
 - Language: English only for identifiers, filenames, test names, log messages, error strings, commit messages and docs.
 - Public modules, classes and functions have docstrings. Comments explain why, not what. Tool directives such as # noqa are allowed.
 - Formatters and linters: Ruff (`uv run ruff check` / `uv run ruff format --check` on `apps packages airflow infra/scripts`), mypy (`apps/api/src apps/worker/src packages/telemetry/src airflow/src`), ESLint and `tsc --noEmit` for `apps/web`.
-- Commit style: Conventional Commits (`feat:`, `fix:`, `docs:`, `ci:`, optional scope such as `feat(web):`).
+- Commit style: Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, `test:`, `ci:`, optional scope such as `feat(web):`).
 - PR branches: use `feat/`, `fix/`, `docs/`, or `chore/` followed by a short lowercase kebab-case description (for example, `fix/preview-aspect-matches-resolution`). Branch from current `origin/main` and open the PR against `main` unless the task specifies another base.
 - PR titles: use `type(scope): short imperative summary` in English (for example, `fix(web): fit preview to the selected aspect ratio`). Choose the type for the change and the scope for the affected component, regardless of the branch prefix.
+- PR body: follow the default template at [`RurociagDanych/.github` (`PULL_REQUEST_TEMPLATE.md`)](https://github.com/RurociagDanych/.github/blob/main/.github/PULL_REQUEST_TEMPLATE.md) (`Summary`, `Changes`, `Not changed and why`, `Owner decisions applied`, `Verification`, `Open risks`), filling every section and removing HTML comments; never merge PRs (the owner merges).
 - Test locations: `apps/api/tests`, `apps/worker/tests`, `packages/telemetry/tests`, `airflow/tests`, `scripts/tests`, `infra/scripts/tests`, `dbt/tests`, and Vitest tests in `apps/web/src/test`.
 
 ### Code invariants
@@ -48,7 +49,7 @@ Repository guide for AI coding agents working on Trip Animator: a GPX/TCX and St
 ## Guardrails
 
 - Secrets: never commit `.env`, credentials, Terraform state or plans, object-store data or raw activity files; only `.env.example` with placeholders. Follow [SECURITY.md](SECURITY.md) and run `scripts/check-publication-secrets.sh` (Gitleaks with `.gitleaks.toml`).
-- Git: no force-push and no history rewrite on shared branches.
+- Git: no force-push and no history rewrite on shared branches; never merge PRs (the owner merges).
 - Deletes: do not delete files, data or directories without owner approval.
 - Generated paths: `.venv/`, `node_modules/`, `apps/web/dist/`, `dbt/target/`, `.tmp/` and other ignored build or cache output stay untracked; do not edit or commit them.
 - Lock files: `uv.lock` (workspace), `airflow/uv.lock` and `pnpm-lock.yaml` are authoritative; update them only through `uv` and `pnpm`.
