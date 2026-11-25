@@ -1,3 +1,5 @@
+"""Exercise render job orchestration, persistence, and retries."""
+
 from __future__ import annotations
 
 import asyncio
@@ -12,6 +14,8 @@ from typing import Any
 
 import psycopg
 import pytest
+from boto3.exceptions import S3UploadFailedError
+from botocore.exceptions import ClientError
 from trip_telemetry import ParsedTrack, TrackPoint, build_silver_dataframe, write_silver_parquet
 from trip_worker import (
     ClaimedJob,
@@ -1528,6 +1532,114 @@ def test_chunked_job_fanout_render_concat_notifications_and_failure(
     assert f"Chunk {first_chunk_id} (job {fail_job_id}) failed: Invalid render job parameters" in [
         r.getMessage() for r in chunk_failure_records
     ]
+
+
+@pytest.mark.parametrize("chunked", [False, True])
+@pytest.mark.parametrize("upload_error", [None, OSError, S3UploadFailedError, ClientError])
+def test_final_mp4_upload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    chunked: bool,
+    upload_error: type[Exception] | None,
+) -> None:
+    store = LocalObjectStore(tmp_path / "objects")
+    db = InMemoryRenderDatabase()
+    owner_id, project_id, _ = _seed_project_and_stage(db, store)
+    job_id = uuid.uuid4()
+    job = db.jobs[job_id] = {
+        "id": job_id,
+        "project_id": project_id,
+        "owner_user_id": owner_id,
+        "spec_json": {"version": 2, "resolution": "1280x720", "fps": 30, "duration_seconds": 5.0},
+        "status": "queued",
+        "progress_pct": 0,
+        "attempt_count": 0,
+        "lease_expires_at": None,
+        "output_object_key": None,
+        "thumbnail_key": None,
+        "expires_at": None,
+        "error_message": None,
+        "is_chunked": False,
+        "created_at": datetime.now(UTC),
+        "updated_at": datetime.now(UTC),
+    }
+    payload = b"\x00\x01mp4\xff" * 200_000
+    final_sources: set[Path] = set()
+
+    def encode_output(path: Path) -> Path:
+        if path.name == f"{job_id}.mp4":
+            final_sources.add(path)
+        path.write_bytes(payload)
+        return path
+
+    async def fake_render(
+        manifest: RenderManifest, output_mp4_path: Path, settings: WorkerSettings, **_kw: Any
+    ) -> Path:
+        return encode_output(output_mp4_path)
+
+    monkeypatch.setattr(
+        "trip_worker.runner.concat_mp4_chunks", lambda _chunks, output, **_kw: encode_output(output)
+    )
+    monkeypatch.setattr(
+        "trip_worker.runner.verify_mp4_output",
+        lambda *_a, **_kw: type("Probe", (), {"width": 1280, "height": 720, "duration_s": 5.0})(),
+    )
+    monkeypatch.setattr(
+        "trip_worker.runner.extract_thumbnail",
+        lambda _mp4, thumb, **_kw: thumb.write_bytes(b"RIFFwebp"),
+    )
+
+    output_key = f"outputs/{job_id}.mp4"
+    original_read = Path.read_bytes
+
+    def reject_final_source_read(path: Path) -> bytes:
+        assert path not in final_sources, "Final MP4 must not be read into memory"
+        return original_read(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_final_source_read)
+    uploaded_sources: list[Path] = []
+    original_put_file = store.put_file
+    private_details = ("/tmp/private-render/render.mp4", "private-test-bucket")
+    detail = f"Upload of {private_details[0]} to {private_details[1]} failed"
+
+    def upload(key: str, source: Path, *, content_type: str) -> None:
+        assert (key, content_type) == (output_key, "video/mp4")
+        assert job["status"] == "running"
+        assert job["output_object_key"] is None
+        assert source.is_file()
+        uploaded_sources.append(source)
+        if upload_error is ClientError:
+            raise ClientError({"Error": {"Code": "AccessDenied", "Message": detail}}, "PutObject")
+        if upload_error is not None:
+            raise upload_error(detail)
+        original_put_file(key, source, content_type=content_type)
+
+    monkeypatch.setattr(store, "put_file", upload)
+    settings = WorkerSettings(
+        chunk_threshold_frames=100 if chunked else 1000, chunk_size_frames=120
+    )
+    assert run_once(settings, conn_factory=db.conn_factory(), store=store, render_fn=fake_render)
+    assert job["is_chunked"] is chunked
+    assert len(uploaded_sources) == 1
+    assert final_sources == set(uploaded_sources)
+    assert not uploaded_sources[0].exists()
+
+    if upload_error is not None:
+        assert job["status"] == ("failed" if chunked else "queued")
+        assert job["error_message"] == "Render worker encountered an internal error"
+        assert all(value not in job["error_message"] for value in private_details)
+        assert job["output_object_key"] is None
+        assert job["thumbnail_key"] is None
+        assert job["expires_at"] is None
+        assert not any(n["status"] == "succeeded" for n in db.notifications)
+        with pytest.raises(FileNotFoundError):
+            store.get_bytes(output_key)
+    else:
+        assert job["status"] == "succeeded"
+        assert job["output_object_key"] == output_key
+        assert job["expires_at"] is not None
+        assert store.get_bytes(output_key) == payload
+        assert store.get_bytes(job["thumbnail_key"]) == b"RIFFwebp"
 
 
 def test_failed_unchunked_job_warning_keeps_original_wording(

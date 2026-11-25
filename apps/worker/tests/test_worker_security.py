@@ -1,3 +1,5 @@
+"""Exercise worker security boundaries and artifact handling."""
+
 from __future__ import annotations
 
 import json
@@ -7,6 +9,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from boto3.exceptions import S3UploadFailedError
+from botocore.exceptions import ClientError
+from botocore.stub import ANY, Stubber
 from trip_worker import (
     EncoderError,
     LocalObjectStore,
@@ -416,6 +421,56 @@ async def test_ssrf_async_dns_uses_loop_getaddrinfo(monkeypatch: pytest.MonkeyPa
     assert len(calls) == 3
 
 
+@pytest.mark.parametrize("key", ["", "../escape.mp4", "outputs/../../escape.mp4"])
+def test_local_put_file_rejects_unsafe_keys(tmp_path: Path, key: str) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    store = LocalObjectStore(tmp_path / "objects")
+
+    with pytest.raises(ValueError, match="Unsafe object key"):
+        store.put_file(key, source)
+
+    assert not list(store.root_dir.iterdir())
+    assert source.read_bytes() == b"source"
+
+
+def test_local_put_file_missing_source_does_not_create_destination_parent(tmp_path: Path) -> None:
+    store = LocalObjectStore(tmp_path / "objects")
+
+    with pytest.raises(FileNotFoundError):
+        store.put_file("outputs/new/video.mp4", tmp_path / "missing.mp4")
+
+    assert not list(store.root_dir.iterdir())
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_local_put_file_does_not_publish_partial_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing: bool
+) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"full source")
+    store = LocalObjectStore(tmp_path / "objects")
+    key = "outputs/test.mp4"
+    if existing:
+        store.put_bytes(key, b"previous export")
+
+    def fail_copy(src: Path, dst: Path) -> None:
+        assert src == source
+        dst.write_bytes(b"partial copy")
+        raise OSError("disk full")
+
+    monkeypatch.setattr("trip_worker.storage.shutil.copyfile", fail_copy)
+    with pytest.raises(OSError, match="disk full"):
+        store.put_file(key, source, content_type="video/mp4")
+
+    assert source.read_bytes() == b"full source"
+    assert sorted(path.name for path in (store.root_dir / "outputs").iterdir()) == (
+        ["test.mp4"] if existing else []
+    )
+    if existing:
+        assert store.get_bytes(key) == b"previous export"
+
+
 def test_s3_object_store_passes_none_for_empty_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -460,11 +515,83 @@ def test_s3_object_store_passes_none_for_empty_credentials(
     }
 
 
+@pytest.mark.parametrize(
+    ("size", "part_count", "fail_part"),
+    [(8_388_607, 0, False), (8_388_608, 1, False), (8_388_609, 2, False), (8_388_609, 2, True)],
+    ids=["below-threshold", "at-threshold", "two-parts", "abort-on-part-error"],
+)
+def test_s3_put_file_transfer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, size: int, part_count: int, fail_part: bool
+) -> None:
+    source = tmp_path / "render.mp4"
+    with source.open("wb") as file:
+        file.truncate(size)
+    store = S3ObjectStore(
+        access_key_id="test", secret_access_key="test", bucket="test-bucket", region="us-east-1"
+    )
+    key = "outputs/render.mp4"
+    object_args = {"Bucket": "test-bucket", "Key": key}
+    metadata = {"ContentType": "video/mp4", "ChecksumAlgorithm": "CRC32"}
+    upload_args = {**object_args, "UploadId": "test-upload"}
+    upload_file = store.client.upload_file
+
+    def check_upload(filename: str, bucket: str, object_key: str, **kwargs: Any) -> None:
+        assert isinstance(filename, str) and filename == str(source)
+        assert (bucket, object_key) == ("test-bucket", key)
+        assert kwargs["ExtraArgs"] == {"ContentType": "video/mp4"}
+        config = kwargs["Config"]
+        assert config.multipart_threshold == config.multipart_chunksize == 8_388_608
+        assert config.use_threads is False
+        assert config.preferred_transfer_client == "classic"
+        upload_file(filename, bucket, object_key, **kwargs)
+
+    monkeypatch.setattr(store.client, "upload_file", check_upload)
+    with Stubber(store.client) as stub:
+        if part_count == 0:
+            stub.add_response("put_object", {}, {**object_args, **metadata, "Body": ANY})
+        else:
+            stub.add_response(
+                "create_multipart_upload", {"UploadId": "test-upload"}, {**object_args, **metadata}
+            )
+            parts = []
+            for number in range(1, part_count + 1):
+                part_args = {
+                    **upload_args,
+                    "PartNumber": number,
+                    "Body": ANY,
+                    "ChecksumAlgorithm": "CRC32",
+                }
+                if fail_part and number == part_count:
+                    stub.add_client_error(
+                        "upload_part",
+                        "AccessDenied",
+                        http_status_code=403,
+                        expected_params=part_args,
+                    )
+                    stub.add_response("abort_multipart_upload", {}, upload_args)
+                else:
+                    etag = f"etag-{number}"
+                    stub.add_response("upload_part", {"ETag": etag}, part_args)
+                    parts.append({"ETag": etag, "PartNumber": number})
+            if not fail_part:
+                stub.add_response(
+                    "complete_multipart_upload",
+                    {},
+                    {**upload_args, "MultipartUpload": {"Parts": parts}},
+                )
+
+        if fail_part:
+            with pytest.raises(S3UploadFailedError, match="AccessDenied"):
+                store.put_file(key, source, content_type="video/mp4")
+        else:
+            store.put_file(key, source, content_type="video/mp4")
+        stub.assert_no_pending_responses()
+
+    assert source.stat().st_size == size
+
+
 @pytest.mark.parametrize("code", ["NoSuchKey", "404", "AccessDenied"])
 def test_s3_get_bytes_distinguishes_a_missing_object_from_access_denial(code: str) -> None:
-    from botocore.exceptions import ClientError
-    from botocore.stub import Stubber
-
     store = S3ObjectStore(
         access_key_id="test", secret_access_key="test", bucket="test-bucket", region="us-east-1"
     )

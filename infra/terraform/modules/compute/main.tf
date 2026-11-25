@@ -535,6 +535,13 @@ data "aws_iam_policy_document" "worker_task_s3" {
   }
 
   statement {
+    sid       = "AbortRenderArtifactMultipartUploads"
+    effect    = "Allow"
+    actions   = ["s3:AbortMultipartUpload"]
+    resources = ["${local.objects_bucket_arn}/outputs/*"]
+  }
+
+  statement {
     sid    = "UseObjectsKmsViaS3"
     effect = "Allow"
     actions = [
