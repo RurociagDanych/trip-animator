@@ -12,7 +12,6 @@ from pydantic import StringConstraints
 from sqlalchemy import Select, case, func, select
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
-from trip_telemetry import ActivityType
 
 from trip_api.activity_search import normalize_activity_search
 from trip_api.db import Project, Stage, VaultActivity
@@ -53,7 +52,15 @@ from trip_api.vault_sync import (
 
 router = APIRouter(prefix="/api/v1/vault", tags=["vault"])
 
-_SportValue = Annotated[str, StringConstraints(max_length=32)]
+_SportValue = Annotated[str, StringConstraints(max_length=64)]
+
+_raw_sport = func.trim(VaultActivity.raw_sport_type)
+# Stage backfill can store the source format ("strava") instead of a sport.
+_catalog_sport = case(
+    (VaultActivity.source_provider != "strava", VaultActivity.activity_type),
+    (_raw_sport.in_(("", "strava")), "Unknown"),
+    else_=_raw_sport,
+).label("catalog_sport")
 
 _METRIC_KEYS = {
     "distance_m": "distance",
@@ -85,12 +92,12 @@ ReusePreview = Annotated[ReusePreviewCache, Depends(_reuse_preview)]
 
 
 def _activity_item(
-    activity: VaultActivity, eligibility: ProjectReuseEligibility
+    activity: VaultActivity, sport: str, eligibility: ProjectReuseEligibility
 ) -> VaultActivityListItemOut:
     return VaultActivityListItemOut(
         id=activity.id,
         name=activity.name,
-        activity_type=activity.activity_type,
+        activity_type=sport,
         raw_sport_type=activity.raw_sport_type,
         source_provider=activity.source_provider,
         started_at=activity.started_at,
@@ -150,7 +157,7 @@ def _selection_query(
     if end_date is not None:
         query = query.where(VaultActivity.local_date <= end_date)
     if sport:
-        query = query.where(VaultActivity.activity_type.in_(sport))
+        query = query.where(_catalog_sport.in_(sport))
     if min_distance_m is not None:
         query = query.where(_metric_expression("distance_m") >= min_distance_m)
     if max_distance_m is not None:
@@ -215,7 +222,7 @@ def _summary_by_sport(
     elapsed = _metric_expression("elapsed_seconds")
     rows = db.execute(
         select(
-            activity.activity_type,
+            _catalog_sport,
             func.count(activity.id),
             func.sum(distance),
             func.count(distance),
@@ -228,8 +235,8 @@ def _summary_by_sport(
             func.sum(case((activity.has_gps.is_(True), 1), else_=0)),
         )
         .where(activity.id.in_(query.with_only_columns(activity.id)))
-        .group_by(activity.activity_type)
-        .order_by(func.min(activity.started_at), activity.activity_type)
+        .group_by(_catalog_sport)
+        .order_by(func.min(activity.started_at), _catalog_sport)
     ).all()
     summaries = []
     for row in rows:
@@ -237,7 +244,7 @@ def _summary_by_sport(
         gps_count = int(row[10] or 0)
         summaries.append(
             VaultActivitySportSummaryOut(
-                activity_type=cast(ActivityType, row[0]),
+                activity_type=row[0],
                 activity_count=count,
                 distance_m=float(row[2]) if row[3] else None,
                 distance_known_count=int(row[3] or 0),
@@ -363,15 +370,16 @@ def list_vault_activities(
     }[sort]
     ordering = sort_column.asc() if order == "asc" else sort_column.desc()
     page_query = filters.order_by(ordering, VaultActivity.id.asc()).offset(offset).limit(limit)
-    activities = list(db.scalars(page_query).all())
+    activities = db.execute(page_query.add_columns(_catalog_sport)).all()
     total = int(db.scalar(select(func.count()).select_from(filters.subquery())) or 0)
     return VaultActivityListOut(
         items=[
             _activity_item(
                 item,
+                sport,
                 "no_gps" if not item.has_gps else "ready" if preview.is_ready(item) else "waiting",
             )
-            for item in activities
+            for item, sport in activities
         ],
         total=total,
         offset=offset,
@@ -385,9 +393,8 @@ def list_vault_activities(
 @router.get("/activities/sports")
 def list_vault_sports(auth: CurrentAuth, db: DbSession, include_hidden: bool = False) -> list[str]:
     """List distinct sport types in the owner's visible catalog."""
-    sport = VaultActivity.activity_type
-    query = _visible_activities(auth.user.id, include_hidden).with_only_columns(sport)
-    return list(db.scalars(query.distinct().order_by(sport)))
+    query = _visible_activities(auth.user.id, include_hidden).with_only_columns(_catalog_sport)
+    return list(db.scalars(query.distinct().order_by(_catalog_sport)))
 
 
 @router.post("/activities/reuse-status", response_model=VaultReuseStatusOut)
@@ -518,16 +525,17 @@ def get_vault_activity(
     db: DbSession,
     store: StoreDep,
 ) -> VaultActivityDetailOut:
-    detail_query = select(VaultActivity).where(
+    detail_query = select(VaultActivity, _catalog_sport).where(
         VaultActivity.id == activity_id,
         VaultActivity.user_id == auth.user.id,
     )
     disconnected_at = getattr(VaultActivity, "disconnected_at", None)
     if disconnected_at is not None:
         detail_query = detail_query.where(disconnected_at.is_(None))
-    activity = db.scalar(detail_query)
-    if activity is None:
+    result = db.execute(detail_query).one_or_none()
+    if result is None:
         raise HTTPException(status_code=404, detail="Activity not found")
+    activity, sport = result
 
     usage_rows = db.execute(
         select(Project.id, Project.title, Stage.id, Stage.name)
@@ -543,8 +551,9 @@ def get_vault_activity(
         if activity.source_provider == "strava" and activity.strava_activity_id is not None
         else None
     )
+    eligibility = project_reuse_eligibility(db, store, activity)
     return VaultActivityDetailOut(
-        **_activity_item(activity, project_reuse_eligibility(db, store, activity)).model_dump(),
+        **_activity_item(activity, sport, eligibility).model_dump(),
         strava_activity_id=activity.strava_activity_id,
         started_at_local=activity.started_at_local,
         utc_offset_s=activity.utc_offset_s,

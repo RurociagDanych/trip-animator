@@ -47,9 +47,9 @@ function sanitize(value: unknown): ActivityLibrarySelection {
     const candidate = source[key];
     if (candidate === undefined) continue;
     if (key === "sport") {
-      if (typeof candidate === "string" && candidate.length > 0 && candidate.length <= 32) selection.sport = candidate;
+      if (typeof candidate === "string" && candidate.length > 0 && candidate.length <= 64) selection.sport = candidate;
       if (Array.isArray(candidate) && candidate.length > 0 && candidate.length <= 32
-        && candidate.every((sport) => typeof sport === "string" && sport.length > 0 && sport.length <= 32)) {
+        && candidate.every((sport) => typeof sport === "string" && sport.length > 0 && sport.length <= 64)) {
         selection.sport = [...new Set(candidate)].sort();
       }
     } else if (key === "name" && typeof candidate === "string" && candidate.length <= 200) {
