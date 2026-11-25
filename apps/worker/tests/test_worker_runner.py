@@ -1530,6 +1530,102 @@ def test_chunked_job_fanout_render_concat_notifications_and_failure(
     ]
 
 
+@pytest.mark.parametrize("chunked", [False, True])
+@pytest.mark.parametrize("upload_fails", [False, True])
+def test_final_mp4_upload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, chunked: bool, upload_fails: bool
+) -> None:
+    store = LocalObjectStore(tmp_path)
+    db = InMemoryRenderDatabase()
+    owner_id, project_id, _ = _seed_project_and_stage(db, store)
+    job_id = uuid.uuid4()
+    job = db.jobs[job_id] = {
+        "id": job_id,
+        "project_id": project_id,
+        "owner_user_id": owner_id,
+        "spec_json": {"version": 2, "resolution": "1280x720", "fps": 30, "duration_seconds": 5.0},
+        "status": "queued",
+        "progress_pct": 0,
+        "attempt_count": 0,
+        "lease_expires_at": None,
+        "output_object_key": None,
+        "thumbnail_key": None,
+        "expires_at": None,
+        "error_message": None,
+        "is_chunked": False,
+        "created_at": datetime.now(UTC),
+        "updated_at": datetime.now(UTC),
+    }
+    payload = b"\x00\x01mp4\xff" * 200_000
+
+    def encode_output(path: Path) -> Path:
+        path.write_bytes(payload)
+        return path
+
+    async def fake_render(
+        manifest: RenderManifest, output_mp4_path: Path, settings: WorkerSettings, **_kw: Any
+    ) -> Path:
+        return encode_output(output_mp4_path)
+
+    monkeypatch.setattr(
+        "trip_worker.runner.concat_mp4_chunks", lambda _chunks, output, **_kw: encode_output(output)
+    )
+    monkeypatch.setattr(
+        "trip_worker.runner.verify_mp4_output",
+        lambda *_a, **_kw: type("Probe", (), {"width": 1280, "height": 720, "duration_s": 5.0})(),
+    )
+    monkeypatch.setattr(
+        "trip_worker.runner.extract_thumbnail",
+        lambda _mp4, thumb, **_kw: thumb.write_bytes(b"RIFFwebp"),
+    )
+
+    output_key = f"outputs/{job_id}.mp4"
+    original_read = Path.read_bytes
+
+    def reject_final_source_read(path: Path) -> bytes:
+        assert path.name != f"{job_id}.mp4" or path.is_relative_to(tmp_path), (
+            "Final MP4 must not be read into memory"
+        )
+        return original_read(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_final_source_read)
+    uploaded_sources: list[Path] = []
+
+    def upload(key: str, source: Path, *, content_type: str) -> None:
+        assert (key, content_type) == (output_key, "video/mp4")
+        assert job["status"] == "running"
+        assert job["output_object_key"] is None
+        assert source.is_file()
+        uploaded_sources.append(source)
+        if upload_fails:
+            raise OSError("MP4 upload failed")
+        LocalObjectStore.put_file(store, key, source, content_type=content_type)
+
+    monkeypatch.setattr(store, "put_file", upload)
+    settings = WorkerSettings(
+        chunk_threshold_frames=100 if chunked else 1000, chunk_size_frames=120
+    )
+    assert run_once(settings, conn_factory=db.conn_factory(), store=store, render_fn=fake_render)
+    assert job["is_chunked"] is chunked
+    assert len(uploaded_sources) == 1
+    assert not uploaded_sources[0].exists()
+
+    if upload_fails:
+        assert job["status"] == ("failed" if chunked else "queued")
+        assert job["output_object_key"] is None
+        assert job["thumbnail_key"] is None
+        assert job["expires_at"] is None
+        assert not any(n["status"] == "succeeded" for n in db.notifications)
+        with pytest.raises(FileNotFoundError):
+            store.get_bytes(output_key)
+    else:
+        assert job["status"] == "succeeded"
+        assert job["output_object_key"] == output_key
+        assert job["expires_at"] is not None
+        assert store.get_bytes(output_key) == payload
+        assert store.get_bytes(job["thumbnail_key"]) == b"RIFFwebp"
+
+
 def test_failed_unchunked_job_warning_keeps_original_wording(
     tmp_path: Path,
     monkeypatch: Any,

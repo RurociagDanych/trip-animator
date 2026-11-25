@@ -1580,7 +1580,7 @@ def _finalize_chunked_job(
                         )
 
                     upload_started = time.monotonic()
-                    store.put_bytes(output_key, mp4_path.read_bytes(), content_type="video/mp4")
+                    store.put_file(output_key, mp4_path, content_type="video/mp4")
                     store.put_bytes(
                         thumbnail_key, thumb_path.read_bytes(), content_type="image/webp"
                     )
@@ -2215,7 +2215,7 @@ def _process_claimed_job(
                         )
 
                     upload_started = time.monotonic()
-                    store.put_bytes(output_key, mp4_path.read_bytes(), content_type="video/mp4")
+                    store.put_file(output_key, mp4_path, content_type="video/mp4")
                     store.put_bytes(
                         thumbnail_key, thumb_path.read_bytes(), content_type="image/webp"
                     )

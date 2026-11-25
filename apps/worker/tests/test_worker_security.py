@@ -416,6 +416,34 @@ async def test_ssrf_async_dns_uses_loop_getaddrinfo(monkeypatch: pytest.MonkeyPa
     assert len(calls) == 3
 
 
+@pytest.mark.parametrize("existing", [False, True])
+def test_local_put_file_does_not_publish_partial_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing: bool
+) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"full source")
+    store = LocalObjectStore(tmp_path / "objects")
+    key = "outputs/test.mp4"
+    if existing:
+        store.put_bytes(key, b"previous export")
+
+    def fail_copy(src: Path, dst: Path) -> None:
+        assert src == source
+        dst.write_bytes(b"partial copy")
+        raise OSError("disk full")
+
+    monkeypatch.setattr("trip_worker.storage.shutil.copyfile", fail_copy)
+    with pytest.raises(OSError, match="disk full"):
+        store.put_file(key, source, content_type="video/mp4")
+
+    assert source.read_bytes() == b"full source"
+    assert sorted(path.name for path in (store.root_dir / "outputs").iterdir()) == (
+        ["test.mp4"] if existing else []
+    )
+    if existing:
+        assert store.get_bytes(key) == b"previous export"
+
+
 def test_s3_object_store_passes_none_for_empty_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -2,19 +2,37 @@
 
 from __future__ import annotations
 
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Protocol
 
 import boto3
+from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
 
 from trip_worker.config import WorkerSettings
+
+_MP4_PART_BYTES = 8 * 1024 * 1024
+# Classic uses file-backed parts for filename uploads; one request runs at a time.
+_FILE_TRANSFER_CONFIG = TransferConfig(
+    multipart_threshold=_MP4_PART_BYTES,
+    multipart_chunksize=_MP4_PART_BYTES,
+    use_threads=False,
+    preferred_transfer_client="classic",
+)
 
 
 class ObjectStore(Protocol):
     def put_bytes(
         self, key: str, data: bytes, *, content_type: str = "application/octet-stream"
     ) -> None: ...
+    def put_file(
+        self, key: str, source: Path, *, content_type: str = "application/octet-stream"
+    ) -> None:
+        """Publish the completed file synchronously without consuming the source."""
+        ...
+
     def get_bytes(self, key: str) -> bytes: ...
     def delete(self, key: str) -> None: ...
 
@@ -42,6 +60,19 @@ class LocalObjectStore:
         target = self._safe_path(key)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
+
+    def put_file(
+        self, key: str, source: Path, *, content_type: str = "application/octet-stream"
+    ) -> None:
+        """Replace the destination only after the full copy has been written."""
+        _ = content_type
+        target = self._safe_path(key)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Stage on the destination filesystem so replacement is atomic.
+        with tempfile.TemporaryDirectory(dir=target.parent) as staging_dir:
+            staged = Path(staging_dir) / target.name
+            shutil.copyfile(source, staged)
+            staged.replace(target)
 
     def get_bytes(self, key: str) -> bytes:
         target = self._safe_path(key)
@@ -91,6 +122,18 @@ class S3ObjectStore:
         self, key: str, data: bytes, *, content_type: str = "application/octet-stream"
     ) -> None:
         self.client.put_object(Bucket=self.bucket, Key=key, Body=data, ContentType=content_type)
+
+    def put_file(
+        self, key: str, source: Path, *, content_type: str = "application/octet-stream"
+    ) -> None:
+        """Upload a filename with a bounded, synchronous multipart transfer."""
+        self.client.upload_file(
+            str(source),
+            self.bucket,
+            key,
+            ExtraArgs={"ContentType": content_type},
+            Config=_FILE_TRANSFER_CONFIG,
+        )
 
     def get_bytes(self, key: str) -> bytes:
         try:
