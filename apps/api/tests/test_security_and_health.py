@@ -456,6 +456,62 @@ def test_metrics_prometheus_exposition_gating_and_zero_pii(tmp_path: Path) -> No
         engine.dispose()
 
 
+def test_http_metrics_use_route_templates_and_count_failures_once(
+    make_harness: HarnessFactory,
+) -> None:
+    h = make_harness()
+
+    @h.app.get("/_test_metrics/{item}")
+    def _item(item: int) -> dict[str, int]:
+        if item == 43:
+            raise RuntimeError("private diagnostic")
+        return {"item": item}
+
+    with TestClient(h.app, raise_server_exceptions=False) as client:
+        assert client.get("/_test_metrics/424242?key=private-query").status_code == 200
+        assert client.get("/_test_metrics/private-invalid").status_code == 422
+        assert client.get("/_test_metrics/43").status_code == 500
+        assert client.get("/private-missing").status_code == 404
+        assert client.get("/metrics").status_code == 200
+        scrape = client.get("/metrics")
+
+    assert scrape.status_code == 200
+    from prometheus_client.parser import text_string_to_metric_families
+
+    samples = {
+        (sample.name, tuple(sorted(sample.labels.items()))): sample.value
+        for family in text_string_to_metric_families(scrape.text)
+        for sample in family.samples
+    }
+    counts = {
+        labels: value
+        for (name, labels), value in samples.items()
+        if name == "trip_api_http_request_duration_seconds_count"
+    }
+    assert counts == {
+        (("route", route), ("status_class", status_class)): 1
+        for route, status_class in (
+            ("/_test_metrics/{item}", "2xx"),
+            ("/_test_metrics/{item}", "4xx"),
+            ("/_test_metrics/{item}", "5xx"),
+            ("unmatched", "4xx"),
+        )
+    }
+    for labels in counts:
+        assert samples["trip_api_http_request_duration_seconds_sum", labels] > 0
+        assert (
+            samples["trip_api_http_request_duration_seconds_bucket", (("le", "+Inf"), *labels)] == 1
+        )
+    for private in (
+        "424242",
+        "private-query",
+        "private-invalid",
+        "private-missing",
+        "private diagnostic",
+    ):
+        assert private not in scrape.text
+
+
 def test_unhandled_exception_handler_and_rate_limiter_branches(
     make_harness: HarnessFactory,
     monkeypatch: pytest.MonkeyPatch,
