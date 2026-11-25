@@ -46,7 +46,13 @@ function sanitize(value: unknown): ActivityLibrarySelection {
   for (const key of selectionKeys) {
     const candidate = source[key];
     if (candidate === undefined) continue;
-    if ((key === "name" || key === "sport") && typeof candidate === "string" && candidate.length <= 200) {
+    if (key === "sport") {
+      if (typeof candidate === "string" && candidate.length > 0 && candidate.length <= 32) selection.sport = candidate;
+      if (Array.isArray(candidate) && candidate.length > 0 && candidate.length <= 32
+        && candidate.every((sport) => typeof sport === "string" && sport.length > 0 && sport.length <= 32)) {
+        selection.sport = [...new Set(candidate)].sort();
+      }
+    } else if (key === "name" && typeof candidate === "string" && candidate.length <= 200) {
       if (candidate) selection[key] = candidate;
     } else if ((key === "start_date" || key === "end_date") && isDate(candidate)) {
       selection[key] = candidate;

@@ -3,10 +3,12 @@
 from datetime import UTC, datetime
 from uuid import uuid4
 
+import pytest
 from trip_api.routers import library_views
 
 
-def test_saved_view_persists_rules_and_resolves_relative_dates(harness, monkeypatch):
+@pytest.mark.parametrize("sport", ["cycling", ["cycling", "running"]])
+def test_saved_view_persists_rules_and_resolves_relative_dates(harness, monkeypatch, sport):
     class _FrozenDatetime(datetime):
         @classmethod
         def now(cls, tz=None):
@@ -17,7 +19,7 @@ def test_saved_view_persists_rules_and_resolves_relative_dates(harness, monkeypa
     client, csrf = harness.login_client("views@example.test")
     rules = {
         "version": 1,
-        "filters": {"sport": "cycling", "relative_days": 7},
+        "filters": {"sport": sport, "relative_days": 7},
         "sort": "distance_m",
         "direction": "asc",
     }
@@ -33,7 +35,7 @@ def test_saved_view_persists_rules_and_resolves_relative_dates(harness, monkeypa
     opened = client.get(f"/api/v1/vault/views/{view_id}")
     assert opened.status_code == 200
     assert opened.json()["resolved_filters"] == {
-        "sport": "cycling",
+        "sport": sport,
         "start_date": "2026-11-15",
         "end_date": "2026-11-21",
     }
@@ -74,6 +76,8 @@ def test_saved_view_validates_rules_and_keeps_fixed_dates(harness):
         {"version": 2},
         {"version": 1, "activity_ids": []},
         {"version": 1, "filters": {"relative_days": 0}},
+        {"version": 1, "filters": {"sport": ["cycling"] * 33}},
+        {"version": 1, "filters": {"sport": ["x" * 33]}},
         {"version": 1, "filters": {"start_date": "2020-01-02", "end_date": "2020-01-01"}},
         {"version": 1, "filters": {"min_distance_m": -1}},
         {"version": 1, "sort": "unsafe"},

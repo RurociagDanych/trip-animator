@@ -1,7 +1,7 @@
 """Private named Activity Library views storing validated, versioned query rules."""
 
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, Literal, Self
+from typing import Annotated, Any, Literal, Self
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Response
@@ -20,7 +20,11 @@ class ViewFilters(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     name: str | None = Field(default=None, max_length=200)
-    sport: str | None = Field(default=None, max_length=32)
+    sport: (
+        Annotated[str, Field(max_length=32)]
+        | Annotated[list[Annotated[str, Field(max_length=32)]], Field(max_length=32)]
+        | None
+    ) = None
     start_date: date | None = None
     end_date: date | None = None
     relative_days: int | None = Field(default=None, ge=1, le=36500, strict=True)

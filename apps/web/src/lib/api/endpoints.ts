@@ -61,25 +61,32 @@ import type {
 } from "./types";
 
 export interface VaultActivityFilters {
-  name?: string; start_date?: string; end_date?: string; sport?: string;
+  name?: string; start_date?: string; end_date?: string; sport?: string | string[];
   min_distance_m?: number; max_distance_m?: number; min_elevation_gain_m?: number;
   max_elevation_gain_m?: number; min_moving_seconds?: number; max_moving_seconds?: number;
   has_gps?: boolean; include_hidden?: boolean; sort?: string; order?: string; offset?: number; limit?: number; area?: string;
 }
 
+function vaultActivityQuery(filters: VaultActivityFilters, omitLimit = false): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if ((omitLimit && key === "limit") || value === undefined || value === "") continue;
+    if (Array.isArray(value)) for (const sport of value) params.append(key, sport);
+    else params.set(key, String(value));
+  }
+  return params.toString();
+}
+
 export const vaultApi = {
+  sports(includeHidden: boolean, signal?: AbortSignal): Promise<string[]> {
+    return apiClient.get<string[]>(`/api/v1/vault/activities/sports?include_hidden=${includeHidden}`, signal);
+  },
   list(filters: VaultActivityFilters, signal?: AbortSignal): Promise<VaultActivityListOut> {
-    const params = new URLSearchParams();
-    for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== "") params.set(key, String(value));
-    const qs = params.toString();
+    const qs = vaultActivityQuery(filters);
     return apiClient.get<VaultActivityListOut>(`/api/v1/vault/activities${qs ? `?${qs}` : ""}`, signal);
   },
   map(filters: VaultActivityFilters, signal?: AbortSignal): Promise<VaultActivityMapOut> {
-    const params = new URLSearchParams();
-    for (const [key, value] of Object.entries(filters)) {
-      if (key !== "limit" && value !== undefined && value !== "") params.set(key, String(value));
-    }
-    const qs = params.toString();
+    const qs = vaultActivityQuery(filters, true);
     return apiClient.get<VaultActivityMapOut>(`/api/v1/vault/activities/map${qs ? `?${qs}` : ""}`, signal);
   },
   get(id: string, signal?: AbortSignal): Promise<VaultActivityDetailOut> {
