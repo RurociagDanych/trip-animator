@@ -722,6 +722,21 @@ class VaultActivityReadinessOut(BaseModel):
     tile_precision: Literal["none", "summary_polyline", "full_stream"]
 
 
+ProjectReuseEligibility = Literal["ready", "waiting", "no_gps", "unavailable"]
+
+
+class VaultReuseStatusRequest(BaseModel):
+    """Identify activities whose reuse readiness should be checked."""
+
+    activity_ids: list[uuid.UUID] = Field(min_length=1, max_length=200)
+
+
+class VaultReuseStatusOut(BaseModel):
+    """Report readiness only for activities owned by the caller."""
+
+    statuses: dict[uuid.UUID, ProjectReuseEligibility]
+
+
 class VaultActivityListItemOut(BaseModel):
     """Activity metadata returned by the library, including visibility state."""
 
@@ -741,7 +756,7 @@ class VaultActivityListItemOut(BaseModel):
     has_gps: bool
     hidden: bool = False
     readiness: VaultActivityReadinessOut
-    project_reuse_eligibility: Literal["ready", "waiting", "no_gps", "unavailable"]
+    project_reuse_eligibility: ProjectReuseEligibility
 
 
 class VaultActivitySummaryOut(BaseModel):

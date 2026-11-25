@@ -186,8 +186,8 @@ export const apiClient = {
   get<TResponse>(path: string, signal?: AbortSignal): Promise<TResponse> {
     return apiRequest<TResponse>(path, { method: "GET", signal });
   },
-  post<TResponse>(path: string, body?: unknown, headers?: Record<string, string>): Promise<TResponse> {
-    return apiRequest<TResponse>(path, { method: "POST", body, headers });
+  post<TResponse>(path: string, body?: unknown, headers?: Record<string, string>, signal?: AbortSignal): Promise<TResponse> {
+    return apiRequest<TResponse>(path, { method: "POST", body, headers, signal });
   },
   put<TResponse>(path: string, body?: unknown, headers?: Record<string, string>): Promise<TResponse> {
     return apiRequest<TResponse>(path, { method: "PUT", body, headers });

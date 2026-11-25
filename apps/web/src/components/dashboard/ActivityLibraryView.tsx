@@ -12,6 +12,9 @@ import { loadActivityLibrarySelection, saveActivityLibrarySelection } from "./ac
 
 
 const PAGE_SIZE = 50;
+const REUSE_BATCH_SIZE = 200;
+const POLL_INTERVAL = 3000;
+const reuseLabel = (eligibility?: ProjectReuseEligibility) => eligibility === "ready" ? "Ready" : eligibility === "no_gps" ? "No GPS track" : eligibility === "unavailable" ? "Unavailable" : "Waiting for reusable track";
 const baseInput = "rounded border border-border bg-surface px-2 py-1.5 text-sm text-ink";
 const metric = (value: number | null, unit: string) => value == null ? "Unknown" : unit === "h" ? duration(value) : `${(value / unitFactor(unit)).toFixed(1)} ${unit}`;
 function unitFactor(unit: string) { return unit === "km" ? 1000 : unit === "m" ? 1 : unit === "h" ? 3600 : 1; }
@@ -36,16 +39,25 @@ function ActivityLibraryOwnerView({ ownerId }: { ownerId: string | null }) {
 
   const previousVaultVersion = useRef<number | undefined>(undefined);
   const previousSyncStatus = useRef<string | undefined>(undefined);
-  const list = useQuery({ queryKey: ["vault", ownerId, "activities", filters], queryFn: ({ signal }) => vaultApi.list(filters, signal), refetchInterval: (query) => query.state.data?.items.some((item) => item.project_reuse_eligibility === "waiting") ? 3000 : false, retry: false });
-  const selectedElsewhere = selectedIds.filter((id) => !list.data?.items.some((item) => item.id === id));
-  const selectedActivities = useQueries({ queries: selectedElsewhere.map((id) => ({
-    queryKey: ["vault", ownerId, "activity", id],
-    queryFn: ({ signal }: { signal: AbortSignal }) => vaultApi.get(id, signal),
-    refetchInterval: (query: { state: { data?: { project_reuse_eligibility?: ProjectReuseEligibility } } }) => !query.state.data?.project_reuse_eligibility || query.state.data.project_reuse_eligibility === "waiting" ? 3000 : false,
+  const list = useQuery({ queryKey: ["vault", ownerId, "activities", filters], queryFn: ({ signal }) => vaultApi.list(filters, signal), retry: false });
+  const visibleItems = list.data?.items ?? [];
+  const visibleIds = new Set(visibleItems.map((item) => item.id));
+  const idsToCheck = [
+    ...visibleItems.filter((item) => item.project_reuse_eligibility === "waiting").map((item) => item.id),
+    ...selectedIds.filter((id) => !visibleIds.has(id)),
+  ].sort();
+  const batches: string[][] = [];
+  for (let index = 0; index < idsToCheck.length; index += REUSE_BATCH_SIZE) {
+    batches.push(idsToCheck.slice(index, index + REUSE_BATCH_SIZE));
+  }
+  const reusePreviews = useQueries({ queries: batches.map((ids) => ({
+    queryKey: ["vault", ownerId, "reuse-status", ids],
+    queryFn: ({ signal }: { signal: AbortSignal }) => vaultApi.reuseStatus(ids, signal),
+    refetchInterval: (query: { state: { data?: Awaited<ReturnType<typeof vaultApi.reuseStatus>> } }) => !query.state.data || Object.values(query.state.data.statuses).includes("waiting") ? POLL_INTERVAL : false,
     retry: false,
   })) });
-  const awaitingTrack = list.data?.items.some((item) => item.project_reuse_eligibility === "waiting") || selectedActivities.some((query) => !query.data?.project_reuse_eligibility || query.data.project_reuse_eligibility === "waiting");
-  const status = useQuery({ queryKey: ["vault", ownerId, "sync-status"], queryFn: ({ signal }) => vaultApi.status(signal), refetchInterval: (query) => awaitingTrack || ["queued", "running", "rate_limited"].includes(query.state.data?.status ?? "") ? 3000 : false, retry: false });
+  const awaitingTrack = reusePreviews.some((query) => !query.data || Object.values(query.data.statuses).includes("waiting"));
+  const status = useQuery({ queryKey: ["vault", ownerId, "sync-status"], queryFn: ({ signal }) => vaultApi.status(signal), refetchInterval: (query) => awaitingTrack || ["queued", "running", "rate_limited"].includes(query.state.data?.status ?? "") ? POLL_INTERVAL : false, retry: false });
   const activity = useQuery({ queryKey: ["vault", ownerId, "activity", selectedId], queryFn: ({ signal }) => vaultApi.get(selectedId!, signal), enabled: Boolean(selectedId), retry: false });
   const sync = useMutation({ mutationFn: vaultApi.sync, onSuccess: () => { void client.invalidateQueries({ queryKey: ["vault", ownerId] }); } });
   useEffect(() => {
@@ -62,9 +74,12 @@ function ActivityLibraryOwnerView({ ownerId }: { ownerId: string | null }) {
     }
     if (syncStatus) previousSyncStatus.current = syncStatus;
   }, [client, ownerId, status.data?.status]);
-  const eligibilityById: Record<string, ProjectReuseEligibility> = {};
-  for (const selected of selectedActivities) if (!selected.isError && selected.data?.project_reuse_eligibility) eligibilityById[selected.data.id] = selected.data.project_reuse_eligibility;
-  for (const item of list.data?.items ?? []) if (item.project_reuse_eligibility) eligibilityById[item.id] = item.project_reuse_eligibility;
+  const eligibilityById: Record<string, ProjectReuseEligibility | undefined> = {};
+  for (const item of visibleItems) eligibilityById[item.id] = item.project_reuse_eligibility;
+  for (const [index, preview] of reusePreviews.entries()) {
+    if (!preview.data || preview.isError) continue;
+    for (const id of batches[index] ?? []) eligibilityById[id] = preview.data.statuses[id] ?? "unavailable";
+  }
   useEffect(() => {
     saveActivityLibrarySelection(ownerId, filters);
   }, [ownerId, filters]);
@@ -96,12 +111,12 @@ function ActivityLibraryOwnerView({ ownerId }: { ownerId: string | null }) {
     {data && <div className="rounded border border-border bg-surface p-3 text-sm">Filtered summary ({data.summary.activity_count} activities): {metric(data.summary.distance_m, "km")} total distance · {metric(data.summary.elevation_gain_m, "m")} elevation · {metric(data.summary.moving_seconds, "h")} moving · {metric(data.summary.elapsed_seconds, "h")} elapsed · {data.summary.gps_activity_count} with GPS · {data.summary.no_gps_activity_count} without GPS{data.by_sport?.length > 0 && <ul aria-label="Summary by sport" className="mt-2 list-inside list-disc">{data.by_sport.map((sport) => <li key={sport.activity_type}>{sport.activity_type}: {sport.activity_count} activities · {metric(sport.distance_m, "km")} · {sport.gps_activity_count} with GPS</li>)}</ul>}</div>}
     {list.isLoading && <p role="status">Loading activities…</p>}
     {list.isError && <p role="alert" className="text-red-600">{list.error instanceof ApiError ? list.error.message : "Could not load activities."}</p>}
-    {selectedActivities.some((query) => query.isError) && <p role="alert">Could not refresh selected activity readiness.</p>}
+    {reusePreviews.some((query) => query.isError) && <p role="alert">Could not refresh activity readiness.</p>}
     {(data || selectedIds.length > 0 || activity.data) && <LibraryActivityActions ownerId={ownerId} selectedIds={selectedIds} eligibilityById={eligibilityById} activity={activity.data} onClearSelection={() => setSelectedIds([])} onDisconnected={() => setSelectedId(null)} />}
     {data?.items.length === 0 && <p className="rounded border border-border p-6 text-center text-sm text-ink-muted">No activities match these filters.</p>}
     {data && data.items.length > 0 && <>
 
-      <div className="overflow-x-auto rounded border border-border"><table className="w-full text-left text-sm"><thead className="bg-surface text-ink-muted"><tr><th className="p-3">Select</th>{["Activity", "Date", "Sport", "Distance", "Climb", "Moving", "GPS / readiness", "Project reuse"].map((x) => <th key={x} className="p-3">{x}</th>)}</tr></thead><tbody>{data.items.map((item) => <tr key={item.id} className="border-t border-border"><td className="p-3"><input type="checkbox" aria-label={`Select ${item.name}`} checked={selectedIds.includes(item.id)} onChange={(e) => { const checked = e.currentTarget.checked; setSelectedIds((ids) => checked ? [...ids, item.id] : ids.filter((id) => id !== item.id)); }} /></td><td className="p-3"><button aria-pressed={selectedId === item.id} className="font-medium text-sky-accent hover:underline" onClick={() => setSelectedId(item.id)}>{item.name}</button>{item.hidden && <span className="ml-2 text-xs text-amber-700">Hidden</span>}</td><td className="p-3">{item.local_date}{item.date_is_utc_fallback ? " (UTC fallback)" : ""}</td><td className="p-3">{item.activity_type}</td><td className="p-3">{metric(item.distance_m, "km")}</td><td className="p-3">{metric(item.elevation_gain_m, "m")}</td><td className="p-3">{metric(item.moving_seconds, "h")}</td><td className="p-3">{item.has_gps ? "GPS" : "No GPS"} · {item.readiness.track_ready ? `track ready (${item.readiness.tile_precision})` : "track not ready"}</td><td className="p-3">{item.project_reuse_eligibility === "ready" ? "Ready" : item.project_reuse_eligibility === "no_gps" ? "No GPS track" : item.project_reuse_eligibility === "unavailable" ? "Unavailable" : "Waiting for reusable track"}</td></tr>)}</tbody></table></div>
+      <div className="overflow-x-auto rounded border border-border"><table className="w-full text-left text-sm"><thead className="bg-surface text-ink-muted"><tr><th className="p-3">Select</th>{["Activity", "Date", "Sport", "Distance", "Climb", "Moving", "GPS / readiness", "Project reuse"].map((x) => <th key={x} className="p-3">{x}</th>)}</tr></thead><tbody>{data.items.map((item) => <tr key={item.id} className="border-t border-border"><td className="p-3"><input type="checkbox" aria-label={`Select ${item.name}`} checked={selectedIds.includes(item.id)} onChange={(e) => { const checked = e.currentTarget.checked; setSelectedIds((ids) => checked ? [...ids, item.id] : ids.filter((id) => id !== item.id)); }} /></td><td className="p-3"><button aria-pressed={selectedId === item.id} className="font-medium text-sky-accent hover:underline" onClick={() => setSelectedId(item.id)}>{item.name}</button>{item.hidden && <span className="ml-2 text-xs text-amber-700">Hidden</span>}</td><td className="p-3">{item.local_date}{item.date_is_utc_fallback ? " (UTC fallback)" : ""}</td><td className="p-3">{item.activity_type}</td><td className="p-3">{metric(item.distance_m, "km")}</td><td className="p-3">{metric(item.elevation_gain_m, "m")}</td><td className="p-3">{metric(item.moving_seconds, "h")}</td><td className="p-3">{item.has_gps ? "GPS" : "No GPS"} · {item.readiness.track_ready ? `track ready (${item.readiness.tile_precision})` : "track not ready"}</td><td className="p-3">{reuseLabel(eligibilityById[item.id])}</td></tr>)}</tbody></table></div>
       <div className="flex items-center justify-between text-sm"><span>{data.total} activities · page {Math.floor((filters.offset ?? 0) / PAGE_SIZE) + 1} of {pageCount}</span><div className="flex gap-2"><button className="rounded border border-border px-3 py-1.5 disabled:opacity-40" disabled={(filters.offset ?? 0) === 0} onClick={() => setFilters((f) => ({ ...f, offset: Math.max(0, (f.offset ?? 0) - PAGE_SIZE) }))}>Previous</button><button className="rounded border border-border px-3 py-1.5 disabled:opacity-40" disabled={(filters.offset ?? 0) + PAGE_SIZE >= data.total} onClick={() => setFilters((f) => ({ ...f, offset: (f.offset ?? 0) + PAGE_SIZE }))}>Next</button></div></div>
     </>}
 

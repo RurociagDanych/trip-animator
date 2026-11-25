@@ -28,7 +28,15 @@ export function ActivityLibraryMap({ ownerId = null, filters, area, refreshKey, 
   const routeDataRef = useRef<VaultActivityMapOut | null>(null);
   const routeDataOwnerRef = useRef<string | null>(ownerId);
   const [bounds, setBounds] = useState<string | undefined>(undefined);
-  const requestFilters = useMemo(() => ({ ...filters, area }), [filters, area]);
+  const {
+    name, start_date, end_date, sport, min_distance_m, max_distance_m, min_elevation_gain_m,
+    max_elevation_gain_m, min_moving_seconds, max_moving_seconds, has_gps, include_hidden,
+  } = filters;
+  const requestFilters = useMemo(() => ({
+    name, start_date, end_date, sport, min_distance_m, max_distance_m, min_elevation_gain_m,
+    max_elevation_gain_m, min_moving_seconds, max_moving_seconds, has_gps, include_hidden, area,
+  }), [name, start_date, end_date, sport, min_distance_m, max_distance_m, min_elevation_gain_m,
+    max_elevation_gain_m, min_moving_seconds, max_moving_seconds, has_gps, include_hidden, area]);
   const requestKey = JSON.stringify([ownerId, requestFilters, refreshKey]);
   const [requestState, setRequestState] = useState<{ key: string; ownerId: string | null; data: VaultActivityMapOut | null; error: boolean } | null>(null);
   const [mapReady, setMapReady] = useState(false);

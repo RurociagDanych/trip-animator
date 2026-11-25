@@ -7,7 +7,7 @@ from datetime import date
 from typing import Annotated, Literal, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import StringConstraints
 from sqlalchemy import Select, case, func, select
 from sqlalchemy.orm import Session
@@ -27,8 +27,10 @@ from trip_api.library_geometry import (
     parse_area,
 )
 from trip_api.rate_limit import check_rate_limit
-from trip_api.routers.library_projects import project_reuse_eligibility
+from trip_api.reuse_preview import ReusePreviewCache
+from trip_api.routers.library_projects import batch_reuse_preview, project_reuse_eligibility
 from trip_api.schemas import (
+    ProjectReuseEligibility,
     VaultActivityDetailOut,
     VaultActivityListItemOut,
     VaultActivityListOut,
@@ -37,6 +39,8 @@ from trip_api.schemas import (
     VaultActivitySportSummaryOut,
     VaultActivitySummaryOut,
     VaultBackfillStagesOut,
+    VaultReuseStatusOut,
+    VaultReuseStatusRequest,
     VaultSyncStatusOut,
     VaultSyncStravaRequest,
 )
@@ -73,8 +77,15 @@ def _stored_metric(activity: VaultActivity, field: str) -> float | None:
     return None
 
 
+def _reuse_preview(request: Request) -> ReusePreviewCache:
+    return cast(ReusePreviewCache, request.app.state.reuse_preview)
+
+
+ReusePreview = Annotated[ReusePreviewCache, Depends(_reuse_preview)]
+
+
 def _activity_item(
-    activity: VaultActivity, db: Session, store: StoreDep
+    activity: VaultActivity, eligibility: ProjectReuseEligibility
 ) -> VaultActivityListItemOut:
     return VaultActivityListItemOut(
         id=activity.id,
@@ -100,7 +111,7 @@ def _activity_item(
                 Literal["none", "summary_polyline", "full_stream"], activity.tile_precision
             ),
         ),
-        project_reuse_eligibility=project_reuse_eligibility(db, store, activity),
+        project_reuse_eligibility=eligibility,
     )
 
 
@@ -331,7 +342,7 @@ Selection = Annotated[LibrarySelection, Depends(library_selection)]
 @router.get("/activities", response_model=VaultActivityListOut)
 def list_vault_activities(
     db: DbSession,
-    store: StoreDep,
+    preview: ReusePreview,
     selection: Selection,
     sort: str = Query(
         default="started_at",
@@ -355,7 +366,13 @@ def list_vault_activities(
     activities = list(db.scalars(page_query).all())
     total = int(db.scalar(select(func.count()).select_from(filters.subquery())) or 0)
     return VaultActivityListOut(
-        items=[_activity_item(item, db, store) for item in activities],
+        items=[
+            _activity_item(
+                item,
+                "no_gps" if not item.has_gps else "ready" if preview.is_ready(item) else "waiting",
+            )
+            for item in activities
+        ],
         total=total,
         offset=offset,
         limit=limit,
@@ -371,6 +388,28 @@ def list_vault_sports(auth: CurrentAuth, db: DbSession, include_hidden: bool = F
     sport = VaultActivity.activity_type
     query = _visible_activities(auth.user.id, include_hidden).with_only_columns(sport)
     return list(db.scalars(query.distinct().order_by(sport)))
+
+
+@router.post("/activities/reuse-status", response_model=VaultReuseStatusOut)
+def get_vault_reuse_status(
+    body: VaultReuseStatusRequest,
+    auth: CsrfAuth,
+    db: DbSession,
+    store: StoreDep,
+    preview: ReusePreview,
+) -> VaultReuseStatusOut:
+    """Check reuse eligibility independently of catalog loading."""
+    user_id = auth.user.id
+    check_rate_limit(db, bucket_key=f"vault-reuse-preview:{user_id}", limit=60, window_seconds=60)
+    activities = list(
+        db.scalars(
+            _visible_activities(user_id, include_hidden=True).where(
+                VaultActivity.id.in_(set(body.activity_ids))
+            )
+        )
+    )
+    statuses = batch_reuse_preview(db, store, preview, user_id, activities)
+    return VaultReuseStatusOut(statuses=statuses)
 
 
 @router.get("/activities/map")
@@ -505,7 +544,7 @@ def get_vault_activity(
         else None
     )
     return VaultActivityDetailOut(
-        **_activity_item(activity, db, store).model_dump(),
+        **_activity_item(activity, project_reuse_eligibility(db, store, activity)).model_dump(),
         strava_activity_id=activity.strava_activity_id,
         started_at_local=activity.started_at_local,
         utc_offset_s=activity.utc_offset_s,

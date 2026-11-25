@@ -7,6 +7,8 @@ import json
 import logging
 import re
 import uuid
+from collections import defaultdict
+from collections.abc import Iterable
 from copy import deepcopy
 from datetime import UTC, datetime
 from io import BytesIO
@@ -21,6 +23,8 @@ from trip_telemetry import build_silver_dataframe, parse_strava_streams, parse_t
 
 from trip_api.db import IngestJob, Project, Stage, VaultActivity
 from trip_api.deps import CsrfAuth, DbSession, StoreDep
+from trip_api.reuse_preview import ReusePreviewCache
+from trip_api.schemas import ProjectReuseEligibility
 
 router = APIRouter(prefix="/api/v1/library/projects", tags=["library-projects"])
 logger = logging.getLogger(__name__)
@@ -136,6 +140,105 @@ def project_reuse_eligibility(
     return "waiting"
 
 
+def batch_reuse_preview(
+    db: Session,
+    store: StoreDep,
+    cache: ReusePreviewCache,
+    user_id: uuid.UUID,
+    activities: list[VaultActivity],
+) -> dict[uuid.UUID, ProjectReuseEligibility]:
+    """Validate connected, owner-scoped activities without per-activity SQL."""
+    statuses: dict[uuid.UUID, ProjectReuseEligibility] = {}
+    unresolved = []
+    for activity in activities:
+        if not activity.has_gps:
+            statuses[activity.id] = "no_gps"
+        elif cache.is_ready(activity):
+            statuses[activity.id] = "ready"
+        elif _standalone_original(store, activity) is not None:
+            # Standalone resolution compares the full telemetry, not just geometry.
+            cache.mark_ready(activity)
+            statuses[activity.id] = "ready"
+        else:
+            unresolved.append(activity)
+    if not unresolved:
+        return statuses
+
+    linked_ids = {a.source_stage_id for a in unresolved if a.source_stage_id is not None}
+    provider_ids = {
+        a.strava_activity_id
+        for a in unresolved
+        if a.source_stage_id is None
+        and a.source_provider == "strava"
+        and a.strava_activity_id is not None
+        and a.external_activity_id == str(a.strava_activity_id)
+    }
+    linked: dict[uuid.UUID, Stage] = {}
+    by_provider: dict[int, list[Stage]] = defaultdict(list)
+    if linked_ids or provider_ids:
+        for stage in db.scalars(
+            select(Stage)
+            .join(Project, Project.id == Stage.project_id)
+            .where(
+                Project.owner_user_id == user_id,
+                Stage.id.in_(linked_ids) | Stage.strava_activity_id.in_(provider_ids),
+            )
+        ):
+            if stage.id in linked_ids:
+                linked[stage.id] = stage
+            if stage.strava_activity_id is not None:
+                by_provider[stage.strava_activity_id].append(stage)
+
+    waiting = []
+    for activity in unresolved:
+        if activity.source_stage_id is not None:
+            source = linked.get(activity.source_stage_id)
+            if source is not None and source.vault_activity_id != activity.id:
+                source = None
+        elif (
+            activity.strava_activity_id in provider_ids
+            and activity.source_provider == "strava"
+            and activity.external_activity_id == str(activity.strava_activity_id)
+        ):
+            source = _verified_unlinked_original(
+                store, activity, by_provider.get(activity.strava_activity_id, [])
+            )
+        else:
+            source = None
+        if source is not None and source.bronze_object_key and source.silver_object_key:
+            try:
+                _validate_artifacts(store, [(activity, source)])
+            except HTTPException as exc:
+                if exc.status_code != 409:
+                    raise
+            else:
+                statuses[activity.id] = "ready"
+                continue
+        if activity.silver_object_key or activity.source_stage_id is not None:
+            statuses[activity.id] = "unavailable"
+        else:
+            waiting.append(activity)
+
+    if waiting:
+        catalog_id = IngestJob.payload_json["catalog_activity_id"].as_string()
+        failed = set(
+            db.scalars(
+                select(catalog_id)
+                .where(
+                    IngestJob.provider == "strava",
+                    IngestJob.payload_json["kind"].as_string() == "library_enrichment",
+                    IngestJob.payload_json["owner_user_id"].as_string() == str(user_id),
+                    catalog_id.in_([str(a.id) for a in waiting]),
+                    IngestJob.status.in_(["failed", "ignored"]),
+                )
+                .distinct()
+            )
+        )
+        for activity in waiting:
+            statuses[activity.id] = "unavailable" if str(activity.id) in failed else "waiting"
+    return statuses
+
+
 def _standalone_original(store: StoreDep, activity: VaultActivity) -> Stage | None:
     """Build transient stage metadata only from digest-verified original provider bytes."""
     if (
@@ -245,11 +348,14 @@ def _find_unlinked_original(
             )
         ).all()
     )
+    return _verified_unlinked_original(store, activity, candidates)
+
+
+def _verified_unlinked_original(
+    store: StoreDep, activity: VaultActivity, candidates: Iterable[Stage]
+) -> Stage | None:
     for stage in candidates:
         if not _is_original_provider_stage(stage, activity):
-            continue
-        project = db.get(Project, stage.project_id)
-        if project is None or project.owner_user_id != owner_id:
             continue
         try:
             raw = store.get_bytes(stage.bronze_object_key)
