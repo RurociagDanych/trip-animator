@@ -186,6 +186,9 @@ jobs:
           echo "Checked out commit: $(git rev-parse --short HEAD) ($(git log -1 --pretty=%s))"
 
           compose_cmd=(docker compose --env-file .env -f infra/compose.yaml)
+          if [[ -f infra/compose.observability.yaml ]]; then
+            compose_cmd+=(-f infra/compose.observability.yaml)
+          fi
 
           prune_cache() {
             if [[ "$PRUNE_BUILDER_CACHE" == "true" ]]; then
@@ -250,6 +253,9 @@ jobs:
             echo "Error: Health check failed after 30 attempts for ${VPS_HEALTH_URL} (last HTTP status: ${last_http_code})" >&2
             "${compose_cmd[@]}" logs --tail=50 api caddy web || true
             exit 1
+          fi
+          if [[ -x infra/scripts/apply-observability.sh ]]; then
+            infra/scripts/apply-observability.sh || echo 'Warning: could not apply observability settings.' >&2
           fi
           REMOTE_SCRIPT
           } | ssh "${ssh_opts[@]}" -- "${VPS_USER}@${VPS_HOST}" 'bash -s'

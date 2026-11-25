@@ -1,0 +1,33 @@
+{
+  "uid": "trip-api-overview",
+  "title": "Trip Animator — API and renders",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "API scrape status (1 = reachable)",
+      "gridPos": {"h": 4, "w": 12, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "trip-prometheus"},
+      "targets": [{"refId": "A", "expr": "up{job=\"trip-api\"} and (time() - timestamp(up{job=\"trip-api\"}) < 90)", "instant": true, "range": false}]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Database status (1 = reachable)",
+      "gridPos": {"h": 4, "w": 12, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "trip-prometheus"},
+      "targets": [{"refId": "A", "expr": "trip_db_up and (up{job=\"trip-api\"} == 1) and (time() - timestamp(trip_db_up) < 90)", "instant": true, "range": false}]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Queued and running renders",
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "trip-prometheus"},
+      "targets": [{"refId": "A", "expr": "trip_render_jobs_total{status=~\"queued|running\"} and on (job,instance) (trip_db_up == 1) and on (job,instance) (up{job=\"trip-api\"} == 1) and (time() - timestamp(trip_render_jobs_total{status=~\"queued|running\"}) < 90)", "legendFormat": "{{status}}", "range": true}]
+    }
+  ]
+}
