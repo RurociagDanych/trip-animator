@@ -32,7 +32,7 @@ if "${stack[@]}" config --services | grep -Ex 'grafana|prometheus'; then
 fi
 "${fixture[@]}" up -d --wait postgres
 "${fixture[@]}" run -T --no-deps --pull never --rm migrate
-"${fixture[@]}" up -d --no-deps --no-build --wait api
+"${fixture[@]}" up -d --no-deps --build --wait api
 infra/scripts/apply-observability.sh "$conf"
 
 grafana="http://127.0.0.1:$port"
@@ -59,6 +59,16 @@ fi
 test "$(curl -s --max-time 3 -o /dev/null -w '%{http_code}' "$grafana/api/dashboards/uid/trip-api-overview")" = 401
 wait_for queue_readable 2>/dev/null || queue_readable
 printf '%s\n' 'Verified the authenticated dashboard and live API/PostgreSQL scrape.'
+
+ingest_dashboard="$grafana/api/dashboards/uid/trip-ingest-overview"
+wait_for curl_grafana "$ingest_dashboard" >/dev/null
+for panel in 1 2; do
+  expression=$(curl_grafana "$ingest_dashboard" |
+    python3 -c 'import json,sys; print(next(p["targets"][0]["expr"] for p in json.load(sys.stdin)["dashboard"]["panels"] if p["id"] == int(sys.argv[1])))' "$panel")
+  query "$expression" |
+    python3 -c 'import json,sys; assert [r["value"][1] for r in json.load(sys.stdin)["data"]["result"]] == ["0"]'
+done
+printf '%s\n' 'Verified both ingest dashboard queries against an empty PostgreSQL queue.'
 
 # Keep the running application container and both named volumes when switching off.
 api_id=$("${fixture[@]}" ps -q api)

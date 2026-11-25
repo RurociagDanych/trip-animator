@@ -125,6 +125,8 @@ The optional monitoring stack starts **off**. To enable it locally, start the ap
 
 Grafana uses the `admin` account on first launch. Open `http://127.0.0.1:3001` locally, or use `ssh -N -L 3001:127.0.0.1:3001 user@vps` before opening the same URL. Prometheus has no published port. The **Trip Animator — API and renders** dashboard shows scrape status, database health, and render queue depth. Unavailable queue data is not rendered as zero. Prometheus keeps up to 15 days, with a 1 GB retention target for stored blocks; the WAL and head can use additional space. No history backup or alerts are configured.
 
+The **Trip Animator — ingest queue** dashboard shows the number of persisted jobs in `queued` status and the age of the oldest one since creation. Running and completed jobs are excluded. A confirmed empty queue reports zero; stale or unavailable measurements are not shown as zero.
+
 Set `OBSERVABILITY_ENABLED=false` and rerun the same script to stop only monitoring and retain its data. Do not use `--remove-orphans` with the base file alone when monitoring is enabled: include `-f infra/compose.observability.yaml` so Compose recognizes its containers. This slice does not collect logs yet.
 
 - **Liveness**: `GET /health` → `200 {"status":"ok","service":"trip-api","env":"..."}`

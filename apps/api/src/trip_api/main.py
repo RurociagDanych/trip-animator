@@ -22,6 +22,7 @@ from starlette.formparsers import MultiPartException
 
 from trip_api.config import Settings, get_settings
 from trip_api.db import (
+    IngestJob,
     OAuthConnection,
     Project,
     RenderJob,
@@ -237,6 +238,7 @@ def create_app(
         stages_total = 0
         sessions_active = 0
         oauth_connections_total = 0
+        ingest_lines: list[str] = []
 
         try:
             with db_session_factory() as db:
@@ -260,6 +262,26 @@ def create_app(
                 oauth_connections_total = int(
                     db.scalar(select(func.count()).select_from(OAuthConnection)) or 0
                 )
+                ingest_depth, oldest_ingest = db.execute(
+                    select(func.count(), func.min(IngestJob.created_at)).where(
+                        IngestJob.status == "queued"
+                    )
+                ).one()
+                ingest_age = 0.0
+                if oldest_ingest is not None:
+                    # SQLite returns naive timestamps for columns stored in UTC.
+                    if oldest_ingest.tzinfo is None:
+                        oldest_ingest = oldest_ingest.replace(tzinfo=UTC)
+                    ingest_age = max(0.0, (now - oldest_ingest).total_seconds())
+                ingest_lines = [
+                    "# HELP trip_ingest_queue_depth Number of persisted queued ingest jobs.",
+                    "# TYPE trip_ingest_queue_depth gauge",
+                    f"trip_ingest_queue_depth {ingest_depth}",
+                    "# HELP trip_ingest_queue_oldest_age_seconds "
+                    "Age since creation of the oldest queued ingest job in seconds.",
+                    "# TYPE trip_ingest_queue_oldest_age_seconds gauge",
+                    f"trip_ingest_queue_oldest_age_seconds {ingest_age:g}",
+                ]
         except SQLAlchemyError as exc:
             logger.warning("Metrics DB query failed: %s", type(exc).__name__)
             db_up = 0
@@ -289,6 +311,7 @@ def create_app(
             "# HELP trip_oauth_connections_total Active OAuth provider connections.",
             "# TYPE trip_oauth_connections_total gauge",
             f"trip_oauth_connections_total {oauth_connections_total}",
+            *(ingest_lines if db_up else []),
         ]
         return PlainTextResponse(
             content="\n".join(lines) + "\n",
