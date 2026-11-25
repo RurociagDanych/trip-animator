@@ -100,11 +100,47 @@ def test_catalog_sports_are_distinct_sorted_and_follow_owner_visibility(
     client, _ = harness.login_client("sports@example.com")
     response = client.get(endpoint, params={"name": "No match", "sport": "cycling", "offset": 100})
     assert response.status_code == 200, response.text
-    assert response.json() == ["cycling", "running"]
+    assert response.json() == ["VirtualRun", "cycling"]
 
     response = client.get(endpoint, params={"include_hidden": True})
     assert response.status_code == 200, response.text
-    assert response.json() == ["cycling", "hiking", "running"]
+    assert response.json() == ["VirtualRun", "cycling", "hiking"]
+
+
+def test_catalog_uses_provider_sport_across_list_details_filters_and_summary(
+    harness: AppHarness,
+) -> None:
+    user = harness.create_user("provider-sports@example.com")
+    when = datetime(2025, 3, 1, tzinfo=UTC)
+    sports = ["Dance", "Crossfit", "WeightTraining", "Ride", "VirtualRide", "FutureSport" * 4]
+    activities = []
+    for sport in [*sports, "", "strava"]:
+        activity = _activity(user.id, sport or "Unknown", started=when, has_gps=False)
+        activity.raw_sport_type = sport
+        activities.append(activity)
+    upload = _activity(user.id, "Uploaded ride", started=when, has_gps=False)
+    upload.source_provider = "upload"
+    upload.raw_sport_type = "gpx"
+    dance_id = activities[0].id
+    _seed(harness, *activities, upload)
+    client, _ = harness.login_client("provider-sports@example.com")
+    base = "/api/v1/vault/activities"
+    assert set(client.get(f"{base}/sports").json()) == {*sports, "Unknown", "cycling"}
+
+    filtered = client.get(base, params={"sport": ["Dance", sports[-1]]})
+    assert filtered.status_code == 200, filtered.text
+    body = filtered.json()
+    assert {item["activity_type"] for item in body["items"]} == {"Dance", sports[-1]}
+    assert {item["activity_type"]: item["activity_count"] for item in body["by_sport"]} == {
+        "Dance": 1,
+        sports[-1]: 1,
+    }
+    assert client.get(f"{base}/map", params={"sport": "Dance"}).json()["total"] == 1
+    assert client.get(base, params={"sport": "cycling"}).json()["total"] == 1
+    assert client.get(base, params={"sport": "Unknown"}).json()["total"] == 2
+    assert client.get(f"{base}/{dance_id}").json()["activity_type"] == "Dance"
+    with harness.session_factory() as db:
+        assert db.get(VaultActivity, dance_id).activity_type == "cycling"
 
 
 def test_activity_library_searches_beyond_first_page_and_sorts_stably(
@@ -265,7 +301,7 @@ def test_sport_filter_bounds_allow_unknown_and_empty_values(harness: AppHarness)
         assert response.json()["total"] == 1
         assert client.get(endpoint, params={"sport": ""}).json()["total"] == 0
         assert client.get(endpoint, params={"sport": ["running"] * 33}).status_code == 422
-        assert client.get(endpoint, params={"sport": ["running", "x" * 33]}).status_code == 422
+        assert client.get(endpoint, params={"sport": ["running", "x" * 65]}).status_code == 422
 
 
 def test_activity_library_summary_groups_metrics_by_exact_sport(harness: AppHarness) -> None:

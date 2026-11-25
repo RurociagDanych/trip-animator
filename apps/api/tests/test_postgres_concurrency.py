@@ -738,6 +738,29 @@ def test_postgres_activity_search_backfills_names_and_preserves_literal_filters(
     assert client.get("/api/v1/vault/activities", params={"name": "kolo"}).json()["total"] == 1
 
 
+def test_postgres_catalog_preserves_strava_sport_from_import(pg_app_factory: Any) -> None:
+    app, _settings, _engine, sf, _store = pg_app_factory()
+    user = _create_pg_user(sf, "provider-sport-pg@example.com")
+    now = datetime.now(UTC)
+    with sf() as db:
+        for item in (
+            {"id": 1, "name": "Morning dance", "sport_type": "Dance", "type": "Workout"},
+            {"id": 2, "name": "Afternoon ride", "type": "Ride"},
+        ):
+            upsert_strava_activity_to_vault(db, user_id=user.id, item=item, now=now)
+        db.commit()
+
+    client, _csrf = _login_pg_client(app, "provider-sport-pg@example.com")
+    base = "/api/v1/vault/activities"
+    assert client.get(f"{base}/sports").json() == ["Dance", "Ride"]
+    response = client.get(base, params={"sport": "Dance"})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["total"] == 1
+    assert [item["activity_type"] for item in body["items"]] == ["Dance"]
+    assert [item["activity_type"] for item in body["by_sport"]] == ["Dance"]
+
+
 def test_postgres_concurrent_ingest_parsed_track_unique_stage_order(
     pg_app_factory: Any,
     sample_gpx: bytes,

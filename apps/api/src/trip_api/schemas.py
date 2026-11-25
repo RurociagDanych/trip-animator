@@ -742,7 +742,7 @@ class VaultActivityListItemOut(BaseModel):
 
     id: uuid.UUID
     name: str
-    activity_type: str
+    activity_type: str = Field(description="Catalog sport, not the project stage activity type.")
     raw_sport_type: str
     source_provider: str
     started_at: datetime
@@ -774,9 +774,9 @@ class VaultActivitySummaryOut(BaseModel):
 
 
 class VaultActivitySportSummaryOut(BaseModel):
-    """Metric totals and measurement coverage for one canonical activity type."""
+    """Metric totals and measurement coverage for one catalog sport."""
 
-    activity_type: ActivityType
+    activity_type: str
     activity_count: int
     distance_m: float | None
     distance_known_count: int
