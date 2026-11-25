@@ -1,4 +1,4 @@
-"""Activity Vault Strava sync, live status, and Stage backfill endpoints."""
+"""Activity Vault catalog, Strava sync, live status, and Stage backfill endpoints."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import Annotated, Literal, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from pydantic import StringConstraints
 from sqlalchemy import Select, case, func, select
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
@@ -48,6 +49,7 @@ from trip_api.vault_sync import (
 
 router = APIRouter(prefix="/api/v1/vault", tags=["vault"])
 
+_SportValue = Annotated[str, StringConstraints(max_length=32)]
 
 _METRIC_KEYS = {
     "distance_m": "distance",
@@ -102,13 +104,22 @@ def _activity_item(
     )
 
 
+def _visible_activities(user_id: UUID, include_hidden: bool) -> Select[VaultActivity]:
+    query = select(VaultActivity).where(
+        VaultActivity.user_id == user_id, VaultActivity.disconnected_at.is_(None)
+    )
+    if not include_hidden:
+        query = query.where(VaultActivity.hidden_at.is_(None))
+    return query
+
+
 def _selection_query(
     user_id: UUID,
     *,
     name: str | None,
     start_date: date | None,
     end_date: date | None,
-    sport: str | None,
+    sport: list[str] | None,
     min_distance_m: float | None,
     max_distance_m: float | None,
     min_elevation_gain_m: float | None,
@@ -118,13 +129,7 @@ def _selection_query(
     has_gps: bool | None,
     include_hidden: bool = False,
 ) -> Select[VaultActivity]:
-    query = select(VaultActivity).where(VaultActivity.user_id == user_id)
-    disconnected_at = getattr(VaultActivity, "disconnected_at", None)
-    hidden_at = getattr(VaultActivity, "hidden_at", None)
-    if disconnected_at is not None:
-        query = query.where(disconnected_at.is_(None))
-    if not include_hidden and hidden_at is not None:
-        query = query.where(hidden_at.is_(None))
+    query = _visible_activities(user_id, include_hidden)
     if name is not None:
         normalized = normalize_activity_search(name)
         escaped = normalized.replace("!", "!!").replace("%", "!%").replace("_", "!_")
@@ -133,8 +138,8 @@ def _selection_query(
         query = query.where(VaultActivity.local_date >= start_date)
     if end_date is not None:
         query = query.where(VaultActivity.local_date <= end_date)
-    if sport is not None:
-        query = query.where(VaultActivity.activity_type == sport)
+    if sport:
+        query = query.where(VaultActivity.activity_type.in_(sport))
     if min_distance_m is not None:
         query = query.where(_metric_expression("distance_m") >= min_distance_m)
     if max_distance_m is not None:
@@ -250,7 +255,7 @@ def library_selection(
     name: str | None = Query(default=None, max_length=200),
     start_date: date | None = None,
     end_date: date | None = None,
-    sport: str | None = Query(default=None, max_length=32),
+    sport: Annotated[list[_SportValue] | None, Query(max_length=32)] = None,
     min_distance_m: float | None = Query(default=None, ge=0),
     max_distance_m: float | None = Query(default=None, ge=0),
     min_elevation_gain_m: float | None = Query(default=None, ge=0),
@@ -358,6 +363,14 @@ def list_vault_activities(
         by_sport=_summary_by_sport(db, filters),
         geographic_excluded_count=selection.geographic_excluded_count,
     )
+
+
+@router.get("/activities/sports")
+def list_vault_sports(auth: CurrentAuth, db: DbSession, include_hidden: bool = False) -> list[str]:
+    """List distinct sport types in the owner's visible catalog."""
+    sport = VaultActivity.activity_type
+    query = _visible_activities(auth.user.id, include_hidden).with_only_columns(sport)
+    return list(db.scalars(query.distinct().order_by(sport)))
 
 
 @router.get("/activities/map")

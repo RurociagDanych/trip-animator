@@ -7,6 +7,7 @@ import type { ProjectReuseEligibility } from "../../lib/api/types";
 import { ActivityLibraryMap } from "./ActivityLibraryMap";
 import { LibraryActivityActions } from "./LibraryActivityActions";
 import { LibrarySavedViews } from "./LibrarySavedViews";
+import { LibrarySportFilter } from "./LibrarySportFilter";
 import { loadActivityLibrarySelection, saveActivityLibrarySelection } from "./activity-library-selection";
 
 
@@ -67,7 +68,7 @@ function ActivityLibraryOwnerView({ ownerId }: { ownerId: string | null }) {
   useEffect(() => {
     saveActivityLibrarySelection(ownerId, filters);
   }, [ownerId, filters]);
-  function change(key: keyof VaultActivityFilters, value: string | number | boolean | undefined) {
+  function change<K extends keyof VaultActivityFilters>(key: K, value: VaultActivityFilters[K]) {
     setFilters((current) => ({ ...current, [key]: value, offset: 0 }));
   }
   const data = list.data;
@@ -82,7 +83,7 @@ function ActivityLibraryOwnerView({ ownerId }: { ownerId: string | null }) {
     <ActivityLibraryMap ownerId={ownerId} filters={filters} area={filters.area} onAreaChange={(area) => setFilters((current) => ({ ...current, area, offset: 0 }))} selectedId={selectedId} onSelect={setSelectedId} refreshKey={status.data?.vault_version} />
     <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
       <label className="text-xs text-ink-muted">Search name<input aria-label="Search activity name" className={`${baseInput} mt-1 w-full`} value={filters.name ?? ""} onChange={(e) => change("name", e.currentTarget.value || undefined)} /></label>
-      <label className="text-xs text-ink-muted">Sport<input aria-label="Sport type" className={`${baseInput} mt-1 w-full`} value={filters.sport ?? ""} placeholder="e.g. Ride" onChange={(e) => change("sport", e.currentTarget.value || undefined)} /></label>
+      <LibrarySportFilter ownerId={ownerId} includeHidden={filters.include_hidden ?? false} value={filters.sport} onChange={(sports) => change("sport", sports)} />
       <label className="text-xs text-ink-muted">From<input type="date" className={`${baseInput} mt-1 w-full`} value={filters.start_date ?? ""} onChange={(e) => change("start_date", e.currentTarget.value || undefined)} /></label>
       <label className="text-xs text-ink-muted">To<input type="date" className={`${baseInput} mt-1 w-full`} value={filters.end_date ?? ""} onChange={(e) => change("end_date", e.currentTarget.value || undefined)} /></label>
       <label className="text-xs text-ink-muted">GPS<select aria-label="GPS filter" className={`${baseInput} mt-1 w-full`} value={filters.has_gps === undefined ? "" : String(filters.has_gps)} onChange={(e) => change("has_gps", e.currentTarget.value === "" ? undefined : e.currentTarget.value === "true")}><option value="">Any</option><option value="true">GPS available</option><option value="false">No GPS</option></select></label>

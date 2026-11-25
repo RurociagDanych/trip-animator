@@ -73,6 +73,40 @@ def test_activity_library_requires_authentication(harness: AppHarness) -> None:
     assert TestClient(harness.app).get("/api/v1/vault/activities").status_code == 401
 
 
+def test_catalog_sports_are_distinct_sorted_and_follow_owner_visibility(
+    harness: AppHarness,
+) -> None:
+    endpoint = "/api/v1/vault/activities/sports"
+    assert TestClient(harness.app).get(endpoint).status_code == 401
+
+    owner = harness.create_user("sports@example.com")
+    other = harness.create_user("other-sports@example.com")
+    when = datetime(2025, 3, 1, tzinfo=UTC)
+    run = _activity(owner.id, "Run", started=when, activity_type="running", has_gps=False)
+    run.raw_sport_type = "VirtualRun"
+    hidden = _activity(owner.id, "Hike", started=when, activity_type="hiking")
+    hidden.hidden_at = when
+    disconnected = _activity(owner.id, "Walk", started=when, activity_type="walking")
+    disconnected.disconnected_at = when
+    _seed(
+        harness,
+        run,
+        hidden,
+        disconnected,
+        _activity(owner.id, "First ride", started=when),
+        _activity(owner.id, "Second ride", started=when),
+        _activity(other.id, "Ski", started=when, activity_type="skiing"),
+    )
+    client, _ = harness.login_client("sports@example.com")
+    response = client.get(endpoint, params={"name": "No match", "sport": "cycling", "offset": 100})
+    assert response.status_code == 200, response.text
+    assert response.json() == ["cycling", "running"]
+
+    response = client.get(endpoint, params={"include_hidden": True})
+    assert response.status_code == 200, response.text
+    assert response.json() == ["cycling", "hiking", "running"]
+
+
 def test_activity_library_searches_beyond_first_page_and_sorts_stably(
     harness: AppHarness,
 ) -> None:
@@ -178,6 +212,60 @@ def test_activity_library_filters_and_summary_use_entire_filtered_selection(
         "gps_activity_count": 0,
         "no_gps_activity_count": 1,
     }
+
+
+def test_repeated_sports_share_selection_across_list_summary_and_map(harness: AppHarness) -> None:
+    user = harness.create_user("multi-sport@example.com")
+    when = datetime(2025, 3, 1, tzinfo=UTC)
+    activities = [
+        _activity(user.id, "Morning ride", started=when, distance_m=1200),
+        _activity(user.id, "Morning run", started=when, activity_type="running", distance_m=800),
+        _activity(user.id, "Morning hike", started=when, activity_type="hiking"),
+        _activity(user.id, "Evening ride", started=when),
+    ]
+    for activity in activities:
+        activity.summary_polyline = "_p~iF~ps|U_ulLnnqC_mqNvxq`@"
+    _seed(harness, *activities)
+    client, _ = harness.login_client("multi-sport@example.com")
+
+    params = {"sport": ["cycling", "running", "cycling"], "name": "Morning"}
+    listing = client.get("/api/v1/vault/activities", params={**params, "limit": 1})
+    mapped = client.get("/api/v1/vault/activities/map", params=params)
+    assert listing.status_code == 200, listing.text
+    assert mapped.status_code == 200, mapped.text
+    body = listing.json()
+    assert body["total"] == body["summary"]["activity_count"] == mapped.json()["total"] == 2
+    assert len(body["items"]) == 1
+    assert body["summary"]["distance_m"] == 2000
+    assert {entry["activity_type"]: entry["activity_count"] for entry in body["by_sport"]} == {
+        "cycling": 1,
+        "running": 1,
+    }
+    assert {feature["properties"]["name"] for feature in mapped.json()["features"]} == {
+        "Morning ride",
+        "Morning run",
+    }
+
+
+def test_sport_filter_bounds_allow_unknown_and_empty_values(harness: AppHarness) -> None:
+    user = harness.create_user("sport-bounds@example.com")
+    when = datetime(2025, 3, 1, tzinfo=UTC)
+    custom_sport = " Unmapped, " + "x" * 21
+    _seed(
+        harness,
+        _activity(user.id, "Run", started=when, activity_type="running"),
+        _activity(user.id, "Ride", started=when),
+    )
+    client, _ = harness.login_client("sport-bounds@example.com")
+
+    for endpoint in ("/api/v1/vault/activities", "/api/v1/vault/activities/map"):
+        sports = ["running", "", custom_sport] + ["unknown"] * 29
+        response = client.get(endpoint, params={"sport": sports})
+        assert response.status_code == 200, response.text
+        assert response.json()["total"] == 1
+        assert client.get(endpoint, params={"sport": ""}).json()["total"] == 0
+        assert client.get(endpoint, params={"sport": ["running"] * 33}).status_code == 422
+        assert client.get(endpoint, params={"sport": ["running", "x" * 33]}).status_code == 422
 
 
 def test_activity_library_summary_groups_metrics_by_exact_sport(harness: AppHarness) -> None:

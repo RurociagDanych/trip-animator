@@ -129,6 +129,7 @@ const mapResult = {
 function renderLibrary(ownerId = "owner-a", savedViews: LibrarySavedView[] = []) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   vi.spyOn(libraryViewsApi, "list").mockResolvedValue({ items: savedViews });
+  if (!vi.isMockFunction(vaultApi.sports)) vi.spyOn(vaultApi, "sports").mockResolvedValue([]);
   return render(<QueryClientProvider client={client}><ActivityLibraryView ownerId={ownerId} /></QueryClientProvider>);
 }
 
@@ -142,6 +143,47 @@ afterEach(() => {
 });
 
 describe("ActivityLibraryView", () => {
+  it("filters list and map by multiple account sports independently of name and pagination", async () => {
+    const sports = vi.spyOn(vaultApi, "sports").mockImplementation(async (includeHidden) =>
+      includeHidden ? ["cycling", "hiking", "running"] : ["cycling", "running"]);
+    const map = vi.spyOn(vaultApi, "map").mockResolvedValue(mapResult);
+    const list = vi.spyOn(vaultApi, "list").mockImplementation(async (filters) =>
+      listResult([item("1", "Account activity")], filters.offset ?? 0, 60));
+    vi.spyOn(vaultApi, "status").mockResolvedValue(syncStatus(1));
+    const { unmount } = renderLibrary();
+    await screen.findByText("Account activity");
+    fireEvent.change(screen.getByRole("textbox", { name: "Search activity name" }), { target: { value: "Account" } });
+    fireEvent.click(await screen.findByRole("button", { name: "Next" }));
+    await waitFor(() => expect(list).toHaveBeenLastCalledWith(expect.objectContaining({ offset: 50 }), expect.anything()));
+    fireEvent.click(screen.getByText("All sports"));
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Road Cycling" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Running" }));
+    await waitFor(() => {
+      const filters = expect.objectContaining({ name: "Account", sport: ["cycling", "running"], offset: 0 });
+      expect(list).toHaveBeenLastCalledWith(filters, expect.anything());
+      expect(map).toHaveBeenLastCalledWith(expect.objectContaining({ name: "Account", sport: ["cycling", "running"] }), expect.anything());
+    });
+    expect(sports).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("checkbox", { name: "Hiking / Trekking" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include hidden activities" }));
+    expect(await screen.findByRole("checkbox", { name: "Hiking / Trekking" })).not.toBeChecked();
+    unmount();
+    renderLibrary();
+    expect(screen.getByText("2 selected")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("2 selected"));
+    fireEvent.click(screen.getByRole("button", { name: "Clear sports" }));
+    await waitFor(() => expect(list).toHaveBeenLastCalledWith(expect.objectContaining({ sport: undefined }), expect.anything()));
+  });
+
+  it("serializes selected sports as repeated query parameters for list and map", async () => {
+    const get = vi.spyOn(apiClient, "get").mockResolvedValue({});
+    await vaultApi.list({ sport: ["cycling", "running"], limit: 50 });
+    await vaultApi.map({ sport: ["cycling", "running"], limit: 50 });
+    expect(get.mock.calls.map(([url]) => url)).toEqual([
+      "/api/v1/vault/activities?sport=cycling&sport=running&limit=50",
+      "/api/v1/vault/activities/map?sport=cycling&sport=running",
+    ]);
+  });
   it("refreshes waiting selections outside the visible page before allowing project reuse", async () => {
     let enriched = false;
     vi.spyOn(vaultApi, "map").mockResolvedValue(mapResult);
