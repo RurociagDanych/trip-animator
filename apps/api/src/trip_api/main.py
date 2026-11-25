@@ -234,6 +234,7 @@ def create_app(
             for status_name in ("queued", "running", "succeeded", "failed", "cancelled")
         }
         projects_total = 0
+        oldest_queued_age_seconds = 0
         stages_total = 0
         sessions_active = 0
         oauth_connections_total = 0
@@ -241,12 +242,21 @@ def create_app(
         try:
             with db_session_factory() as db:
                 rows = db.execute(
-                    select(RenderJob.status, func.count()).group_by(RenderJob.status)
+                    select(RenderJob.status, func.count(), func.min(RenderJob.created_at)).group_by(
+                        RenderJob.status
+                    )
                 ).all()
-                for status_val, count_val in rows:
+                for status_val, count_val, oldest_created_at in rows:
                     key = str(status_val)
                     if key in render_counts:
                         render_counts[key] = int(count_val)
+                    if key == "queued" and oldest_created_at is not None:
+                        # SQLite returns naive timestamps for UTC creation times.
+                        if oldest_created_at.tzinfo is None:
+                            oldest_created_at = oldest_created_at.replace(tzinfo=UTC)
+                        oldest_queued_age_seconds = max(
+                            0, int((now - oldest_created_at).total_seconds())
+                        )
                 projects_total = int(db.scalar(select(func.count()).select_from(Project)) or 0)
                 stages_total = int(db.scalar(select(func.count()).select_from(Stage)) or 0)
                 sessions_active = int(
@@ -290,6 +300,15 @@ def create_app(
             "# TYPE trip_oauth_connections_total gauge",
             f"trip_oauth_connections_total {oauth_connections_total}",
         ]
+        if db_up:
+            lines.extend(
+                [
+                    "# HELP trip_render_queue_oldest_age_seconds "
+                    "Age since creation of the oldest queued render, or zero when empty.",
+                    "# TYPE trip_render_queue_oldest_age_seconds gauge",
+                    f"trip_render_queue_oldest_age_seconds {oldest_queued_age_seconds}",
+                ]
+            )
         return PlainTextResponse(
             content="\n".join(lines) + "\n",
             media_type="text/plain; version=0.0.4; charset=utf-8",

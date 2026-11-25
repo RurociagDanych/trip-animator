@@ -32,7 +32,7 @@ if "${stack[@]}" config --services | grep -Ex 'grafana|prometheus'; then
 fi
 "${fixture[@]}" up -d --wait postgres
 "${fixture[@]}" run -T --no-deps --pull never --rm migrate
-"${fixture[@]}" up -d --no-deps --no-build --wait api
+"${fixture[@]}" up -d --no-deps --build --wait api
 infra/scripts/apply-observability.sh "$conf"
 
 grafana="http://127.0.0.1:$port"
@@ -58,6 +58,11 @@ if ! wait_for curl_grafana "$grafana/api/dashboards/uid/trip-api-overview" >/dev
 fi
 test "$(curl -s --max-time 3 -o /dev/null -w '%{http_code}' "$grafana/api/dashboards/uid/trip-api-overview")" = 401
 wait_for queue_readable 2>/dev/null || queue_readable
+queue_age_query=$(curl_grafana "$grafana/api/dashboards/uid/trip-api-overview" |
+  python3 -c 'import sys,json; panels=json.load(sys.stdin)["dashboard"]["panels"]; print(next(p for p in panels if p["id"] == 4)["targets"][0]["expr"])')
+query "$queue_age_query" |
+  python3 -c 'import sys,json; assert [row["value"][1] for row in json.load(sys.stdin)["data"]["result"]] == ["0"]'
+printf '%s\n' 'Verified the dashboard queue age query against an empty PostgreSQL queue.'
 printf '%s\n' 'Verified the authenticated dashboard and live API/PostgreSQL scrape.'
 
 # Keep the running application container and both named volumes when switching off.

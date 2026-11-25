@@ -28,6 +28,15 @@
       "gridPos": {"h": 10, "w": 24, "x": 0, "y": 4},
       "datasource": {"type": "prometheus", "uid": "trip-prometheus"},
       "targets": [{"refId": "A", "expr": "trip_render_jobs_total{status=~\"queued|running\"} and on (job,instance) (trip_db_up == 1) and on (job,instance) (up{job=\"trip-api\"} == 1) and (time() - timestamp(trip_render_jobs_total{status=~\"queued|running\"}) < 90)", "legendFormat": "{{status}}", "range": true}]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Age of oldest queued render",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 14},
+      "datasource": {"type": "prometheus", "uid": "trip-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s", "min": 0}},
+      "targets": [{"refId": "A", "expr": "trip_render_queue_oldest_age_seconds and (trip_db_up == 1) and (up{job=\"trip-api\"} == 1) and (time() - timestamp(trip_render_queue_oldest_age_seconds) < 90)", "legendFormat": "Oldest queued render", "range": true}]
     }
   ]
 }
