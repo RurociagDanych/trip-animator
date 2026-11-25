@@ -456,6 +456,34 @@ def test_metrics_prometheus_exposition_gating_and_zero_pii(tmp_path: Path) -> No
         engine.dispose()
 
 
+def test_http_operational_events_use_route_template_and_only_report_server_errors(
+    make_harness: HarnessFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = make_harness().app
+    events: list[tuple[str | None, int]] = []
+
+    def record(route: str | None, status: int) -> None:
+        events.append((route, status))
+
+    monkeypatch.setattr("trip_api.main.record_api_failure", record)
+
+    @app.get("/_test_failure/{item}", status_code=503)
+    def _unavailable(item: str) -> dict[str, str]:
+        return {"item": item}
+
+    @app.get("/_test_exception/{item}")
+    def _exception(item: str) -> None:
+        raise RuntimeError(item)
+
+    client = TestClient(app, raise_server_exceptions=False)
+    assert client.get("/health").status_code == 200
+    assert client.get("/_test_missing").status_code == 404
+    assert client.get("/_test_failure/private-item?trace=private-value").status_code == 503
+    assert client.get("/_test_exception/private-item?trace=private-value").status_code == 500
+    assert events == [("/_test_failure/{item}", 503), ("/_test_exception/{item}", 500)]
+
+
 def test_unhandled_exception_handler_and_rate_limiter_branches(
     make_harness: HarnessFactory,
     monkeypatch: pytest.MonkeyPatch,

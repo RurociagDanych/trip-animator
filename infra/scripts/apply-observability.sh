@@ -5,7 +5,7 @@ root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 env_file=${1:-$root/.env}
 base=(docker compose --env-file "$env_file" -f "$root/infra/compose.yaml")
 stack=("${base[@]}" -f "$root/infra/compose.observability.yaml")
-services=(prometheus grafana)
+services=(prometheus loki alloy grafana)
 
 flag=$("${base[@]}" config --environment | awk '/^OBSERVABILITY_ENABLED=/ {sub(/^[^=]*=/, ""); print}')
 case "$flag" in
