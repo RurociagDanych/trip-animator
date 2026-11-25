@@ -25,6 +25,7 @@ from trip_telemetry import DEFAULT_ACTIVITY_TYPE, RenderSpecV2, normalize_activi
 from trip_worker.config import WorkerSettings
 from trip_worker.encoder import (
     EncoderError,
+    ProbeResult,
     concat_mp4_chunks,
     extract_thumbnail,
     verify_mp4_output,
@@ -1476,6 +1477,54 @@ def _split_job_into_chunks(
     return True
 
 
+def _verify_and_upload_render(
+    mp4_path: Path,
+    manifest: RenderManifest,
+    settings: WorkerSettings,
+    lease: _JobLeaseSession,
+    store: ObjectStore,
+    *,
+    job_id: uuid.UUID,
+    output_key: str,
+    thumbnail_key: str,
+) -> ProbeResult:
+    if not lease.update_progress(97, force=True):
+        raise RenderCancelledError(f"Render job {job_id} cancelled or fenced before ffprobe")
+
+    probe = verify_mp4_output(
+        mp4_path,
+        expected_width=manifest.width,
+        expected_height=manifest.height,
+        expected_duration_s=manifest.duration_s,
+        duration_tolerance_s=max(1.5, manifest.duration_s * 0.25),
+        timeout_seconds=settings.ffprobe_timeout_seconds,
+    )
+    thumb_path = mp4_path.with_suffix(".webp")
+    extract_thumbnail(
+        mp4_path,
+        thumb_path,
+        seek_seconds=min(0.5, manifest.duration_s * 0.25),
+        width=min(640, manifest.width),
+        timeout_seconds=settings.ffmpeg_timeout_seconds,
+    )
+    if not lease.update_progress(99, force=True):
+        raise RenderCancelledError(f"Render job {job_id} cancelled or fenced before upload")
+
+    upload_started = time.monotonic()
+    store.put_file(output_key, mp4_path, content_type="video/mp4")
+    store.put_bytes(thumbnail_key, thumb_path.read_bytes(), content_type="image/webp")
+    logger.info(
+        "Render upload finished",
+        extra={
+            "event": "upload_finish",
+            "job_id": job_id,
+            "stage": "upload",
+            "duration_ms": elapsed_ms(upload_started),
+        },
+    )
+    return probe
+
+
 def _finalize_chunked_job(
     conn_factory: Callable[[], AbstractContextManager[DbConnection]],
     job: ClaimedJob,
@@ -1544,7 +1593,6 @@ def _finalize_chunked_job(
                         chunk_paths.append(c_path)
 
                     mp4_path = tmp_root / f"{job.id}.mp4"
-                    thumb_path = tmp_root / f"{job.id}.webp"
 
                     concat_mp4_chunks(
                         chunk_paths,
@@ -1552,46 +1600,15 @@ def _finalize_chunked_job(
                         timeout_seconds=settings.ffmpeg_timeout_seconds,
                     )
 
-                    if not lease.update_progress(97, force=True):
-                        raise RenderCancelledError(
-                            f"Render job {job.id} cancelled or fenced before ffprobe"
-                        )
-
-                    probe = verify_mp4_output(
+                    probe = _verify_and_upload_render(
                         mp4_path,
-                        expected_width=manifest.width,
-                        expected_height=manifest.height,
-                        expected_duration_s=manifest.duration_s,
-                        duration_tolerance_s=max(1.5, manifest.duration_s * 0.25),
-                        timeout_seconds=settings.ffprobe_timeout_seconds,
-                    )
-
-                    extract_thumbnail(
-                        mp4_path,
-                        thumb_path,
-                        seek_seconds=min(0.5, manifest.duration_s * 0.25),
-                        width=min(640, manifest.width),
-                        timeout_seconds=settings.ffmpeg_timeout_seconds,
-                    )
-
-                    if not lease.update_progress(99, force=True):
-                        raise RenderCancelledError(
-                            f"Render job {job.id} cancelled or fenced before upload"
-                        )
-
-                    upload_started = time.monotonic()
-                    store.put_file(output_key, mp4_path, content_type="video/mp4")
-                    store.put_bytes(
-                        thumbnail_key, thumb_path.read_bytes(), content_type="image/webp"
-                    )
-                    logger.info(
-                        "Render upload finished",
-                        extra={
-                            "event": "upload_finish",
-                            "job_id": job.id,
-                            "stage": "upload",
-                            "duration_ms": elapsed_ms(upload_started),
-                        },
+                        manifest,
+                        settings,
+                        lease,
+                        store,
+                        job_id=job.id,
+                        output_key=output_key,
+                        thumbnail_key=thumbnail_key,
                     )
             finally:
                 lease.stop_background_renewer()
@@ -2174,7 +2191,6 @@ def _process_claimed_job(
                 with tempfile.TemporaryDirectory(prefix="trip_render_") as tmpdir:
                     tmp_root = Path(tmpdir)
                     mp4_path = tmp_root / f"{job.id}.mp4"
-                    thumb_path = tmp_root / f"{job.id}.webp"
 
                     _execute_render(
                         render_fn,
@@ -2187,46 +2203,15 @@ def _process_claimed_job(
                         photo_assets=photo_assets,
                     )
 
-                    if not lease.update_progress(97, force=True):
-                        raise RenderCancelledError(
-                            f"Render job {job.id} cancelled or fenced before ffprobe"
-                        )
-
-                    probe = verify_mp4_output(
+                    probe = _verify_and_upload_render(
                         mp4_path,
-                        expected_width=manifest.width,
-                        expected_height=manifest.height,
-                        expected_duration_s=manifest.duration_s,
-                        duration_tolerance_s=max(1.5, manifest.duration_s * 0.25),
-                        timeout_seconds=settings.ffprobe_timeout_seconds,
-                    )
-
-                    extract_thumbnail(
-                        mp4_path,
-                        thumb_path,
-                        seek_seconds=min(0.5, manifest.duration_s * 0.25),
-                        width=min(640, manifest.width),
-                        timeout_seconds=settings.ffmpeg_timeout_seconds,
-                    )
-
-                    if not lease.update_progress(99, force=True):
-                        raise RenderCancelledError(
-                            f"Render job {job.id} cancelled or fenced before upload"
-                        )
-
-                    upload_started = time.monotonic()
-                    store.put_file(output_key, mp4_path, content_type="video/mp4")
-                    store.put_bytes(
-                        thumbnail_key, thumb_path.read_bytes(), content_type="image/webp"
-                    )
-                    logger.info(
-                        "Render upload finished",
-                        extra={
-                            "event": "upload_finish",
-                            "job_id": job.id,
-                            "stage": "upload",
-                            "duration_ms": elapsed_ms(upload_started),
-                        },
+                        manifest,
+                        settings,
+                        lease,
+                        store,
+                        job_id=job.id,
+                        output_key=output_key,
+                        thumbnail_key=thumbnail_key,
                     )
             finally:
                 lease.stop_background_renewer()

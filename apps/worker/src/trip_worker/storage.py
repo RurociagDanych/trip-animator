@@ -67,6 +67,7 @@ class LocalObjectStore:
         """Replace the destination only after the full copy has been written."""
         _ = content_type
         target = self._safe_path(key)
+        source.stat()  # Reject an already missing source before creating destination directories.
         target.parent.mkdir(parents=True, exist_ok=True)
         # Stage on the destination filesystem so replacement is atomic.
         with tempfile.TemporaryDirectory(dir=target.parent) as staging_dir:
@@ -126,7 +127,7 @@ class S3ObjectStore:
     def put_file(
         self, key: str, source: Path, *, content_type: str = "application/octet-stream"
     ) -> None:
-        """Upload a filename with a bounded, synchronous multipart transfer."""
+        """Upload a local file synchronously, using bounded multipart transfers when needed."""
         self.client.upload_file(
             str(source),
             self.bucket,
