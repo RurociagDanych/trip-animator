@@ -116,6 +116,7 @@ This sequence contains usable vertical slices. A passed slice is not acceptance 
 ## Synchronization and lifecycle contracts
 
 - Metadata ingestion and track enrichment expose distinct readiness states. Metadata-first results are useful before all tracks finish.
+- Catalog list requests never read track artifacts. `waiting` in the list includes tracks that have not yet been verified for reuse. The authenticated `POST /api/v1/vault/activities/reuse-status` checks up to 200 IDs and omits missing, disconnected, or foreign activities. A recent successful standalone verification is an advisory preview, not authorization to copy: project creation and append still verify the original artifacts.
 - Durable server-side state records history progress, cursors, pending enrichment, retry/rate-limit timing, and recoverable failures. Browser polling observes work rather than owning its lifetime.
 - Idempotent retries, historical scans, live updates, and reconciliation use the same canonical source identity. Provider rate limits are respected; a bounded page or temporary rate limit is not reported as complete history.
 - Disconnect stops future provider work; existing project records are not automatically destroyed. An explicit permanent-delete flow must preview project impact and prevent silent reimport.

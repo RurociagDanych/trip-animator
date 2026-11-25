@@ -58,6 +58,7 @@ import type {
   VaultActivityListOut,
   VaultActivityMapOut,
   VaultSyncStatusOut,
+  ProjectReuseEligibility,
 } from "./types";
 
 export interface VaultActivityFilters {
@@ -84,6 +85,12 @@ export const vaultApi = {
   list(filters: VaultActivityFilters, signal?: AbortSignal): Promise<VaultActivityListOut> {
     const qs = vaultActivityQuery(filters);
     return apiClient.get<VaultActivityListOut>(`/api/v1/vault/activities${qs ? `?${qs}` : ""}`, signal);
+  },
+  /** Check project reuse previews for at most 200 activities. */
+  reuseStatus(activityIds: string[], signal?: AbortSignal) {
+    return apiClient.post<{ statuses: Record<string, ProjectReuseEligibility | undefined> }>(
+      "/api/v1/vault/activities/reuse-status", { activity_ids: activityIds }, undefined, signal,
+    );
   },
   map(filters: VaultActivityFilters, signal?: AbortSignal): Promise<VaultActivityMapOut> {
     const qs = vaultActivityQuery(filters, true);

@@ -651,16 +651,36 @@ def test_reuse_rejects_other_users_and_missing_source_artifacts(harness: AppHarn
         assert db.scalar(select(Project).where(Project.title == "Unavailable")) is None
 
 
-def test_standalone_source_is_ready_and_reused_over_authenticated_http(harness: AppHarness) -> None:
+def test_standalone_source_is_ready_and_reused_over_authenticated_http(
+    harness: AppHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
     user = harness.create_user("standalone-ready@example.test")
     activity_id, raw_bronze, raw_silver = _seed_standalone_original(harness, user.id)
     client, csrf = harness.login_client(user.email)
     headers = {"X-CSRF-Token": csrf}
 
-    listing = client.get("/api/v1/vault/activities")
+    def forbid_read(key: str) -> bytes:
+        raise AssertionError(f"Catalog read object {key}")
+
+    with monkeypatch.context() as context:
+        context.setattr(harness.store, "get_bytes", forbid_read)
+        listing = client.get("/api/v1/vault/activities")
     assert listing.status_code == 200, listing.text
     item = next(row for row in listing.json()["items"] if row["id"] == str(activity_id))
-    assert item["project_reuse_eligibility"] == "ready"
+    assert item["project_reuse_eligibility"] == "waiting"
+    status = client.post(
+        "/api/v1/vault/activities/reuse-status",
+        json={"activity_ids": [str(activity_id), str(uuid.uuid4())]},
+        headers=headers,
+    )
+    assert status.status_code == 200, status.text
+    assert status.json() == {"statuses": {str(activity_id): "ready"}}
+    with monkeypatch.context() as context:
+        context.setattr(harness.store, "get_bytes", forbid_read)
+        assert (
+            client.get("/api/v1/vault/activities").json()["items"][0]["project_reuse_eligibility"]
+            == "ready"
+        )
     detail = client.get(f"/api/v1/vault/activities/{activity_id}")
     assert detail.status_code == 200, detail.text
     assert detail.json()["project_reuse_eligibility"] == "ready"
@@ -696,6 +716,40 @@ def test_standalone_source_is_ready_and_reused_over_authenticated_http(harness: 
         assert source is not None and source.source_stage_id is None
 
 
+def test_reuse_preview_is_owner_scoped_and_invalidated_by_source_changes(
+    harness: AppHarness,
+) -> None:
+    owner = harness.create_user("preview-owner@example.test")
+    stranger = harness.create_user("preview-stranger@example.test")
+    activity_id, _, _ = _seed_standalone_original(harness, owner.id)
+    client, csrf = harness.login_client(owner.email)
+    foreign_client, foreign_csrf = harness.login_client(stranger.email)
+    endpoint = "/api/v1/vault/activities/reuse-status"
+    body = {"activity_ids": [str(activity_id)]}
+    headers = {"X-CSRF-Token": csrf}
+    assert client.post(endpoint, json=body).status_code == 403
+    assert client.post(endpoint, json=body, headers=headers).json() == {
+        "statuses": {str(activity_id): "ready"}
+    }
+    assert foreign_client.post(
+        endpoint, json=body, headers={"X-CSRF-Token": foreign_csrf}
+    ).json() == {"statuses": {}}
+
+    with harness.session_factory() as db:
+        activity = db.get(VaultActivity, activity_id)
+        assert activity is not None
+        activity.source_sha256 = "a" * 64
+        db.commit()
+
+    assert (
+        client.get("/api/v1/vault/activities").json()["items"][0]["project_reuse_eligibility"]
+        == "waiting"
+    )
+    assert client.post(endpoint, json=body, headers=headers).json() == {
+        "statuses": {str(activity_id): "unavailable"}
+    }
+
+
 @pytest.mark.parametrize(
     ("variant", "eligibility"),
     [
@@ -716,10 +770,13 @@ def test_standalone_source_readiness_and_reuse_reject_invalid_artifacts(
     activity_id, _, _ = _seed_standalone_original(harness, user.id, variant=variant)
     client, csrf = harness.login_client(user.email)
     headers = {"X-CSRF-Token": csrf}
-    listing = client.get("/api/v1/vault/activities")
-    assert listing.status_code == 200, listing.text
-    item = next(row for row in listing.json()["items"] if row["id"] == str(activity_id))
-    assert item["project_reuse_eligibility"] == eligibility
+    status = client.post(
+        "/api/v1/vault/activities/reuse-status",
+        json={"activity_ids": [str(activity_id)]},
+        headers=headers,
+    )
+    assert status.status_code == 200, status.text
+    assert status.json() == {"statuses": {str(activity_id): eligibility}}
     detail = client.get(f"/api/v1/vault/activities/{activity_id}")
     assert detail.status_code == 200, detail.text
     assert detail.json()["project_reuse_eligibility"] == eligibility

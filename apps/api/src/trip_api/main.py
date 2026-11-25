@@ -32,6 +32,7 @@ from trip_api.db import (
 )
 from trip_api.gold_sync import ensure_local_gold_duckdb
 from trip_api.reaper import build_object_store
+from trip_api.reuse_preview import ReusePreviewCache
 from trip_api.routers import (
     analytics,
     auth,
@@ -128,6 +129,7 @@ def create_app(
     application.state.engine = db_engine
     application.state.session_factory = db_session_factory
     application.state.object_store = store
+    application.state.reuse_preview = ReusePreviewCache()
 
     application.add_middleware(
         CORSMiddleware,

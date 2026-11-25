@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from itertools import pairwise
 
 from trip_telemetry.tiles import decode_polyline
 
@@ -76,18 +77,26 @@ def _segment_hits(x: float, y: float, end_x: float, end_y: float, bounds: Bounds
 
 
 def intersects_area(points: list[tuple[float, float]], bounds: Bounds) -> bool:
+    """Match routes touching the area, including across the dateline."""
     west, south, east, north = bounds
     intervals = [(west, east)] if west <= east else [(west, 180), (-180, east)]
-    for (lat, lon), (end_lat, end_lon) in zip(points, points[1:], strict=False):
+    rectangles = [
+        (left + shift, south, right + shift, north)
+        for left, right in intervals
+        for shift in (-360, 0, 360)
+    ]
+    for (lat, lon), (end_lat, end_lon) in pairwise(points):
+        if (lat < south and end_lat < south) or (lat > north and end_lat > north):
+            continue
         # Unwrap the shortest segment so a dateline crossing does not cross Greenwich.
         if end_lon - lon > 180:
             end_lon -= 360
         elif end_lon - lon < -180:
             end_lon += 360
-        for left, right in intervals:
-            for shift in (-360, 0, 360):
-                if _segment_hits(
-                    lon, lat, end_lon, end_lat, (left + shift, south, right + shift, north)
-                ):
-                    return True
+        for rectangle in rectangles:
+            left, _, right, _ = rectangle
+            if (lon < left and end_lon < left) or (lon > right and end_lon > right):
+                continue
+            if _segment_hits(lon, lat, end_lon, end_lat, rectangle):
+                return True
     return False

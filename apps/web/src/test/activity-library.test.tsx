@@ -184,15 +184,16 @@ describe("ActivityLibraryView", () => {
       "/api/v1/vault/activities/map?sport=cycling&sport=running",
     ]);
   });
-  it("refreshes waiting selections outside the visible page before allowing project reuse", async () => {
+  it("batches visible and off-page readiness without refreshing the catalog or opening details", async () => {
     let enriched = false;
     vi.spyOn(vaultApi, "map").mockResolvedValue(mapResult);
     vi.spyOn(vaultApi, "status").mockResolvedValue(syncStatus(1));
-    vi.spyOn(vaultApi, "list").mockImplementation(async (filters) => listResult([
-      { ...item(filters.offset ? "2" : "1", filters.offset ? "Second ride" : "First ride"), project_reuse_eligibility: filters.offset ? "ready" : "waiting" },
+    const list = vi.spyOn(vaultApi, "list").mockImplementation(async (filters) => listResult([
+      { ...item(filters.offset ? "2" : "1", filters.offset ? "Second ride" : "First ride"), project_reuse_eligibility: "waiting" },
     ], filters.offset ?? 0, 60));
-    const get = vi.spyOn(vaultApi, "get").mockImplementation(async (id) => ({
-      ...detail(id, "First ride"), project_reuse_eligibility: enriched ? "ready" : "waiting",
+    const get = vi.spyOn(vaultApi, "get").mockResolvedValue(detail("1", "First ride"));
+    const post = vi.spyOn(apiClient, "post").mockImplementation(async (_path, body) => ({
+      statuses: Object.fromEntries((body as { activity_ids: string[] }).activity_ids.map((id) => [id, enriched ? "ready" : "waiting"])),
     }));
     renderLibrary();
     fireEvent.click(await screen.findByRole("checkbox", { name: "Select First ride" }));
@@ -200,9 +201,12 @@ describe("ActivityLibraryView", () => {
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
     fireEvent.click(await screen.findByRole("checkbox", { name: "Select Second ride" }));
     expect(screen.getByRole("button", { name: "Create project" })).toBeDisabled();
+    await waitFor(() => expect(post).toHaveBeenCalledWith("/api/v1/vault/activities/reuse-status", { activity_ids: ["1", "2"] }, undefined, expect.any(AbortSignal)));
     enriched = true;
     await waitFor(() => expect(screen.getByRole("button", { name: "Create project" })).toBeEnabled(), { timeout: 5000 });
-    expect(get).toHaveBeenCalledWith("1", expect.anything());
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(get).not.toHaveBeenCalled();
+    expect(screen.getByText("Ready")).toBeInTheDocument();
     expect(screen.getByText("2 activities selected")).toBeInTheDocument();
   });
 
@@ -251,17 +255,23 @@ describe("ActivityLibraryView", () => {
   });
 
   it("sends filters to the server and resets pagination when a filter changes", async () => {
-    vi.spyOn(vaultApi, "map").mockResolvedValue(mapResult);
+    const map = vi.spyOn(vaultApi, "map").mockResolvedValue(mapResult);
     const list = vi.spyOn(vaultApi, "list").mockImplementation(async (filters: VaultActivityFilters) =>
       listResult([item("first", "Fictional Valley Ride")], filters.offset ?? 0, 60));
     vi.spyOn(vaultApi, "status").mockResolvedValue(syncStatus(1));
     renderLibrary();
 
     await screen.findByText("Fictional Valley Ride");
+    await waitFor(() => expect(map).toHaveBeenCalled());
+    const initialMapCalls = map.mock.calls.length;
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
     await waitFor(() => expect(list).toHaveBeenLastCalledWith(expect.objectContaining({ offset: 50 }), expect.anything()));
+    fireEvent.change(screen.getByLabelText("Sort by"), { target: { value: "name" } });
+    await waitFor(() => expect(list).toHaveBeenLastCalledWith(expect.objectContaining({ sort: "name" }), expect.anything()));
+    expect(map).toHaveBeenCalledTimes(initialMapCalls);
     fireEvent.change(screen.getByRole("textbox", { name: "Search activity name" }), { target: { value: "summit" } });
     await waitFor(() => expect(list).toHaveBeenLastCalledWith(expect.objectContaining({ name: "summit", offset: 0 }), expect.anything()));
+    await waitFor(() => expect(map).toHaveBeenLastCalledWith(expect.objectContaining({ name: "summit", offset: 0 }), expect.any(AbortSignal)));
     expect(screen.getByText(/page 1 of 2/)).toBeInTheDocument();
   });
 
@@ -373,7 +383,7 @@ describe("ActivityLibraryView", () => {
     renderLibrary();
 
     await screen.findByRole("button", { name: "Map Route" });
-    await waitFor(() => expect(vaultApi.map).toHaveBeenCalledWith(expect.objectContaining({ sort: "started_at" }), expect.any(AbortSignal)));
+    await waitFor(() => expect(vaultApi.map).toHaveBeenCalledWith(expect.objectContaining({ include_hidden: false, offset: 0 }), expect.any(AbortSignal)));
     fireEvent.change(screen.getByRole("textbox", { name: "Search activity name" }), { target: { value: "ridge" } });
     await waitFor(() => expect(vaultApi.map).toHaveBeenLastCalledWith(expect.objectContaining({ name: "ridge" }), expect.any(AbortSignal)));
     const map = mapHarness.instances[0]!;
@@ -446,8 +456,8 @@ describe("ActivityLibraryView", () => {
     const onAreaChange = vi.fn();
     render(<ActivityLibraryMap filters={{ offset: 50 }} area={undefined} onAreaChange={onAreaChange} selectedId={null} onSelect={vi.fn()} />);
     await waitFor(() => expect(map).toHaveBeenCalledTimes(2));
-    expect(map).toHaveBeenNthCalledWith(1, { offset: 0, area: undefined }, expect.any(AbortSignal));
-    expect(map).toHaveBeenNthCalledWith(2, { offset: 500, area: undefined }, expect.any(AbortSignal));
+    expect(map).toHaveBeenNthCalledWith(1, expect.objectContaining({ offset: 0, area: undefined }), expect.any(AbortSignal));
+    expect(map).toHaveBeenNthCalledWith(2, expect.objectContaining({ offset: 500, area: undefined }), expect.any(AbortSignal));
     expect(screen.getByText("Loading activity routes…")).toBeInTheDocument();
     expect(mapHarness.instances[0]!.fitBounds).not.toHaveBeenCalled();
     await act(async () => completeSecondPage({ ...mapResult, features: [italy], total: 501, truncated: false, unevaluated_count: 0 }));
