@@ -515,11 +515,17 @@ def test_missing_lavapipe_driver_only_blocks_lavapipe(
 async def test_render_manifest_with_page_png_cancellation_and_pageerror_handling() -> None:
     args_default = build_chromium_launch_args(WorkerSettings(chromium_no_sandbox=False))
     assert "--no-sandbox" not in args_default
+    assert "--disable-setuid-sandbox" not in args_default
+    assert "--no-zygote" not in args_default
+    assert "--disable-gpu-sandbox" not in args_default
     assert "--disable-features=WebRtcHideLocalIpsWithMdns" in args_default
     assert "--enforce-webrtc-ip-permission-check" in args_default
     assert "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" in args_default
     args_no_sandbox = build_chromium_launch_args(WorkerSettings(chromium_no_sandbox=True))
     assert "--no-sandbox" in args_no_sandbox
+    assert "--disable-setuid-sandbox" in args_no_sandbox
+    assert "--no-zygote" in args_no_sandbox
+    assert "--disable-gpu-sandbox" in args_no_sandbox
 
     manifest = _sample_manifest(total_frames=2)
     page = FakePage(js_frame_count=2)

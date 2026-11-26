@@ -180,7 +180,14 @@ def build_chromium_launch_args(settings: WorkerSettings) -> list[str]:
     if settings.worker_gpu_enabled:
         args.append("--disable-software-rasterizer")
     if settings.chromium_no_sandbox:
-        args.append("--no-sandbox")
+        args.extend(
+            [
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--no-zygote",
+                "--disable-gpu-sandbox",
+            ]
+        )
     return args
 
 
