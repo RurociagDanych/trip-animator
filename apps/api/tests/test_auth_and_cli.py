@@ -383,6 +383,7 @@ def test_expired_tampered_cookies_inactive_user_and_prod_cookie_flags(
     prod_h = make_harness(
         app_env="production",
         dev_auth_enabled=False,
+        smtp_host="smtp.example.com",
         session_secret="prod-cookie-secret-minimum-32-characters",
         token_encryption_key=base64.urlsafe_b64encode(b"p" * 32).decode("ascii"),
     )
@@ -401,6 +402,7 @@ def test_dev_login_disabled_in_prod_and_allowed_in_dev(make_harness: HarnessFact
     prod_harness = make_harness(
         app_env="production",
         dev_auth_enabled=False,
+        smtp_host="smtp.example.com",
         session_secret="prod-session-secret-minimum-32-characters-long",
         token_encryption_key=base64.urlsafe_b64encode(b"z" * 32).decode("ascii"),
     )
@@ -456,7 +458,6 @@ def test_dev_login_handles_concurrent_first_login_integrity_race(
     h1 = make_harness(app_env="development", dev_auth_enabled=True)
 
     def racing_hash_password(password: str) -> str:
-        # Insert the dev user from a concurrent session before the handler commits.
         with h1.session_factory() as other_db:
             if other_db.scalar(select(User).where(User.email == "dev@trip-animator.local")) is None:
                 other_db.add(
@@ -908,9 +909,6 @@ async def test_x_forwarded_for_spoofing_vs_trusted_forwarded_allow_ips(
         == 429
     )
 
-    # 2. ProxyHeadersMiddleware with FORWARDED_ALLOW_IPS set to loopback addresses:
-    #    - Untrusted peer cannot spoof X-Forwarded-For
-    #    - Trusted proxy uses rightmost untrusted hop, blocking leftmost spoofing
     proxied_app: Any = ProxyHeadersMiddleware(cast(Any, h.app), trusted_hosts=["127.0.0.1", "::1"])
 
     untrusted_transport = httpx.ASGITransport(app=proxied_app, client=("203.0.113.77", 54321))
@@ -933,7 +931,6 @@ async def test_x_forwarded_for_spoofing_vs_trusted_forwarded_allow_ips(
 
     trusted_transport = httpx.ASGITransport(app=proxied_app, client=("127.0.0.1", 54321))
     async with httpx.AsyncClient(transport=trusted_transport, base_url="http://test") as trusted:
-        # Leftmost spoofed IPs still map to the rightmost untrusted client IP
         for spoofed_left in ("1.1.1.1", "8.8.8.8", "4.2.2.1"):
             res = await trusted.post(
                 "/api/v1/auth/login",
@@ -1062,23 +1059,17 @@ async def test_login_dual_ip_and_normalized_account_rate_limit(
 
 def test_public_config_registration_enabled_flag(make_harness: HarnessFactory) -> None:
     default_h = make_harness()
-    default_client = TestClient(default_h.app)
-    default_cfg = default_client.get("/api/v1/public-config")
+    default_cfg = TestClient(default_h.app).get("/api/v1/public-config")
     assert default_cfg.status_code == 200
-    assert default_cfg.json()["registration_enabled"] is False
+    assert default_cfg.json()["registration_enabled"] is True
 
-    blank_h = make_harness(registration_invite_code=" ,  , ")
-    blank_cfg = TestClient(blank_h.app).get("/api/v1/public-config")
-    assert blank_cfg.status_code == 200
-    assert blank_cfg.json()["registration_enabled"] is False
-
-    enabled_h = make_harness(registration_invite_code="alpine-2026, summit-99")
-    enabled_cfg = TestClient(enabled_h.app).get("/api/v1/public-config")
-    assert enabled_cfg.status_code == 200
-    assert enabled_cfg.json()["registration_enabled"] is True
+    disabled_h = make_harness(registration_enabled=False)
+    disabled_cfg = TestClient(disabled_h.app).get("/api/v1/public-config")
+    assert disabled_cfg.status_code == 200
+    assert disabled_cfg.json()["registration_enabled"] is False
 
 
-def test_register_invite_code_lifecycle_validation_and_conflicts(
+def test_register_lifecycle_validation_and_verification(
     make_harness: HarnessFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1093,7 +1084,7 @@ def test_register_invite_code_lifecycle_validation_and_conflicts(
 
     monkeypatch.setattr(auth_router, "send_verification_email", _capture_email)
 
-    disabled_h = make_harness()
+    disabled_h = make_harness(registration_enabled=False)
     disabled_client = TestClient(disabled_h.app)
     disabled_resp = disabled_client.post(
         "/api/v1/auth/register",
@@ -1101,29 +1092,15 @@ def test_register_invite_code_lifecycle_validation_and_conflicts(
             "email": "new@example.com",
             "display_name": "New Rider",
             "password": "valid-password-1234",
-            "invite_code": "any-code",
         },
     )
     assert disabled_resp.status_code == 403
     assert disabled_resp.json()["detail"] == "Account registration is disabled"
 
     single_h = make_harness(
-        registration_invite_code="alpine-2026",
         public_base_url="https://trips.example.com/",
     )
     single_client = TestClient(single_h.app)
-
-    wrong_code = single_client.post(
-        "/api/v1/auth/register",
-        json={
-            "email": "rider1@example.com",
-            "display_name": "Rider One",
-            "password": "valid-password-1234",
-            "invite_code": "wrong-code",
-        },
-    )
-    assert wrong_code.status_code == 403
-    assert wrong_code.json()["detail"] == "Invalid registration invite code"
 
     short_pw = single_client.post(
         "/api/v1/auth/register",
@@ -1131,7 +1108,6 @@ def test_register_invite_code_lifecycle_validation_and_conflicts(
             "email": "rider1@example.com",
             "display_name": "Rider One",
             "password": "short-pw",
-            "invite_code": "alpine-2026",
         },
     )
     assert short_pw.status_code == 422
@@ -1143,7 +1119,6 @@ def test_register_invite_code_lifecycle_validation_and_conflicts(
                 "email": bad_email,
                 "display_name": "Rider One",
                 "password": "valid-password-1234",
-                "invite_code": "alpine-2026",
             },
         )
         assert invalid_email_resp.status_code == 422
@@ -1154,14 +1129,13 @@ def test_register_invite_code_lifecycle_validation_and_conflicts(
             "email": "  Rider.One@Example.COM  ",
             "display_name": "  Alpine Explorer  ",
             "password": "alpine-secret-password-123",
-            "invite_code": "alpine-2026",
         },
     )
-    assert ok_resp.status_code == 201, ok_resp.text
+    assert ok_resp.status_code == 202, ok_resp.text
     body = ok_resp.json()
     assert body["status"] == "verification_required"
     assert body["email"] == "rider.one@example.com"
-    assert "verify" in body["message"].lower()
+    assert "verification" in body["message"].lower()
     assert "trip_session" not in single_client.cookies
     assert single_client.get("/api/v1/auth/me").status_code == 401
 
@@ -1242,38 +1216,23 @@ def test_register_invite_code_lifecycle_validation_and_conflicts(
             "email": "rider.one@example.com",
             "display_name": "Duplicate",
             "password": "another-valid-password-123",
-            "invite_code": "alpine-2026",
         },
     )
-    assert dup_resp.status_code == 409
-    assert dup_resp.json()["detail"] == "An account with this email already exists"
-
-    multi_h = make_harness(registration_invite_code="first-code, second-code , third-code")
-    for idx, code in enumerate(("first-code", "second-code", "third-code"), start=1):
-        c = TestClient(multi_h.app)
-        resp = c.post(
-            "/api/v1/auth/register",
-            json={
-                "email": f"multi{idx}@example.com",
-                "display_name": f"Multi {idx}",
-                "password": "multi-code-password-123",
-                "invite_code": code,
-            },
-        )
-        assert resp.status_code == 201, resp.text
-        assert resp.json()["status"] == "verification_required"
-        tok = sent_emails[-1][2].split("token=", 1)[1]
-        assert c.post("/api/v1/auth/verify-email", json={"token": tok}).status_code == 200
-        assert c.get("/api/v1/auth/me").status_code == 200
+    assert dup_resp.status_code == 202
+    assert dup_resp.json()["status"] == "verification_required"
 
 
 async def test_register_ip_and_account_rate_limiting(
     make_harness: HarnessFactory,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import hashlib
 
+    import trip_api.routers.auth as auth_router
+
+    monkeypatch.setattr(auth_router, "send_verification_email", lambda *_args: None)
+
     ip_h = make_harness(
-        registration_invite_code="alpine-2026",
         rate_limit_register_max=2,
         rate_limit_register_account_max=10,
         rate_limit_register_window_s=60,
@@ -1286,10 +1245,9 @@ async def test_register_ip_and_account_rate_limiting(
                 "email": f"ip-limit-{idx}@example.com",
                 "display_name": "IP Test",
                 "password": "valid-password-1234",
-                "invite_code": "wrong-code",
             },
         )
-        assert res.status_code == 403
+        assert res.status_code == 202
 
     ip_blocked = ip_client.post(
         "/api/v1/auth/register",
@@ -1297,14 +1255,12 @@ async def test_register_ip_and_account_rate_limiting(
             "email": "ip-limit-2@example.com",
             "display_name": "IP Test",
             "password": "valid-password-1234",
-            "invite_code": "alpine-2026",
         },
     )
     assert ip_blocked.status_code == 429
     assert "retry-after" in ip_blocked.headers
 
     acct_h = make_harness(
-        registration_invite_code="alpine-2026",
         rate_limit_register_max=20,
         rate_limit_register_account_max=2,
         rate_limit_register_window_s=60,
@@ -1319,11 +1275,10 @@ async def test_register_ip_and_account_rate_limiting(
                     "email": email_variant,
                     "display_name": "Target",
                     "password": "valid-password-1234",
-                    "invite_code": "wrong-code",
                 },
                 headers={"X-Forwarded-For": f"198.51.100.{idx + 1}"},
             )
-            assert r.status_code == 403
+            assert r.status_code == 202
 
         acct_blocked = await client.post(
             "/api/v1/auth/register",
@@ -1331,7 +1286,6 @@ async def test_register_ip_and_account_rate_limiting(
                 "email": "target@example.com",
                 "display_name": "Target",
                 "password": "valid-password-1234",
-                "invite_code": "alpine-2026",
             },
             headers={"X-Forwarded-For": "198.51.100.99"},
         )
@@ -1345,13 +1299,16 @@ async def test_register_ip_and_account_rate_limiting(
     assert any(k.startswith("register:ip:") for k in keys)
 
 
-def test_compose_and_env_example_expose_invite_and_caddy_variables() -> None:
+def test_compose_and_env_example_expose_registration_turnstile_and_caddy_variables() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     compose_text = (repo_root / "infra" / "compose.yaml").read_text(encoding="utf-8")
     env_example_text = (repo_root / ".env.example").read_text(encoding="utf-8")
 
     expected_vars = (
-        "REGISTRATION_INVITE_CODE",
+        "REGISTRATION_ENABLED",
+        "TURNSTILE_SITE_KEY",
+        "TURNSTILE_SECRET_KEY",
+        "CADDY_TURNSTILE_CSP_ORIGIN",
         "CADDY_HTTP_PUBLISH",
         "CADDY_HTTPS_PUBLISH",
         "DOMAIN",
@@ -1383,7 +1340,7 @@ def test_email_verification_token_expiry_invalid_and_inactive_user(
         lambda _s, _to, _name, url: sent_urls.append(url),
     )
 
-    h = make_harness(registration_invite_code="alpine-2026", rate_limit_verify_email_max=3)
+    h = make_harness(rate_limit_verify_email_max=3)
     client = TestClient(h.app)
 
     assert client.post("/api/v1/auth/verify-email", json={"token": "bad"}).status_code == 400
@@ -1399,10 +1356,9 @@ def test_email_verification_token_expiry_invalid_and_inactive_user(
             "email": "expiring@example.com",
             "display_name": "Expiring User",
             "password": "valid-password-1234",
-            "invite_code": "alpine-2026",
         },
     )
-    assert reg_resp.status_code == 201
+    assert reg_resp.status_code == 202
     tok_expired = sent_urls[-1].split("token=", 1)[1]
     with h.session_factory() as db:
         tok_row = db.scalar(select(EmailVerificationToken))
@@ -1416,7 +1372,7 @@ def test_email_verification_token_expiry_invalid_and_inactive_user(
     assert limited.status_code == 429
     assert "retry-after" in limited.headers
 
-    h2 = make_harness(registration_invite_code="alpine-2026")
+    h2 = make_harness()
     c2 = TestClient(h2.app)
     assert (
         c2.post(
@@ -1425,10 +1381,9 @@ def test_email_verification_token_expiry_invalid_and_inactive_user(
                 "email": "disabled@example.com",
                 "display_name": "Disabled User",
                 "password": "valid-password-1234",
-                "invite_code": "alpine-2026",
             },
         ).status_code
-        == 201
+        == 202
     )
     tok_inactive = sent_urls[-1].split("token=", 1)[1]
     with h2.session_factory() as db:
@@ -1453,7 +1408,6 @@ async def test_resend_verification_anti_enumeration_replacement_and_rate_limits(
     )
 
     h = make_harness(
-        registration_invite_code="alpine-2026",
         rate_limit_resend_verification_max=10,
         rate_limit_resend_verification_account_max=2,
         rate_limit_resend_verification_window_s=60,
@@ -1474,10 +1428,9 @@ async def test_resend_verification_anti_enumeration_replacement_and_rate_limits(
                 "email": "pending@example.com",
                 "display_name": "Pending User",
                 "password": "valid-password-1234",
-                "invite_code": "alpine-2026",
             },
         ).status_code
-        == 201
+        == 202
     )
     first_token = sent[-1][1].split("token=", 1)[1]
 
@@ -1864,7 +1817,6 @@ async def test_forgot_password_and_reset_password_lifecycle_and_rate_limits(
         == 400
     )
 
-    # Use a fresh harness for reset-password rate limit check so prior attempts do not interfere
     h_rl = make_harness(
         rate_limit_forgot_password_max=10,
         rate_limit_forgot_password_account_max=2,

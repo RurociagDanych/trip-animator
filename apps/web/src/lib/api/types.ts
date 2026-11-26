@@ -132,6 +132,7 @@ export interface HealthResponse {
 export interface PublicConfigOut {
   dev_auth_enabled: boolean;
   registration_enabled?: boolean;
+  turnstile_site_key?: string | null;
   strava_configured: boolean;
   google_photos_configured?: boolean;
 }
@@ -140,7 +141,7 @@ export interface RegisterRequest {
   email: string;
   display_name: string;
   password: string;
-  invite_code: string;
+  turnstile_token?: string | null;
 }
 
 export interface RegisterResponse {
@@ -526,7 +527,6 @@ export interface TelemetryGeometryOut {
 
 export interface TelemetryTimelinePoint {
   cum_dist_m: number;
-  /** UTC epoch milliseconds recorded for this point. */
   ts_ms: number;
 }
 
@@ -1113,8 +1113,6 @@ export interface InvalidRenderSpecValue {
   fallback: ResolutionPreset | RenderFps;
 }
 
-// Stored values that normalizeRenderSpecV2 replaces with defaults. The stored data is not
-// rewritten here; the Inspector lists these so the replacement is visible to the user.
 export function findInvalidRenderSpecValues(
   raw?: Partial<RenderSpecV2> | null,
 ): InvalidRenderSpecValue[] {

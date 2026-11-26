@@ -7,7 +7,7 @@
 	@non_share not path /share/*
 
 	header @non_share {
-		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: {$CADDY_TILE_CSP_ORIGINS:https://tiles.openfreemap.org https://s3.amazonaws.com https://server.arcgisonline.com}; font-src 'self' data: {$CADDY_TILE_CSP_ORIGINS:https://tiles.openfreemap.org https://s3.amazonaws.com https://server.arcgisonline.com}; connect-src 'self' {$CADDY_TILE_CSP_ORIGINS:https://tiles.openfreemap.org https://s3.amazonaws.com https://server.arcgisonline.com}; worker-src 'self' blob:; child-src 'self' blob:; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+		Content-Security-Policy "default-src 'self'; script-src 'self' {$CADDY_TURNSTILE_CSP_ORIGIN:}; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: {$CADDY_TILE_CSP_ORIGINS:https://tiles.openfreemap.org https://s3.amazonaws.com https://server.arcgisonline.com}; font-src 'self' data: {$CADDY_TILE_CSP_ORIGINS:https://tiles.openfreemap.org https://s3.amazonaws.com https://server.arcgisonline.com}; connect-src 'self' {$CADDY_TILE_CSP_ORIGINS:https://tiles.openfreemap.org https://s3.amazonaws.com https://server.arcgisonline.com} {$CADDY_TURNSTILE_CSP_ORIGIN:}; frame-src 'self' {$CADDY_TURNSTILE_CSP_ORIGIN:}; worker-src 'self' blob:; child-src 'self' blob: {$CADDY_TURNSTILE_CSP_ORIGIN:}; media-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "strict-origin-when-cross-origin"

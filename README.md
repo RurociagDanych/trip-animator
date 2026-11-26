@@ -123,7 +123,7 @@ Copy [`.env.example`](.env.example) to `.env` (`make bootstrap` does this when `
 
 | Area | Variables |
 | :--- | :--- |
-| Application runtime | `APP_ENV`, `LOG_LEVEL`, `DEV_AUTH_ENABLED`, `REGISTRATION_INVITE_CODE` |
+| Application runtime | `APP_ENV`, `LOG_LEVEL`, `DEV_AUTH_ENABLED`, `REGISTRATION_ENABLED`, `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY`, `CADDY_TURNSTILE_CSP_ORIGIN` |
 | Email verification and SMTP | `PUBLIC_BASE_URL`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`, `SMTP_USE_TLS`, `EMAIL_VERIFICATION_TTL_HOURS` |
 | Database (PostgreSQL 17) | `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `DATABASE_URL` |
 | Security and encryption | `SESSION_SECRET`, `TOKEN_ENCRYPTION_KEY`, `ALLOWED_ORIGINS` |
@@ -186,8 +186,9 @@ A VPS deployment exists.
 - [docs/specs/ACTIVITY_LIBRARY_SPEC.md](docs/specs/ACTIVITY_LIBRARY_SPEC.md): Activity Library specification.
 - [docs/specs/CINEMATIC_PHOTOS_SPEC.md](docs/specs/CINEMATIC_PHOTOS_SPEC.md): cinematic photo-stop specification.
 - [docs/specs/OBSERVABILITY_SPEC.md](docs/specs/OBSERVABILITY_SPEC.md): self-hosted observability specification.
+- [docs/specs/PUBLIC_LAUNCH_AND_CREDITS_SPEC.md](docs/specs/PUBLIC_LAUNCH_AND_CREDITS_SPEC.md): public launch, Google OIDC, Render Credits and Credit Voucher specification.
 - [docs/specs/REMOTE_RENDER_BACKEND_SPEC.md](docs/specs/REMOTE_RENDER_BACKEND_SPEC.md): pluggable Render Backend and AWS Step Functions + Lambda specification.
-- [GLOSSARY.md](GLOSSARY.md): Activity Library, trip playback and render execution terminology.
+- [GLOSSARY.md](GLOSSARY.md): Activity Library, trip playback, render execution and credits terminology.
 - [docs/demo/generate_synthetic_gpx.py](docs/demo/generate_synthetic_gpx.py): generates a synthetic GPX demo track.
 
 ## Known gaps

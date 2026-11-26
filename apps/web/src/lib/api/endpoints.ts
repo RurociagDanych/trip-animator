@@ -86,7 +86,6 @@ export const vaultApi = {
     const qs = vaultActivityQuery(filters);
     return apiClient.get<VaultActivityListOut>(`/api/v1/vault/activities${qs ? `?${qs}` : ""}`, signal);
   },
-  /** Check project reuse previews for at most 200 activities. */
   reuseStatus(activityIds: string[], signal?: AbortSignal) {
     return apiClient.post<{ statuses: Record<string, ProjectReuseEligibility | undefined> }>(
       "/api/v1/vault/activities/reuse-status", { activity_ids: activityIds }, undefined, signal,
@@ -132,8 +131,12 @@ export const authApi = {
   resendVerification(email: string): Promise<ResendVerificationResponse> {
     return apiClient.post<ResendVerificationResponse>("/api/v1/auth/resend-verification", { email });
   },
-  forgotPassword(email: string): Promise<ForgotPasswordResponse> {
-    return apiClient.post<ForgotPasswordResponse>("/api/v1/auth/forgot-password", { email });
+  forgotPassword(email: string, turnstileToken?: string | null): Promise<ForgotPasswordResponse> {
+    const body: { email: string; turnstile_token?: string } = { email };
+    if (turnstileToken) {
+      body.turnstile_token = turnstileToken;
+    }
+    return apiClient.post<ForgotPasswordResponse>("/api/v1/auth/forgot-password", body);
   },
   resetPassword(payload: ResetPasswordRequest): Promise<ResetPasswordResponse> {
     return apiClient.post<ResetPasswordResponse>("/api/v1/auth/reset-password", payload);

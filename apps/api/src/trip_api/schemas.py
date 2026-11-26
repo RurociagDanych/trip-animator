@@ -1,5 +1,3 @@
-"""Pydantic v2 API request/response schemas and domain validation helpers."""
-
 from __future__ import annotations
 
 import uuid
@@ -44,7 +42,7 @@ class RegisterRequest(BaseModel):
     email: str = Field(min_length=3, max_length=320)
     display_name: DisplayNameStr
     password: str = Field(min_length=12, max_length=256)
-    invite_code: str = Field(min_length=1, max_length=256)
+    turnstile_token: str | None = Field(default=None, max_length=4096)
 
 
 class RegisterResponse(BaseModel):
@@ -68,6 +66,7 @@ class ResendVerificationResponse(BaseModel):
 
 class ForgotPasswordRequest(BaseModel):
     email: str = Field(min_length=3, max_length=320)
+    turnstile_token: str | None = Field(default=None, max_length=4096)
 
 
 class ForgotPasswordResponse(BaseModel):
@@ -726,20 +725,14 @@ ProjectReuseEligibility = Literal["ready", "waiting", "no_gps", "unavailable"]
 
 
 class VaultReuseStatusRequest(BaseModel):
-    """Identify activities whose reuse readiness should be checked."""
-
     activity_ids: list[uuid.UUID] = Field(min_length=1, max_length=200)
 
 
 class VaultReuseStatusOut(BaseModel):
-    """Report readiness only for activities owned by the caller."""
-
     statuses: dict[uuid.UUID, ProjectReuseEligibility]
 
 
 class VaultActivityListItemOut(BaseModel):
-    """Activity metadata returned by the library, including visibility state."""
-
     id: uuid.UUID
     name: str
     activity_type: str = Field(description="Catalog sport, not the project stage activity type.")
@@ -774,8 +767,6 @@ class VaultActivitySummaryOut(BaseModel):
 
 
 class VaultActivitySportSummaryOut(BaseModel):
-    """Metric totals and measurement coverage for one catalog sport."""
-
     activity_type: str
     activity_count: int
     distance_m: float | None
@@ -791,8 +782,6 @@ class VaultActivitySportSummaryOut(BaseModel):
 
 
 class VaultActivityListOut(BaseModel):
-    """Paginated activities and summaries over the complete filtered selection."""
-
     items: list[VaultActivityListItemOut]
     total: int
     offset: int
@@ -849,7 +838,6 @@ class VaultActivityDetailOut(VaultActivityListItemOut):
 
 
 def validate_stage_maps_against_project(spec: RenderSpecV2, valid_stage_ids: set[str]) -> None:
-    """Reject stage maps referencing foreign or missing stage UUIDs."""
     bad_colors = set(spec.stage_colors.keys()) - valid_stage_ids
     bad_transitions = set(spec.stage_transitions.keys()) - valid_stage_ids
     bad_overrides = set(spec.stage_camera_overrides.keys()) - valid_stage_ids
