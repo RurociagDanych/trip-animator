@@ -10,6 +10,7 @@ services:
       - --storage.tsdb.retention.size=1GB
     volumes:
       - ./observability/prometheus.yaml:/etc/prometheus/trip.yaml:ro
+      - ./observability/service-probes.yaml:/etc/prometheus/service-probes.yaml:ro
       - prometheus_data:/prometheus
     secrets:
       - metrics_token
@@ -41,6 +42,56 @@ services:
       - observability
       - grafana_access
 
+
+  service-probes:
+    profiles: [observability]
+    image: prom/blackbox-exporter:v0.29.1
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command:
+      - --config.file=/etc/blackbox/trip.yaml
+    volumes:
+      - ./observability/blackbox.yaml:/etc/blackbox/trip.yaml:ro
+    networks:
+      - observability
+      - backend
+      - edge
+
+  disk-metrics:
+    profiles: [observability]
+    image: python:3.12-slim
+    restart: unless-stopped
+    user: "65534:65534"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["python", "-B", "/disk-exporter.py"]
+    volumes:
+      - ./observability/disk-exporter.py:/disk-exporter.py:ro
+      - disk_sample:/sample:ro
+    networks: [observability]
+
+  loki:
+    profiles: [observability]
+    image: grafana/loki:3.7.10
+    restart: unless-stopped
+    command: [-config.file=/etc/loki/trip.yaml]
+    volumes:
+      - ./observability/loki.yaml:/etc/loki/trip.yaml:ro
+      - loki_data:/loki
+    networks: [observability]
+
+  alloy:
+    profiles: [observability]
+    image: grafana/alloy:v1.22.0
+    restart: unless-stopped
+    command: [run, --disable-reporting, /etc/alloy/config.alloy]
+    volumes:
+      - ./observability/config.alloy:/etc/alloy/config.alloy:ro
+    networks: [backend, observability]
+
 secrets:
   metrics_token:
     environment: METRICS_TOKEN
@@ -50,6 +101,8 @@ secrets:
 volumes:
   prometheus_data:
   grafana_data:
+  disk_sample:
+  loki_data:
 
 networks:
   observability:

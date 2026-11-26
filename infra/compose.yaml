@@ -150,6 +150,7 @@ services:
     environment:
       <<: *app-env
       FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1,::1,172.30.0.10}
+      OPERATIONAL_EVENTS_HOST: alloy
       GOLD_OUTPUT_DIR: /data/gold
       STRAVA_VERIFY_TOKEN: ${STRAVA_VERIFY_TOKEN:-}
       STRAVA_WEBHOOK_SUBSCRIPTION_ID: ${STRAVA_WEBHOOK_SUBSCRIPTION_ID:-}
@@ -227,6 +228,7 @@ services:
     environment:
       <<: *app-env
       RENDER_BASE_URL: ${COMPOSE_RENDER_BASE_URL:-http://caddy}
+      OPERATIONAL_EVENTS_HOST: alloy
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
       WORKER_GPU_ENABLED: ${WORKER_GPU_ENABLED:-false}
       WORKER_CPU_RENDERER: ${WORKER_CPU_RENDERER:-lavapipe}

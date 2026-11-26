@@ -1,0 +1,19 @@
+loki.source.syslog "reviewed" {
+  listener {
+    address = "0.0.0.0:1514"
+    protocol = "udp"
+    labels = {service = "api"}
+  }
+  listener {
+    address = "0.0.0.0:1515"
+    protocol = "udp"
+    labels = {service = "worker"}
+  }
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

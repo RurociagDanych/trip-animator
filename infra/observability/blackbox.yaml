@@ -1,0 +1,23 @@
+modules:
+  health_http:
+    prober: http
+    timeout: 4s
+    http:
+      preferred_ip_protocol: ip4
+      follow_redirects: false
+  frontend_http:
+    prober: http
+    timeout: 4s
+    http:
+      preferred_ip_protocol: ip4
+      follow_redirects: false
+      fail_if_body_not_matches_regexp: ['id="root"']
+  airflow_health:
+    prober: http
+    timeout: 4s
+    http:
+      preferred_ip_protocol: ip4
+      follow_redirects: false
+      fail_if_body_json_not_matches_cel: >-
+        body.metadatabase.status == "healthy" && body.scheduler.status == "healthy"
+        && body.dag_processor.status == "healthy"

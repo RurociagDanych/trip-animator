@@ -1,0 +1,30 @@
+scrape_configs:
+  - job_name: trip-service-probes
+    metrics_path: /probe
+    static_configs:
+      - targets: ["http://caddy/"]
+        labels: {service: caddy, module: frontend_http}
+      - targets: ["http://web:8080/"]
+        labels: {service: web, module: frontend_http}
+      - targets: ["http://minio:9000/health/ready"]
+        labels: {service: rustfs, module: health_http}
+      - targets: ["http://airflow:8080/api/v2/monitor/health"]
+        labels: {service: airflow, module: airflow_health}
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [module]
+        target_label: __param_module
+      - source_labels: [service]
+        target_label: instance
+      - target_label: __address__
+        replacement: service-probes:9115
+      - action: labeldrop
+        regex: module
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: probe_success
+        action: keep
+  - job_name: trip-disk-metrics
+    static_configs:
+      - targets: ["disk-metrics:9100"]

@@ -1,0 +1,9 @@
+apiVersion: 1
+
+datasources:
+  - name: Trip Loki
+    uid: trip-loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false

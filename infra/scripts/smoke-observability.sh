@@ -11,7 +11,7 @@ stack=(docker compose --env-file "$conf" -f infra/compose.yaml -f infra/compose.
 fixture=("${stack[@]}" -f "$scratch/local.yaml")
 cleanup() {
   if [[ $1 != 0 ]]; then
-    "${fixture[@]}" --profile observability logs --tail=25 grafana prometheus >&2 || true
+    "${fixture[@]}" --profile observability logs --tail=25 grafana prometheus loki alloy >&2 || true
   fi
   "${fixture[@]}" --profile observability down -v --remove-orphans
   rm -rf -- "$scratch"
@@ -23,17 +23,22 @@ password=$(openssl rand -hex 24)
 printf '%s' "$password" > "$scratch/secrets/grafana_admin_password"
 printf 'OBSERVABILITY_ENABLED=true\nMETRICS_TOKEN=%s\nGRAFANA_LOCAL_PORT=%s\n' "$(openssl rand -hex 24)" "$port" > "$conf"
 printf 'services:\n  postgres:\n    ports: !reset []\nnetworks:\n  edge:\n    ipam: !reset null\n' > "$scratch/local.yaml"
+printf 'services:\n  caddy:\n    ports: !reset []\n    networks:\n      edge:\n        ipv4_address: !reset null\n  minio:\n    ports: !reset []\n  airflow:\n    ports: !reset []\n' > "$scratch/probes.yaml"
+fixture+=(-f "$scratch/probes.yaml")
 
 # Other checkouts may already use the default static edge subnet or database port.
 "${fixture[@]}" config --quiet
-if "${stack[@]}" config --services | grep -Ex 'grafana|prometheus'; then
+if "${stack[@]}" config --services | grep -Ex 'grafana|prometheus|loki|alloy'; then
   printf '%s\n' 'Monitoring services must not be active in the default application model.' >&2
   exit 1
 fi
 "${fixture[@]}" up -d --wait postgres
 "${fixture[@]}" run -T --no-deps --pull never --rm migrate
 "${fixture[@]}" up -d --no-deps --build --wait api
-infra/scripts/apply-observability.sh "$conf"
+"${fixture[@]}" up -d --no-deps --wait web caddy minio
+"${fixture[@]}" run -T --no-deps --rm airflow-init
+"${fixture[@]}" up -d --no-deps --wait --wait-timeout 180 airflow
+infra/scripts/apply-observability.sh "$conf" "$scratch/local.yaml" "$scratch/probes.yaml"
 
 grafana="http://127.0.0.1:$port"
 wait_for() {
@@ -65,13 +70,77 @@ query "$queue_age_query" |
 printf '%s\n' 'Verified the dashboard queue age query against an empty PostgreSQL queue.'
 printf '%s\n' 'Verified the authenticated dashboard and live API/PostgreSQL scrape.'
 
+
+probe_expression=$(curl_grafana "$grafana/api/dashboards/uid/trip-service-health" |
+  python3 -c 'import sys,json; print(json.load(sys.stdin)["dashboard"]["panels"][0]["targets"][0]["expr"])')
+probes_match() {
+  query "$probe_expression" | python3 -c 'import json, sys; rows = json.load(sys.stdin)["data"]["result"]; assert {r["metric"]["service"]: r["value"][1] for r in rows} == json.loads(sys.argv[1])' "$1"
+}
+wait_for probes_match '{"caddy":"1","web":"1","rustfs":"1","airflow":"1"}' 2>/dev/null
+"${fixture[@]}" stop web
+wait_for probes_match '{"caddy":"0","web":"0","rustfs":"1","airflow":"1"}' 2>/dev/null
+"${fixture[@]}" --profile observability stop service-probes
+wait_for probes_match '{}' 2>/dev/null
+"${fixture[@]}" --profile observability start service-probes
+printf '%s\n' 'Verified healthy, failed, and unknown internal service probes in Grafana.'
+
+disk_expression=$(curl_grafana "$grafana/api/dashboards/uid/trip-service-health" |
+  python3 -c 'import json,sys; print(next(p for p in json.load(sys.stdin)["dashboard"]["panels"] if p["id"] == 2)["targets"][0]["expr"])')
+disk_matches() {
+  query "$disk_expression" | python3 -c 'import json,sys; rows = json.load(sys.stdin)["data"]["result"]; assert (len(rows) == 1 and float(rows[0]["value"][1]) > 0) if sys.argv[1] == "present" else not rows' "$1"
+}
+wait_for disk_matches present 2>/dev/null
+"${fixture[@]}" --profile observability stop disk-metrics
+wait_for disk_matches absent 2>/dev/null
+"${fixture[@]}" --profile observability start disk-metrics
+printf '%s\n' 'Verified real Docker volume disk headroom and unknown state after exporter shutdown.'
+
+loki_readable() {
+  curl_grafana -G "$grafana/api/datasources/proxy/uid/trip-loki/loki/api/v1/query_range" \
+    --data-urlencode 'query={service=~"api|worker"}' |
+    python3 -c 'import json, sys
+expected = {
+    "api": {"event": "http_server_error", "route": "/ready", "status": 503},
+    "worker": {"event": "render_attempt_finished", "job_id": "00000000-0000-0000-0000-000000000001", "outcome": "failed"},
+}
+for stream in json.load(sys.stdin)["data"]["result"]:
+    service = stream["stream"]["service"]
+    if service in expected and any(json.loads(value[1]) == expected[service] for value in stream["values"]):
+        del expected[service]
+assert not expected, expected'
+}
+"${fixture[@]}" stop postgres
+"${fixture[@]}" exec -T api python - <<'PY'
+from time import sleep
+from urllib.error import HTTPError
+from urllib.request import urlopen
+from uuid import UUID
+
+from trip_telemetry.operational_events import record_render_outcome
+
+for _ in range(10):
+    try:
+        with urlopen("http://localhost:8000/ready?fixture=not-in-logs", timeout=5):
+            raise AssertionError("Readiness should fail while PostgreSQL is stopped")
+    except HTTPError as exc:
+        assert exc.code == 503
+    record_render_outcome(UUID(int=1), "failed")
+    sleep(1)
+PY
+wait_for loki_readable 2>/dev/null || loki_readable
+"${fixture[@]}" up -d --wait postgres
+printf '%s\n' 'Verified a real API readiness failure and a worker fixture event through Alloy, Loki and Grafana.'
+
 ingest_dashboard="$grafana/api/dashboards/uid/trip-ingest-overview"
 wait_for curl_grafana "$ingest_dashboard" >/dev/null
+empty_ingest_queue() {
+  query "$1" |
+    python3 -c 'import json,sys; assert [r["value"][1] for r in json.load(sys.stdin)["data"]["result"]] == ["0"]'
+}
 for panel in 1 2; do
   expression=$(curl_grafana "$ingest_dashboard" |
     python3 -c 'import json,sys; print(next(p["targets"][0]["expr"] for p in json.load(sys.stdin)["dashboard"]["panels"] if p["id"] == int(sys.argv[1])))' "$panel")
-  query "$expression" |
-    python3 -c 'import json,sys; assert [r["value"][1] for r in json.load(sys.stdin)["data"]["result"]] == ["0"]'
+  wait_for empty_ingest_queue "$expression" 2>/dev/null || empty_ingest_queue "$expression"
 done
 printf '%s\n' 'Verified both ingest dashboard queries against an empty PostgreSQL queue.'
 
@@ -94,12 +163,12 @@ http_panels_readable() {
 wait_for http_panels_readable 2>/dev/null || http_panels_readable
 printf '%s\n' 'Verified live HTTP error rate and latency in Grafana from requests to the API.'
 
-
-# Keep the running application container and both named volumes when switching off.
+# The application and monitoring data must survive disabling observability.
 api_id=$("${fixture[@]}" ps -q api)
 printf '\nOBSERVABILITY_ENABLED=false\n' >> "$conf"
-infra/scripts/apply-observability.sh "$conf"
-test -z "$("${fixture[@]}" --profile observability ps --status running --services prometheus grafana)"
+infra/scripts/apply-observability.sh "$conf" "$scratch/local.yaml" "$scratch/probes.yaml"
+test -z "$("${fixture[@]}" --profile observability ps --status running --services prometheus grafana loki alloy service-probes disk-metrics)"
 test "$api_id" = "$("${fixture[@]}" ps --status running -q api)"
-docker volume inspect "${COMPOSE_PROJECT_NAME}_prometheus_data" "${COMPOSE_PROJECT_NAME}_grafana_data" >/dev/null
+docker volume inspect "${COMPOSE_PROJECT_NAME}_prometheus_data" "${COMPOSE_PROJECT_NAME}_grafana_data" \
+  "${COMPOSE_PROJECT_NAME}_loki_data" >/dev/null
 printf '%s\n' 'Disabling monitoring preserves the running API and monitoring volumes.'
