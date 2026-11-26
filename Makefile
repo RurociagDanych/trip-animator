@@ -127,11 +127,13 @@ remote-render-push:
 	ecr_url="$$(terraform -chdir="$(REMOTE_RENDER_TF_DIR)" output -raw ecr_repository_url)"; \
 	aws ecr get-login-password --region "$(REMOTE_RENDER_AWS_REGION)" \
 		| docker login --username AWS --password-stdin "$$ecr_url"; \
-	docker build --platform linux/amd64 \
+	docker buildx build --platform linux/amd64 \
+		--provenance=false \
+		--sbom=false \
 		-f infra/docker/Dockerfile.worker-aws-lambda \
 		-t "$$ecr_url:$(REMOTE_RENDER_IMAGE_TAG)" \
-		.; \
-	docker push "$$ecr_url:$(REMOTE_RENDER_IMAGE_TAG)"
+		--push \
+		.
 
 remote-render-deploy:
 	terraform -chdir="$(REMOTE_RENDER_TF_DIR)" init
