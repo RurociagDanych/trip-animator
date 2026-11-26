@@ -2106,6 +2106,11 @@ def test_cinematic_job_logs_lifecycle_probe_and_chunk_stage_events(
 ) -> None:
     settings = WorkerSettings(chunk_threshold_frames=1800, chunk_size_frames=300)
     caplog.set_level("INFO", logger="trip_worker.runner")
+    outcomes = []
+    monkeypatch.setattr(
+        "trip_worker.runner.record_render_outcome",
+        lambda job_id, status: outcomes.append((job_id, status)),
+    )
     db, job_id, _seen = _run_cinematic_job(
         tmp_path,
         monkeypatch,
@@ -2115,6 +2120,7 @@ def test_cinematic_job_logs_lifecycle_probe_and_chunk_stage_events(
         settings=settings,
     )
     assert db.jobs[job_id]["status"] == "succeeded"
+    assert outcomes == [(job_id, "succeeded")]
 
     events = {
         r.event: r  # type: ignore[attr-defined]

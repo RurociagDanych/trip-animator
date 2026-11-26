@@ -16,6 +16,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from trip_api.config import Settings
 from trip_api.db import (
     Base,
+    IngestJob,
     Project,
     RateLimitRecord,
     RenderJob,
@@ -452,6 +453,38 @@ def test_metrics_prometheus_exposition_gating_and_zero_pii(tmp_path: Path) -> No
         ]
         assert 120 <= float(age_value) < 150
 
+        assert "\ntrip_ingest_queue_depth 0\n" in body
+        assert "\ntrip_ingest_queue_oldest_age_seconds 0\n" in body
+        with sf() as db:
+            now = datetime.now(UTC)
+            db.add_all(
+                IngestJob(
+                    event_type="create",
+                    external_owner_id="private-owner",
+                    external_object_id=object_id,
+                    status=job_status,
+                    created_at=now - timedelta(seconds=age),
+                )
+                for object_id, job_status, age in (
+                    (1, "queued", 60),
+                    (2, "queued", 120),
+                    (3, "running", 3600),
+                    (4, "failed", 7200),
+                )
+            )
+            db.commit()
+        populated = client.get(
+            "/metrics", headers={"Authorization": "Bearer super-secret-metrics-token"}
+        )
+        values = dict(
+            line.split(" ", 1)
+            for line in populated.text.splitlines()
+            if line.startswith("trip_ingest_")
+        )
+        assert values["trip_ingest_queue_depth"] == "2"
+        assert 120 <= float(values["trip_ingest_queue_oldest_age_seconds"]) < 130
+        assert "private-owner" not in populated.text
+
         prod_no_token = create_app(
             Settings(
                 app_env="production",
@@ -486,8 +519,94 @@ def test_metrics_prometheus_exposition_gating_and_zero_pii(tmp_path: Path) -> No
         assert down_resp.status_code == 200
         assert "trip_db_up 0" in down_resp.text
         assert not any(line.startswith(f"{metric_name} ") for line in down_resp.text.splitlines())
+        assert "\ntrip_ingest_" not in down_resp.text
     finally:
         engine.dispose()
+
+
+def test_http_operational_events_use_route_template_and_only_report_server_errors(
+    make_harness: HarnessFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = make_harness().app
+    events: list[tuple[str | None, int]] = []
+
+    def record(route: str | None, status: int) -> None:
+        events.append((route, status))
+
+    monkeypatch.setattr("trip_api.main.record_api_failure", record)
+
+    @app.get("/_test_failure/{item}", status_code=503)
+    def _unavailable(item: str) -> dict[str, str]:
+        return {"item": item}
+
+    @app.get("/_test_exception/{item}")
+    def _exception(item: str) -> None:
+        raise RuntimeError(item)
+
+    client = TestClient(app, raise_server_exceptions=False)
+    assert client.get("/health").status_code == 200
+    assert client.get("/_test_missing").status_code == 404
+    assert client.get("/_test_failure/private-item?trace=private-value").status_code == 503
+    assert client.get("/_test_exception/private-item?trace=private-value").status_code == 500
+    assert events == [("/_test_failure/{item}", 503), ("/_test_exception/{item}", 500)]
+
+
+def test_http_metrics_use_route_templates_and_count_failures_once(
+    make_harness: HarnessFactory,
+) -> None:
+    h = make_harness()
+
+    @h.app.get("/_test_metrics/{item}")
+    def _item(item: int) -> dict[str, int]:
+        if item == 43:
+            raise RuntimeError("private diagnostic")
+        return {"item": item}
+
+    with TestClient(h.app, raise_server_exceptions=False) as client:
+        assert client.get("/_test_metrics/424242?key=private-query").status_code == 200
+        assert client.get("/_test_metrics/private-invalid").status_code == 422
+        assert client.get("/_test_metrics/43").status_code == 500
+        assert client.get("/private-missing").status_code == 404
+        assert client.get("/metrics").status_code == 200
+        scrape = client.get("/metrics")
+
+    assert scrape.status_code == 200
+    from prometheus_client.parser import text_string_to_metric_families
+
+    samples = {
+        (sample.name, tuple(sorted(sample.labels.items()))): sample.value
+        for family in text_string_to_metric_families(scrape.text)
+        for sample in family.samples
+    }
+    counts = {
+        labels: value
+        for (name, labels), value in samples.items()
+        if name == "trip_api_http_request_duration_seconds_count"
+    }
+    assert counts == {
+        (("route", route), ("status_class", status_class)): 1
+        for route, status_class in (
+            ("/_test_metrics/{item}", "2xx"),
+            ("/_test_metrics/{item}", "4xx"),
+            ("/_test_metrics/{item}", "5xx"),
+            ("unmatched", "4xx"),
+        )
+    }
+    for labels in counts:
+        assert samples["trip_api_http_request_duration_seconds_sum", labels] > 0
+        assert (
+            samples["trip_api_http_request_duration_seconds_bucket", (("le", "+Inf"), *labels)] == 1
+        )
+    for private in (
+        "424242",
+        "private-query",
+        "private-invalid",
+        "private-missing",
+        "private diagnostic",
+    ):
+        assert private not in scrape.text
+
 
 
 def test_unhandled_exception_handler_and_rate_limiter_branches(
