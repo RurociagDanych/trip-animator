@@ -1,0 +1,36 @@
+{
+  "uid": "trip-api-http",
+  "title": "Trip Animator — API HTTP",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "HTTP errors per second by route",
+      "gridPos": {"h": 10, "w": 12, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "trip-prometheus"},
+      "targets": [{
+        "refId": "A",
+        "expr": "sum by (route, status_class) (rate(trip_api_http_request_duration_seconds_count{status_class=~\"4xx|5xx\"}[5m]) and on (job, instance) ((up{job=\"trip-api\"} == 1) and (time() - timestamp(up{job=\"trip-api\"}) < 90)))",
+        "legendFormat": "{{route}} {{status_class}}",
+        "range": true
+      }]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "P95 time to response headers by route",
+      "gridPos": {"h": 10, "w": 12, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "trip-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "targets": [{
+        "refId": "A",
+        "expr": "histogram_quantile(0.95, sum by (route, le) (rate(trip_api_http_request_duration_seconds_bucket[5m]) and on (job, instance) ((up{job=\"trip-api\"} == 1) and (time() - timestamp(up{job=\"trip-api\"}) < 90))))",
+        "legendFormat": "{{route}}",
+        "range": true
+      }]
+    }
+  ]
+}
