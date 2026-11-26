@@ -27,9 +27,17 @@ case "$flag" in
     fi
     export GRAFANA_ADMIN_PASSWORD
     "${stack[@]}" up -d --no-deps "${services[@]}"
+    editor_config=$(dirname -- "$env_file")/secrets/editor_probe.json
+    if [[ -s "$editor_config" ]]; then
+      EDITOR_PROBE_CONFIG_FILE=$(realpath -- "$editor_config")
+      export EDITOR_PROBE_CONFIG_FILE
+      "${stack[@]}" up -d --no-deps --force-recreate editor-probe
+    else
+      "${stack[@]}" stop editor-probe
+    fi
     ;;
   false|'')
-    "${stack[@]}" stop "${services[@]}"
+    "${stack[@]}" stop "${services[@]}" editor-probe
     ;;
   *)
     printf '%s\n' 'OBSERVABILITY_ENABLED must be true or false.' >&2
