@@ -11,6 +11,7 @@ import pytest
 from botocore.exceptions import ClientError
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from trip_api.config import Settings
 from trip_api.db import (
@@ -416,8 +417,40 @@ def test_metrics_prometheus_exposition_gating_and_zero_pii(tmp_path: Path) -> No
         assert "trip_projects_total 1" in body
         assert 'trip_render_jobs_total{status="queued"} 0' in body
         assert 'trip_render_jobs_total{status="succeeded"} 1' in body
+        metric_name = "trip_render_queue_oldest_age_seconds"
+        assert f"{metric_name} 0" in body.splitlines()
         assert "secret-pii@example.com" not in body
         assert "Confidential Tour Title" not in body
+
+        with sf() as db:
+            job = db.scalars(select(RenderJob)).one()
+            job.created_at = datetime.now(UTC) - timedelta(hours=2)
+            db.add_all(
+                [
+                    RenderJob(
+                        project_id=job.project_id,
+                        owner_user_id=job.owner_user_id,
+                        idempotency_key=f"queued-{age}",
+                        idempotency_hash="m" * 64,
+                        spec_json={"version": 2},
+                        status="queued",
+                        created_at=datetime.now(UTC) - timedelta(seconds=age),
+                    )
+                    for age in (60, 120)
+                ]
+            )
+            db.commit()
+
+        queued = client.get(
+            "/metrics", headers={"Authorization": "Bearer super-secret-metrics-token"}
+        )
+        assert queued.status_code == 200
+        [age_value] = [
+            line.split()[1]
+            for line in queued.text.splitlines()
+            if line.startswith(f"{metric_name} ")
+        ]
+        assert 120 <= float(age_value) < 150
 
         prod_no_token = create_app(
             Settings(
@@ -452,6 +485,7 @@ def test_metrics_prometheus_exposition_gating_and_zero_pii(tmp_path: Path) -> No
         down_resp = TestClient(broken_metrics_app).get("/metrics")
         assert down_resp.status_code == 200
         assert "trip_db_up 0" in down_resp.text
+        assert not any(line.startswith(f"{metric_name} ") for line in down_resp.text.splitlines())
     finally:
         engine.dispose()
 
