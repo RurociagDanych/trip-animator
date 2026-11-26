@@ -84,6 +84,16 @@ wait_for probes_match '{}' 2>/dev/null
 "${fixture[@]}" --profile observability start service-probes
 printf '%s\n' 'Verified healthy, failed, and unknown internal service probes in Grafana.'
 
+disk_expression=$(curl_grafana "$grafana/api/dashboards/uid/trip-service-health" |
+  python3 -c 'import json,sys; print(next(p for p in json.load(sys.stdin)["dashboard"]["panels"] if p["id"] == 2)["targets"][0]["expr"])')
+disk_matches() {
+  query "$disk_expression" | python3 -c 'import json,sys; rows = json.load(sys.stdin)["data"]["result"]; assert (len(rows) == 1 and float(rows[0]["value"][1]) > 0) if sys.argv[1] == "present" else not rows' "$1"
+}
+wait_for disk_matches present 2>/dev/null
+"${fixture[@]}" --profile observability stop disk-metrics
+wait_for disk_matches absent 2>/dev/null
+"${fixture[@]}" --profile observability start disk-metrics
+printf '%s\n' 'Verified real Docker volume disk headroom and unknown state after exporter shutdown.'
 
 loki_readable() {
   curl_grafana -G "$grafana/api/datasources/proxy/uid/trip-loki/loki/api/v1/query_range" \
@@ -157,7 +167,7 @@ printf '%s\n' 'Verified live HTTP error rate and latency in Grafana from request
 api_id=$("${fixture[@]}" ps -q api)
 printf '\nOBSERVABILITY_ENABLED=false\n' >> "$conf"
 infra/scripts/apply-observability.sh "$conf" "$scratch/local.yaml" "$scratch/probes.yaml"
-test -z "$("${fixture[@]}" --profile observability ps --status running --services prometheus grafana loki alloy service-probes)"
+test -z "$("${fixture[@]}" --profile observability ps --status running --services prometheus grafana loki alloy service-probes disk-metrics)"
 test "$api_id" = "$("${fixture[@]}" ps --status running -q api)"
 docker volume inspect "${COMPOSE_PROJECT_NAME}_prometheus_data" "${COMPOSE_PROJECT_NAME}_grafana_data" \
   "${COMPOSE_PROJECT_NAME}_loki_data" >/dev/null

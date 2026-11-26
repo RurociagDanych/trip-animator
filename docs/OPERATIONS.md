@@ -127,6 +127,8 @@ Grafana uses the `admin` account on first launch. Open `http://127.0.0.1:3001` l
 
 The **Trip Animator — internal service health** dashboard probes Caddy and the web service for the React application shell, RustFS for readiness, and Airflow for scheduler, DAG processor, and metadata database health. A failed probe is `0`; an unavailable exporter or stale sample is unknown (no data). These probes do not verify public DNS/TLS, editor startup, or DAG run outcomes. The probe exporter has no published port.
 
+The same dashboard shows free bytes on the filesystem backing default local Docker volumes. It reads a dedicated empty volume, without access to application data, the Docker socket, or host mounts. This is a VPS disk headroom signal, not a storage cap; it does not measure volumes placed on separate filesystems.
+
 The **Trip Animator — ingest queue** dashboard shows the number of persisted jobs in `queued` status and the age of the oldest one since creation. Running and completed jobs are excluded. A confirmed empty queue reports zero; stale or unavailable measurements are not shown as zero.
 
 The **Trip Animator — API HTTP** dashboard shows 4xx/5xx responses per second and p95 time to response headers by route template, over a five-minute window. Requests without a matched route are grouped as `unmatched`; scrapes of `/metrics` are excluded. Client-side failures and errors after response headers (such as interrupted streams) are not measured. The dashboard needs multiple scrapes and does not replace missing data with zero.
@@ -134,7 +136,6 @@ The **Trip Animator — API HTTP** dashboard shows 4xx/5xx responses per second 
 Set `OBSERVABILITY_ENABLED=false` and rerun the same script to stop only monitoring and retain its data. Do not use `--remove-orphans` with the base file alone when monitoring is enabled: include `-f infra/compose.observability.yaml` so Compose recognizes its containers.
 
 In Grafana Explore, select **Trip Loki**. Use `{service="api"} | json` to view HTTP server errors by route template, or `{service="worker"} | json | job_id="…"` to find a render attempt. Only these explicitly emitted fields are collected; existing container logs are not ingested. The internal UDP transport is best effort: missing events do not imply success. Loki retains logs for seven days and rate-limits ingestion, but that is not a disk quota.
-
 
 - **Liveness**: `GET /health` → `200 {"status":"ok","service":"trip-api","env":"..."}`
 - **Readiness**: `GET /ready` → `200` when `SELECT 1` succeeds against PostgreSQL, `503` otherwise

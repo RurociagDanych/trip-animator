@@ -59,6 +59,20 @@ services:
       - backend
       - edge
 
+  disk-metrics:
+    profiles: [observability]
+    image: python:3.12-slim
+    restart: unless-stopped
+    user: "65534:65534"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command: ["python", "-B", "/disk-exporter.py"]
+    volumes:
+      - ./observability/disk-exporter.py:/disk-exporter.py:ro
+      - disk_sample:/sample:ro
+    networks: [observability]
+
   loki:
     profiles: [observability]
     image: grafana/loki:3.7.10
@@ -78,7 +92,6 @@ services:
       - ./observability/config.alloy:/etc/alloy/config.alloy:ro
     networks: [backend, observability]
 
-
 secrets:
   metrics_token:
     environment: METRICS_TOKEN
@@ -88,6 +101,7 @@ secrets:
 volumes:
   prometheus_data:
   grafana_data:
+  disk_sample:
   loki_data:
 
 networks:

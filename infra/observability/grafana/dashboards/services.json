@@ -21,6 +21,22 @@
           "legendFormat": "{{service}}"
         }
       ]
+    },
+    {
+      "id": 2,
+      "title": "Docker volume filesystem free space",
+      "description": "Bytes available to unprivileged processes on the default Docker volume filesystem. Missing or stale data is unknown. This is not a quota and does not cover other mounts.",
+      "type": "timeseries",
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 9},
+      "datasource": {"type": "prometheus", "uid": "trip-prometheus"},
+      "fieldConfig": {"defaults": {"min": 0, "unit": "bytes"}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "trip_docker_volume_available_bytes and on (job,instance) (up{job=\"trip-disk-metrics\"} == 1) and on (job,instance) (time() - timestamp(trip_docker_volume_available_bytes) < 90)",
+          "legendFormat": "Available to unprivileged processes"
+        }
+      ]
     }
   ]
 }
