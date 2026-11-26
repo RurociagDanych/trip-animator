@@ -70,11 +70,11 @@ def test_public_config_exposes_open_registration_and_turnstile_site_key(
 
     turnstile_h = make_harness(
         turnstile_site_key="0x4AAAA-public-site-key",
-        turnstile_secret_key="0x4AAAA-private-secret",
+        turnstile_secret_key="test-turnstile-secret",
     )
     ts_cfg = TestClient(turnstile_h.app).get("/api/v1/public-config").json()
     assert ts_cfg["turnstile_site_key"] == "0x4AAAA-public-site-key"
-    assert "0x4AAAA-private-secret" not in str(ts_cfg)
+    assert "test-turnstile-secret" not in str(ts_cfg)
 
 
 def test_open_registration_anti_enumeration_and_background_email(
