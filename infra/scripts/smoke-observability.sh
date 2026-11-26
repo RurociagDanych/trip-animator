@@ -163,11 +163,62 @@ http_panels_readable() {
 wait_for http_panels_readable 2>/dev/null || http_panels_readable
 printf '%s\n' 'Verified live HTTP error rate and latency in Grafana from requests to the API.'
 
+editor_expression=$(curl_grafana "$grafana/api/dashboards/uid/trip-service-health" |
+  python3 -c 'import json,sys; print(next(p["targets"][0]["expr"] for p in json.load(sys.stdin)["dashboard"]["panels"] if p["id"] == 3))')
+editor_matches() {
+  query "$editor_expression" | python3 -c 'import json,sys; assert [r["value"][1] for r in json.load(sys.stdin)["data"]["result"]] == json.loads(sys.argv[1])' "$1"
+}
+editor_matches '[]'
+"${fixture[@]}" start web
+"${fixture[@]}" exec -T api python - > "$scratch/secrets/editor_probe.json" <<'PY'
+import json
+from secrets import token_urlsafe
+
+from trip_api.cli import create_user
+from trip_api.config import get_settings
+from trip_api.db import Project, create_db_engine, create_session_factory
+from trip_telemetry import RenderSpecV2
+
+email = "synthetic-editor@example.invalid"
+password = token_urlsafe(32)
+user = create_user(email=email, password=password)
+with create_session_factory(create_db_engine(get_settings().database_url))() as db:
+    project = Project(owner_user_id=user.id, title="Synthetic workspace", settings_json=RenderSpecV2().model_dump(mode="json"))
+    db.add(project)
+    db.commit()
+    assert not project.share_enabled
+    print(json.dumps(dict(email=email, password=password, project_id=str(project.id), project_title=project.title)))
+PY
+chmod 0444 "$scratch/secrets/editor_probe.json"
+infra/scripts/apply-observability.sh "$conf" "$scratch/local.yaml" "$scratch/probes.yaml"
+wait_for editor_matches '["1"]' 2>/dev/null || editor_matches '["1"]'
+python3 -c 'import json,sys; print(json.dumps(dict(json.load(sys.stdin), project_id="00000000-0000-0000-0000-000000000001")))' \
+  < "$scratch/secrets/editor_probe.json" > "$scratch/invalid-project.json"
+mv "$scratch/invalid-project.json" "$scratch/secrets/editor_probe.json"
+chmod 0444 "$scratch/secrets/editor_probe.json"
+infra/scripts/apply-observability.sh "$conf" "$scratch/local.yaml" "$scratch/probes.yaml"
+wait_for editor_matches '["0"]' 2>/dev/null || editor_matches '["0"]'
+"${fixture[@]}" exec -T api python - <<'PY'
+from sqlalchemy import select
+
+from trip_api.config import get_settings
+from trip_api.db import Project, SessionRecord, create_db_engine, create_session_factory
+
+with create_session_factory(create_db_engine(get_settings().database_url))() as db:
+    project = db.scalars(select(Project)).one()
+    assert project.revision == 1 and not project.share_enabled
+    assert db.scalar(select(SessionRecord).where(SessionRecord.user_id == project.owner_user_id)) is None
+PY
+printf '%s\n' 'Verified a real Chromium sign-in, private editor startup, failed project lookup, and session cleanup.'
+mv "$scratch/secrets/editor_probe.json" "$scratch/disabled-project.json"
+infra/scripts/apply-observability.sh "$conf" "$scratch/local.yaml" "$scratch/probes.yaml"
+wait_for editor_matches '[]' 2>/dev/null || editor_matches '[]'
+
 # The application and monitoring data must survive disabling observability.
 api_id=$("${fixture[@]}" ps -q api)
 printf '\nOBSERVABILITY_ENABLED=false\n' >> "$conf"
 infra/scripts/apply-observability.sh "$conf" "$scratch/local.yaml" "$scratch/probes.yaml"
-test -z "$("${fixture[@]}" --profile observability ps --status running --services prometheus grafana loki alloy service-probes disk-metrics)"
+test -z "$("${fixture[@]}" --profile observability ps --status running --services prometheus grafana loki alloy service-probes disk-metrics editor-probe)"
 test "$api_id" = "$("${fixture[@]}" ps --status running -q api)"
 docker volume inspect "${COMPOSE_PROJECT_NAME}_prometheus_data" "${COMPOSE_PROJECT_NAME}_grafana_data" \
   "${COMPOSE_PROJECT_NAME}_loki_data" >/dev/null

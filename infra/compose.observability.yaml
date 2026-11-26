@@ -59,6 +59,25 @@ services:
       - backend
       - edge
 
+  editor-probe:
+    profiles: [observability]
+    image: trip-animator-v2-worker:local
+    pull_policy: never
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:size=256M,mode=1777,nosuid,nodev
+    command: ["python", "-B", "/editor-probe.py"]
+    environment:
+      EDITOR_PROBE_ORIGIN: ${EDITOR_PROBE_ORIGIN:-http://caddy}
+    secrets:
+      - editor_probe_config
+    volumes:
+      - ./observability/editor-probe.py:/editor-probe.py:ro
+    networks: [edge, observability]
+
   disk-metrics:
     profiles: [observability]
     image: python:3.12-slim
@@ -97,6 +116,8 @@ secrets:
     environment: METRICS_TOKEN
   grafana_admin_password:
     environment: GRAFANA_ADMIN_PASSWORD
+  editor_probe_config:
+    file: ${EDITOR_PROBE_CONFIG_FILE:-../secrets/editor_probe.json}
 
 volumes:
   prometheus_data:

@@ -37,6 +37,22 @@
           "legendFormat": "Available to unprivileged processes"
         }
       ]
+    },
+    {
+      "id": 3,
+      "title": "Synthetic editor startup",
+      "description": "1 = signed in and loaded the private project, 0 = check failed, no data = unknown or unconfigured. Runs every five minutes without modifying project data.",
+      "type": "timeseries",
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 18},
+      "datasource": {"type": "prometheus", "uid": "trip-prometheus"},
+      "fieldConfig": {"defaults": {"min": 0, "max": 1}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "trip_editor_probe_success and on (job,instance) (up{job=\"trip-editor-probe\"} == 1) and on (job,instance) (time() - timestamp(trip_editor_probe_success) < 90)",
+          "legendFormat": "Editor startup"
+        }
+      ]
     }
   ]
 }
