@@ -65,6 +65,7 @@ class WorkerSettings(BaseSettings):
     max_manifest_points_per_stage: int = Field(default=12_000, ge=100, le=500_000)
     max_total_manifest_points: int = Field(default=36_000, ge=500, le=1_000_000)
     chromium_no_sandbox: bool = False
+    worker_local_spa_dir: str | None = None
 
     @property
     def resolved_tile_cache_dir(self) -> Path | None:

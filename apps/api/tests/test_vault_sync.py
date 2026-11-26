@@ -157,9 +157,12 @@ def test_alembic_vault_sqlite_upgrade_downgrade_roundtrip(
         assert {"hidden_at", "disconnected_at"} <= {
             c["name"] for c in insp.get_columns("vault_activities")
         }
+        assert {"render_backend", "external_execution_id", "remote_dispatched_at"} <= {
+            c["name"] for c in insp.get_columns("render_jobs")
+        }
         with engine.connect() as conn:
             ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-            assert ver == "0012_vault_original_artifacts"
+            assert ver == "0013_render_job_remote_backend"
     finally:
         engine.dispose()
 

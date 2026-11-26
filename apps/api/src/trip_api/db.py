@@ -328,6 +328,13 @@ class RenderJob(Base):
     is_chunked: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="false", nullable=False
     )
+    render_backend: Mapped[str] = mapped_column(
+        String(32), default="local", server_default="local", nullable=False, index=True
+    )
+    external_execution_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    remote_dispatched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     total_frames: Mapped[int | None] = mapped_column(Integer, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

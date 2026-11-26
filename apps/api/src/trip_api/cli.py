@@ -41,6 +41,12 @@ from trip_api.ingest import (
     process_pending_ingest_jobs,
 )
 from trip_api.reaper import build_object_store, run_reap
+from trip_api.remote_renders import (
+    RemoteRenderCycleReport,
+    process_remote_renders_once,
+    run_remote_render_loop,
+)
+from trip_api.render_backends import build_render_backend
 from trip_api.security import hash_password
 from trip_api.services import (
     build_stage_chart_cache_bytes,
@@ -501,6 +507,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Maximum processing attempts before marking an ingest job failed",
     )
     ing_p.add_argument("--json", action="store_true", dest="as_json", help="Emit JSON output")
+
+    rem_p = sub.add_parser(
+        "process-remote-renders",
+        help="Dispatch and reconcile remote render jobs for the configured Render Backend",
+    )
+    rem_p.add_argument("--database-url", default=None, help="Optional database URL override")
+    rem_p.add_argument(
+        "--loop",
+        action="store_true",
+        help="Continuously poll until SIGTERM/SIGINT",
+    )
+    rem_p.add_argument("--json", action="store_true", dest="as_json", help="Emit JSON output")
     return parser
 
 
@@ -652,6 +670,52 @@ def main(argv: Sequence[str] | None = None) -> int:
             if getattr(args, "loop", False)
             else (0 if rep_ing.failed_jobs == 0 and rep_ing.vault_syncs_failed == 0 else 1)
         )
+
+    if args.command == "process-remote-renders":
+        cfg = get_settings()
+        resolved_url = args.database_url or cfg.database_url
+        engine = create_db_engine(resolved_url, settings=cfg)
+        sf = create_session_factory(engine)
+        store = build_object_store(cfg)
+        backend = build_render_backend(cfg)
+        try:
+            if args.loop:
+                stop_event = threading.Event()
+
+                def _handle_sig(_signum: int, _frame: object) -> None:
+                    stop_event.set()
+
+                signal.signal(signal.SIGTERM, _handle_sig)
+                signal.signal(signal.SIGINT, _handle_sig)
+                run_remote_render_loop(sf, store, cfg, backend, stop_event)
+                rep_rem = RemoteRenderCycleReport()
+            else:
+                rep_rem = process_remote_renders_once(sf, store, cfg, backend)
+        finally:
+            engine.dispose()
+
+        if args.as_json:
+            print(
+                json.dumps(
+                    {
+                        "dispatched": rep_rem.dispatched,
+                        "dispatch_failed": rep_rem.dispatch_failed,
+                        "reconciled_running": rep_rem.reconciled_running,
+                        "reconciled_succeeded": rep_rem.reconciled_succeeded,
+                        "reconciled_failed": rep_rem.reconciled_failed,
+                        "reconciled_cancelled": rep_rem.reconciled_cancelled,
+                    }
+                )
+            )
+        else:
+            print(
+                f"Remote renders complete: dispatched={rep_rem.dispatched} "
+                f"dispatch_failed={rep_rem.dispatch_failed} "
+                f"succeeded={rep_rem.reconciled_succeeded} "
+                f"failed={rep_rem.reconciled_failed} "
+                f"cancelled={rep_rem.reconciled_cancelled}"
+            )
+        return 0
 
     return 1
 
