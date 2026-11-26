@@ -12,8 +12,10 @@ import { DashboardPage } from "./routes/DashboardPage";
 import { ForgotPasswordPage } from "./routes/ForgotPasswordPage";
 import { LoginPage } from "./routes/LoginPage";
 import { NotFoundPage } from "./routes/NotFoundPage";
+import { PrivacyPage } from "./routes/PrivacyPage";
 import { ResetPasswordPage } from "./routes/ResetPasswordPage";
 import { StravaCallbackPage } from "./routes/StravaCallbackPage";
+import { TermsPage } from "./routes/TermsPage";
 import { VerifyEmailPage } from "./routes/VerifyEmailPage";
 
 const LazyEditorPage = lazyRouteComponent(
@@ -95,6 +97,18 @@ const shareViewRoute = createRoute({
   pendingComponent: RouteLoadingFallback,
 });
 
+const privacyRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/privacy",
+  component: PrivacyPage,
+});
+
+const termsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/terms",
+  component: TermsPage,
+});
+
 const routeTree = rootRoute.addChildren([
   dashboardRoute,
   loginRoute,
@@ -106,6 +120,8 @@ const routeTree = rootRoute.addChildren([
   editorRoute,
   renderHarnessRoute,
   shareViewRoute,
+  privacyRoute,
+  termsRoute,
 ]);
 
 export function createAppRouter(history?: RouterHistory) {

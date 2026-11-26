@@ -8,7 +8,9 @@ x-app-env: &app-env
   APP_ENV: ${APP_ENV:-development}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   DEV_AUTH_ENABLED: ${DEV_AUTH_ENABLED:-true}
-  REGISTRATION_INVITE_CODE: ${REGISTRATION_INVITE_CODE:-}
+  REGISTRATION_ENABLED: ${REGISTRATION_ENABLED:-true}
+  TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
+  TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:-}
   PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost}
   SMTP_HOST: ${SMTP_HOST:-}
   SMTP_PORT: ${SMTP_PORT:-587}
@@ -297,6 +299,7 @@ services:
     environment:
       DOMAIN: ${DOMAIN:-localhost}
       CADDY_TILE_CSP_ORIGINS: ${CADDY_TILE_CSP_ORIGINS:-https://tiles.openfreemap.org https://s3.amazonaws.com https://server.arcgisonline.com}
+      CADDY_TURNSTILE_CSP_ORIGIN: ${CADDY_TURNSTILE_CSP_ORIGIN:-}
     ports:
       - "${CADDY_HTTP_PUBLISH:-80:80}"
       - "${CADDY_HTTPS_PUBLISH:-443:443}"

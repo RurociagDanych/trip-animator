@@ -74,6 +74,7 @@ def test_production_guard_blocks_dev_auth_and_default_secrets() -> None:
         Settings(
             app_env="production",
             dev_auth_enabled=False,
+            smtp_host="smtp.example.com",
             database_url=prod_db_url,
             session_secret="x" * 40,
             token_encryption_key="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
@@ -83,6 +84,7 @@ def test_production_guard_blocks_dev_auth_and_default_secrets() -> None:
         Settings(
             app_env="production",
             dev_auth_enabled=False,
+            smtp_host="smtp.example.com",
             database_url=(
                 "postgresql+psycopg://trip_app:"
                 "dev-postgres-password-change-me@localhost:5432/trip_animator"
@@ -95,6 +97,7 @@ def test_production_guard_blocks_dev_auth_and_default_secrets() -> None:
         Settings(
             app_env="production",
             dev_auth_enabled=False,
+            smtp_host="smtp.example.com",
             database_url=prod_db_url,
             session_secret="x" * 40,
             token_encryption_key=valid_key,
@@ -107,6 +110,7 @@ def test_production_guard_blocks_dev_auth_and_default_secrets() -> None:
         Settings(
             app_env="production",
             dev_auth_enabled=False,
+            smtp_host="smtp.example.com",
             database_url=prod_db_url,
             session_secret="x" * 40,
             token_encryption_key=valid_key,
@@ -143,6 +147,7 @@ def test_settings_validators_and_security_edge_cases(monkeypatch: pytest.MonkeyP
         Settings(
             app_env="production",
             dev_auth_enabled=False,
+            smtp_host="smtp.example.com",
             database_url=prod_db_url,
             session_secret="dev-only-" + ("x" * 32),
             token_encryption_key=valid_key,
@@ -391,6 +396,7 @@ def test_metrics_prometheus_exposition_gating_and_zero_pii(tmp_path: Path) -> No
             Settings(
                 app_env="production",
                 dev_auth_enabled=False,
+                smtp_host="smtp.example.com",
                 database_url=db_url,
                 session_secret="prod-session-secret-minimum-32-characters-long",
                 token_encryption_key=base64.urlsafe_b64encode(b"m" * 32).decode("ascii"),
@@ -489,6 +495,7 @@ def test_metrics_prometheus_exposition_gating_and_zero_pii(tmp_path: Path) -> No
             Settings(
                 app_env="production",
                 dev_auth_enabled=False,
+                smtp_host="smtp.example.com",
                 database_url=db_url,
                 session_secret="prod-session-secret-minimum-32-characters-long",
                 token_encryption_key=base64.urlsafe_b64encode(b"m" * 32).decode("ascii"),
@@ -689,6 +696,7 @@ def test_production_s3_allows_iam_role_and_rejects_partial_keys() -> None:
     cfg = Settings(
         app_env="production",
         dev_auth_enabled=False,
+        smtp_host="smtp.example.com",
         database_url=prod_db_url,
         session_secret="x" * 40,
         token_encryption_key=valid_key,
@@ -702,11 +710,11 @@ def test_production_s3_allows_iam_role_and_rejects_partial_keys() -> None:
     assert cfg.s3_access_key_id == ""
     assert cfg.s3_secret_access_key == ""
 
-    # Half-configured static credentials must still fail closed
     with pytest.raises(ValueError, match="S3_ACCESS_KEY_ID"):
         Settings(
             app_env="production",
             dev_auth_enabled=False,
+            smtp_host="smtp.example.com",
             database_url=prod_db_url,
             session_secret="x" * 40,
             token_encryption_key=valid_key,
@@ -719,6 +727,7 @@ def test_production_s3_allows_iam_role_and_rejects_partial_keys() -> None:
         Settings(
             app_env="production",
             dev_auth_enabled=False,
+            smtp_host="smtp.example.com",
             database_url=prod_db_url,
             session_secret="x" * 40,
             token_encryption_key=valid_key,

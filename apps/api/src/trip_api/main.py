@@ -1,5 +1,3 @@
-"""FastAPI application entrypoint with hardened headers, CORS, and RFC 7807 errors."""
-
 from __future__ import annotations
 
 import asyncio
@@ -82,7 +80,6 @@ def _problem_response(
 
 
 def _configure_package_logging(cfg: Settings) -> None:
-    """Ensure trip_api logs at the configured level under both uvicorn and pytest caplog."""
     pkg_logger = logging.getLogger("trip_api")
     resolved_level = logging.getLevelNamesMapping().get(cfg.log_level.upper(), logging.INFO)
     pkg_logger.setLevel(resolved_level)
@@ -303,7 +300,6 @@ def create_app(
                     if key in render_counts:
                         render_counts[key] = int(count_val)
                     if key == "queued" and oldest_created_at is not None:
-                        # SQLite returns naive timestamps for UTC creation times.
                         if oldest_created_at.tzinfo is None:
                             oldest_created_at = oldest_created_at.replace(tzinfo=UTC)
                         oldest_queued_age_seconds = max(
@@ -329,7 +325,6 @@ def create_app(
                 ).one()
                 ingest_age = 0.0
                 if oldest_ingest is not None:
-                    # SQLite returns naive timestamps for columns stored in UTC.
                     if oldest_ingest.tzinfo is None:
                         oldest_ingest = oldest_ingest.replace(tzinfo=UTC)
                     ingest_age = max(0.0, (now - oldest_ingest).total_seconds())
@@ -392,6 +387,9 @@ def create_app(
         return {
             "dev_auth_enabled": cfg.dev_auth_enabled and cfg.app_env != "production",
             "registration_enabled": cfg.registration_enabled,
+            "turnstile_site_key": (
+                cfg.turnstile_site_key.strip() if cfg.turnstile_enabled else None
+            ),
             "strava_configured": bool(cfg.strava_client_id),
             "google_photos_configured": bool(cfg.google_client_id and cfg.google_client_secret),
         }

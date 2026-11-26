@@ -13,24 +13,31 @@ import {
   UserPlus,
 } from "lucide-react";
 import { useId, useState } from "react";
+import { TurnstileWidget } from "../components/auth/TurnstileWidget";
+import { LegalLinksNav } from "../components/legal/LegalPageShell";
 import { ApiError } from "../lib/api/client";
 import { authApi, systemApi } from "../lib/api/endpoints";
-import type { PublicConfigOut } from "../lib/api/types";
+import type { PublicConfigOut, RegisterRequest } from "../lib/api/types";
 
 type AuthMode = "signin" | "register";
 
 export function LoginPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const emailInputId = useId();
+  const displayNameInputId = useId();
   const passwordInputId = useId();
+  const passwordHintId = useId();
   const confirmPasswordInputId = useId();
+  const confirmPasswordErrorId = useId();
 
   const [mode, setMode] = useState<AuthMode>("signin");
   const [email, setEmail] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const [inviteCode, setInviteCode] = useState("");
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+  const [turnstileResetKey, setTurnstileResetKey] = useState(0);
   const [showPassword, setShowPassword] = useState(false);
   const [pending, setPending] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -47,6 +54,7 @@ export function LoginPage() {
 
   const devAuthEnabled = publicConfigQuery.data?.dev_auth_enabled === true;
   const registrationEnabled = publicConfigQuery.data?.registration_enabled === true;
+  const turnstileSiteKey = publicConfigQuery.data?.turnstile_site_key ?? null;
   const activeMode: AuthMode = registrationEnabled ? mode : "signin";
   const passwordMeetsLength = password.length >= 12;
   const passwordsMatch = confirmPassword.length > 0 && password === confirmPassword;
@@ -57,6 +65,7 @@ export function LoginPage() {
     setErrorMessage(null);
     setResendFeedback(null);
     setUnverifiedLoginEmail(null);
+    setTurnstileToken(null);
   }
 
   function handleBackToSignIn() {
@@ -65,6 +74,7 @@ export function LoginPage() {
     setErrorMessage(null);
     setResendFeedback(null);
     setUnverifiedLoginEmail(null);
+    setTurnstileToken(null);
   }
 
   async function handleResendVerification(targetEmail: string) {
@@ -112,8 +122,8 @@ export function LoginPage() {
         setErrorMessage("Passwords do not match.");
         return;
       }
-      if (inviteCode.trim().length === 0) {
-        setErrorMessage("Invite code is required.");
+      if (turnstileSiteKey && !turnstileToken) {
+        setErrorMessage("Please complete the verification challenge before creating an account.");
         return;
       }
     }
@@ -122,15 +132,19 @@ export function LoginPage() {
 
     try {
       if (activeMode === "register") {
-        const res = await authApi.register({
+        const payload: RegisterRequest = {
           email: email.trim(),
           display_name: displayName.trim(),
           password,
-          invite_code: inviteCode.trim(),
-        });
+        };
+        if (turnstileToken) {
+          payload.turnstile_token = turnstileToken;
+        }
+        const res = await authApi.register(payload);
         setVerificationEmail(res.email || email.trim());
         setPassword("");
         setConfirmPassword("");
+        setTurnstileToken(null);
         return;
       }
 
@@ -138,6 +152,10 @@ export function LoginPage() {
       await queryClient.invalidateQueries({ queryKey: ["auth", "me"] });
       await navigate({ to: "/" });
     } catch (error) {
+      if (activeMode === "register" && turnstileSiteKey) {
+        setTurnstileToken(null);
+        setTurnstileResetKey((prev) => prev + 1);
+      }
       if (error instanceof ApiError) {
         setErrorMessage(error.message);
         if (
@@ -223,9 +241,9 @@ export function LoginPage() {
               <div className="space-y-2">
                 <h2 className="text-xl font-semibold tracking-tight text-ink">Check your email</h2>
                 <p className="text-sm leading-relaxed text-ink-muted">
-                  We sent a verification link to{" "}
-                  <span className="font-medium text-ink">{verificationEmail}</span>. Click the link
-                  in your email to verify your account before signing in.
+                  If <span className="font-medium text-ink">{verificationEmail}</span> is eligible,
+                  a verification link has been sent. Click the link in your email to verify your
+                  account before signing in.
                 </p>
               </div>
 
@@ -316,7 +334,7 @@ export function LoginPage() {
                 </h2>
                 <p className="text-sm text-ink-muted">
                   {activeMode === "register"
-                    ? "Enter your invite code to set up your personal workspace."
+                    ? "Create your personal workspace to build and share animated trip films."
                     : "Access your multi-day GPX and Strava route projects."}
                 </p>
               </div>
@@ -360,27 +378,42 @@ export function LoginPage() {
               ) : null}
 
               <form onSubmit={handleSubmit} className="space-y-4">
-                <label className="block space-y-1.5">
-                  <span className="block text-xs font-medium text-ink-muted">Email address</span>
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor={emailInputId}
+                    className="block text-xs font-medium text-ink-muted"
+                  >
+                    Email address
+                  </label>
                   <input
+                    id={emailInputId}
                     type="email"
                     name="email"
-                    autoComplete="email"
+                    autoComplete="username"
+                    spellCheck={false}
+                    enterKeyHint="next"
                     required
                     value={email}
                     onChange={(event) => setEmail(event.currentTarget.value)}
                     placeholder="explorer@example.com"
                     className="w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-ink placeholder:text-ink-muted/60 focus:border-sky-accent focus:outline-none"
                   />
-                </label>
+                </div>
 
                 {activeMode === "register" ? (
-                  <label className="block space-y-1.5">
-                    <span className="block text-xs font-medium text-ink-muted">Display name</span>
+                  <div className="space-y-1.5">
+                    <label
+                      htmlFor={displayNameInputId}
+                      className="block text-xs font-medium text-ink-muted"
+                    >
+                      Display name
+                    </label>
                     <input
+                      id={displayNameInputId}
                       type="text"
                       name="display_name"
                       autoComplete="name"
+                      enterKeyHint="next"
                       required
                       maxLength={120}
                       value={displayName}
@@ -388,7 +421,7 @@ export function LoginPage() {
                       placeholder="Alpine Explorer"
                       className="w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-ink placeholder:text-ink-muted/60 focus:border-sky-accent focus:outline-none"
                     />
-                  </label>
+                  </div>
                 ) : null}
 
                 <div className="space-y-1.5">
@@ -414,6 +447,8 @@ export function LoginPage() {
                       type={showPassword ? "text" : "password"}
                       name="password"
                       autoComplete={activeMode === "register" ? "new-password" : "current-password"}
+                      enterKeyHint={activeMode === "register" ? "next" : "done"}
+                      aria-describedby={activeMode === "register" ? passwordHintId : undefined}
                       required
                       minLength={activeMode === "register" ? 12 : undefined}
                       value={password}
@@ -426,6 +461,7 @@ export function LoginPage() {
                     <button
                       type="button"
                       aria-label={showPassword ? "Hide" : "Show"}
+                      aria-pressed={showPassword}
                       onClick={() => setShowPassword((prev) => !prev)}
                       className="absolute inset-y-0 right-0 flex items-center px-3 text-ink-muted hover:text-ink transition-colors"
                     >
@@ -438,6 +474,7 @@ export function LoginPage() {
                   </div>
                   {activeMode === "register" ? (
                     <p
+                      id={passwordHintId}
                       className={`flex items-center gap-1.5 text-xs ${
                         passwordMeetsLength ? "text-teal-accent" : "text-ink-muted"
                       }`}
@@ -465,6 +502,9 @@ export function LoginPage() {
                         type={showPassword ? "text" : "password"}
                         name="confirm_password"
                         autoComplete="new-password"
+                        enterKeyHint="done"
+                        aria-invalid={passwordsMismatch ? "true" : undefined}
+                        aria-describedby={passwordsMismatch ? confirmPasswordErrorId : undefined}
                         required
                         value={confirmPassword}
                         onChange={(event) => setConfirmPassword(event.currentTarget.value)}
@@ -472,25 +512,19 @@ export function LoginPage() {
                         className="w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-ink placeholder:text-ink-muted/60 focus:border-sky-accent focus:outline-none"
                       />
                       {passwordsMismatch ? (
-                        <p className="text-xs text-amber-accent">Passwords do not match</p>
+                        <p id={confirmPasswordErrorId} className="text-xs text-amber-accent">
+                          Passwords do not match
+                        </p>
                       ) : passwordsMatch ? (
                         <p className="text-xs text-teal-accent">Passwords match</p>
                       ) : null}
                     </div>
 
-                    <label className="block space-y-1.5">
-                      <span className="block text-xs font-medium text-ink-muted">Invite code</span>
-                      <input
-                        type="text"
-                        name="invite_code"
-                        autoComplete="off"
-                        required
-                        value={inviteCode}
-                        onChange={(event) => setInviteCode(event.currentTarget.value)}
-                        placeholder="Enter invite code"
-                        className="w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-ink placeholder:text-ink-muted/60 focus:border-sky-accent focus:outline-none"
-                      />
-                    </label>
+                    <TurnstileWidget
+                      siteKey={turnstileSiteKey}
+                      onToken={setTurnstileToken}
+                      resetKey={turnstileResetKey}
+                    />
                   </>
                 ) : null}
 
@@ -529,10 +563,13 @@ export function LoginPage() {
             </>
           )}
 
-          <div className="text-center">
-            <Link to="/" className="text-xs text-ink-muted hover:text-ink">
-              Return to dashboard
-            </Link>
+          <div className="space-y-2 text-center">
+            <div>
+              <Link to="/" className="text-xs text-ink-muted hover:text-ink">
+                Return to dashboard
+              </Link>
+            </div>
+            <LegalLinksNav />
           </div>
         </div>
       </section>

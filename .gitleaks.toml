@@ -73,3 +73,10 @@ condition = "AND"
 regexTarget = "line"
 paths = ['''(^|/)apps/web/src/test/routes\.test\.tsx$''']
 regexes = ['''^\s*window\.history\.replaceState\(\{\}, "", "/verify-email\?token=tok-valid-123"\);$''']
+
+[[rules.allowlists]]
+description = "Open registration test uses a synthetic Turnstile secret placeholder in PR history"
+condition = "AND"
+regexTarget = "line"
+paths = ['''(^|/)apps/api/tests/test_open_registration\.py$''']
+regexes = ['''^\s*turnstile_secret_key="0x4AAAA-private-secret",$''']

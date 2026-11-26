@@ -1,5 +1,3 @@
-"""Application settings with fail-closed production security invariants."""
-
 from __future__ import annotations
 
 import base64
@@ -15,8 +13,6 @@ _PLACEHOLDER_TOKEN_KEY = "A" * 43 + "="
 
 
 class Settings(BaseSettings):
-    """Typed environment settings for the Trip Animator API."""
-
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -36,7 +32,9 @@ class Settings(BaseSettings):
     app_env: Literal["development", "test", "production"] = "development"
     log_level: str = "INFO"
     dev_auth_enabled: bool = True
-    registration_invite_code: str = ""
+    registration_enabled: bool = True
+    turnstile_site_key: str = ""
+    turnstile_secret_key: str = ""
     public_base_url: str = "http://localhost:5173"
 
     smtp_host: str = ""
@@ -147,14 +145,12 @@ class Settings(BaseSettings):
     )
 
     @property
-    def registration_invite_codes(self) -> tuple[str, ...]:
-        return tuple(
-            code.strip() for code in self.registration_invite_code.split(",") if code.strip()
-        )
+    def turnstile_enabled(self) -> bool:
+        return bool(self.turnstile_site_key.strip() and self.turnstile_secret_key.strip())
 
     @property
-    def registration_enabled(self) -> bool:
-        return len(self.registration_invite_codes) > 0
+    def turnstile_allowed_hosts(self) -> frozenset[str]:
+        return frozenset({"challenges.cloudflare.com"})
 
     @property
     def allowed_origins(self) -> list[str]:
@@ -198,9 +194,20 @@ class Settings(BaseSettings):
         if len(self.session_secret) < 32:
             raise ValueError("SESSION_SECRET must be at least 32 characters")
 
+        has_turnstile_site = bool(self.turnstile_site_key.strip())
+        has_turnstile_secret = bool(self.turnstile_secret_key.strip())
+        if has_turnstile_site != has_turnstile_secret:
+            raise ValueError(
+                "TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY must both be set or both omitted"
+            )
+
         if self.app_env == "production":
             if self.dev_auth_enabled:
                 raise ValueError("DEV_AUTH_ENABLED must be false in production")
+            if self.registration_enabled and not self.smtp_host.strip():
+                raise ValueError(
+                    "SMTP_HOST is required in production when REGISTRATION_ENABLED is true"
+                )
             if self.session_secret.startswith("dev-only-"):
                 raise ValueError("Default development SESSION_SECRET is forbidden in production")
             if self.token_encryption_key == _PLACEHOLDER_TOKEN_KEY:

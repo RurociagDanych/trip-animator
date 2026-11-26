@@ -518,6 +518,7 @@ describe("Route tests: DashboardPage, LoginPage, ForgotPasswordPage, ResetPasswo
       let registered = false;
       let capturedPayload: Record<string, unknown> | null = null;
       let resendPayload: Record<string, unknown> | null = null;
+      let registerCalls = 0;
 
       vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
         const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
@@ -526,28 +527,30 @@ describe("Route tests: DashboardPage, LoginPage, ForgotPasswordPage, ResetPasswo
           return jsonResponse({
             dev_auth_enabled: false,
             registration_enabled: true,
+            turnstile_site_key: null,
             strava_configured: false,
           });
         }
         if (url.includes("/api/v1/auth/register") && method === "POST") {
+          registerCalls += 1;
           const body = JSON.parse(String(init?.body ?? "{}")) as {
             email?: string;
             display_name?: string;
             password?: string;
-            invite_code?: string;
           };
           capturedPayload = body;
-          if (body.invite_code === "wrong-code") {
-            return jsonResponse({ detail: "Invalid registration invite code" }, 403);
+          if (registerCalls === 1) {
+            return jsonResponse({ detail: "Too many registration attempts" }, 429);
           }
           registered = true;
           return jsonResponse(
             {
               status: "verification_required",
               email: body.email ?? "alpine@example.com",
-              message: "Please check your email to verify your account before signing in.",
+              message:
+                "If this email address is eligible, a verification link has been sent. Please check your inbox before signing in.",
             },
-            201,
+            202,
           );
         }
         if (url.includes("/api/v1/auth/resend-verification") && method === "POST") {
@@ -574,8 +577,9 @@ describe("Route tests: DashboardPage, LoginPage, ForgotPasswordPage, ResetPasswo
 
       expect(await screen.findByRole("heading", { name: /Create your account/i })).toBeInTheDocument();
       expect(
-        screen.getByText(/Enter your invite code to set up your personal workspace\./i),
+        screen.getByText(/Create your personal workspace to build and share animated trip films\./i),
       ).toBeInTheDocument();
+      expect(screen.queryByLabelText(/Invite code/i)).not.toBeInTheDocument();
       expect(
         screen.queryByText(/Same-origin session cookies protected by CSRF verification\./i),
       ).not.toBeInTheDocument();
@@ -591,9 +595,6 @@ describe("Route tests: DashboardPage, LoginPage, ForgotPasswordPage, ResetPasswo
       });
       fireEvent.change(screen.getByLabelText(/Confirm password/i), {
         target: { value: "too-short" },
-      });
-      fireEvent.change(screen.getByLabelText(/Invite code/i), {
-        target: { value: "alpine-2026" },
       });
       fireEvent.click(screen.getByRole("button", { name: /^Create account$/i }));
 
@@ -617,18 +618,10 @@ describe("Route tests: DashboardPage, LoginPage, ForgotPasswordPage, ResetPasswo
       fireEvent.change(screen.getByLabelText(/Confirm password/i), {
         target: { value: "secure-alpine-pass" },
       });
-      fireEvent.change(screen.getByLabelText(/Invite code/i), {
-        target: { value: "wrong-code" },
-      });
       fireEvent.click(screen.getByRole("button", { name: /^Create account$/i }));
 
-      expect(await screen.findByRole("alert")).toHaveTextContent(
-        /Invalid registration invite code/i,
-      );
+      expect(await screen.findByRole("alert")).toHaveTextContent(/Too many registration attempts/i);
 
-      fireEvent.change(screen.getByLabelText(/Invite code/i), {
-        target: { value: "alpine-2026" },
-      });
       fireEvent.click(screen.getByRole("button", { name: /^Create account$/i }));
 
       expect(await screen.findByRole("heading", { name: /Check your email/i })).toBeInTheDocument();
@@ -637,7 +630,6 @@ describe("Route tests: DashboardPage, LoginPage, ForgotPasswordPage, ResetPasswo
         email: "alpine@example.com",
         display_name: "Alpine Explorer",
         password: "secure-alpine-pass",
-        invite_code: "alpine-2026",
       });
       expect(screen.getByText("alpine@example.com")).toBeInTheDocument();
       expect(router.state.location.pathname).toBe("/login");
@@ -892,7 +884,6 @@ describe("Route tests: DashboardPage, LoginPage, ForgotPasswordPage, ResetPasswo
 
       renderAtRoute("/share/film-slug");
       expect(await screen.findByText("Shared Film Route")).toBeInTheDocument();
-      // 10 s journey plus two separate stops of 1 s transitions and 2 s hold, as in the editor.
       await waitFor(() => expect(screen.getAllByText(/0\.0s \/ 16s/).length).toBeGreaterThan(0));
     });
 

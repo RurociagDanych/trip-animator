@@ -1,16 +1,30 @@
+import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { AlertCircle, KeyRound, Mail } from "lucide-react";
 import { useId, useState } from "react";
+import { TurnstileWidget } from "../components/auth/TurnstileWidget";
+import { LegalLinksNav } from "../components/legal/LegalPageShell";
 import { ApiError } from "../lib/api/client";
-import { authApi } from "../lib/api/endpoints";
+import { authApi, systemApi } from "../lib/api/endpoints";
+import type { PublicConfigOut } from "../lib/api/types";
 
 export function ForgotPasswordPage() {
   const emailInputId = useId();
   const [email, setEmail] = useState("");
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+  const [turnstileResetKey, setTurnstileResetKey] = useState(0);
   const [pending, setPending] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [submittedEmail, setSubmittedEmail] = useState<string | null>(null);
   const [confirmationMessage, setConfirmationMessage] = useState<string | null>(null);
+
+  const publicConfigQuery = useQuery<PublicConfigOut>({
+    queryKey: ["system", "public-config"],
+    queryFn: ({ signal }) => systemApi.publicConfig(signal),
+    retry: false,
+  });
+
+  const turnstileSiteKey = publicConfigQuery.data?.turnstile_site_key ?? null;
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -19,18 +33,27 @@ export function ForgotPasswordPage() {
       setErrorMessage("Please enter your email address.");
       return;
     }
+    if (turnstileSiteKey && !turnstileToken) {
+      setErrorMessage("Please complete the verification challenge before requesting a reset link.");
+      return;
+    }
 
     setPending(true);
     setErrorMessage(null);
 
     try {
-      const response = await authApi.forgotPassword(trimmedEmail);
+      const response = await authApi.forgotPassword(trimmedEmail, turnstileToken);
       setSubmittedEmail(trimmedEmail);
+      setTurnstileToken(null);
       setConfirmationMessage(
         response.message ||
           "If an active account exists for that email address, a password reset link has been sent.",
       );
     } catch (error) {
+      if (turnstileSiteKey) {
+        setTurnstileToken(null);
+        setTurnstileResetKey((prev) => prev + 1);
+      }
       if (error instanceof ApiError) {
         setErrorMessage(error.message);
       } else {
@@ -45,6 +68,8 @@ export function ForgotPasswordPage() {
     setSubmittedEmail(null);
     setConfirmationMessage(null);
     setErrorMessage(null);
+    setTurnstileToken(null);
+    setTurnstileResetKey((prev) => prev + 1);
   }
 
   return (
@@ -121,7 +146,9 @@ export function ForgotPasswordPage() {
                   id={emailInputId}
                   type="email"
                   name="email"
-                  autoComplete="email"
+                  autoComplete="username"
+                  spellCheck={false}
+                  enterKeyHint="done"
                   required
                   value={email}
                   onChange={(event) => setEmail(event.currentTarget.value)}
@@ -130,19 +157,28 @@ export function ForgotPasswordPage() {
                 />
               </div>
 
+              <TurnstileWidget
+                siteKey={turnstileSiteKey}
+                onToken={setTurnstileToken}
+                resetKey={turnstileResetKey}
+              />
+
               <button
                 type="submit"
-                disabled={pending}
+                disabled={pending || publicConfigQuery.isLoading}
                 className="inline-flex w-full items-center justify-center rounded-md bg-sky-accent px-4 py-2 text-sm font-medium text-canvas hover:bg-sky-accent/90 disabled:opacity-60 transition-colors"
               >
                 {pending ? "Sending..." : "Send reset link"}
               </button>
             </form>
 
-            <div className="text-center">
-              <Link to="/login" className="text-xs font-medium text-ink-muted hover:text-ink">
-                Back to sign in
-              </Link>
+            <div className="space-y-2 text-center">
+              <div>
+                <Link to="/login" className="text-xs font-medium text-ink-muted hover:text-ink">
+                  Back to sign in
+                </Link>
+              </div>
+              <LegalLinksNav />
             </div>
           </>
         )}

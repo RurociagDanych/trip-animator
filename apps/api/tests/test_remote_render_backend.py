@@ -89,6 +89,7 @@ def test_production_settings_fail_closed_for_remote_render_backend() -> None:
     base_prod: dict[str, Any] = {
         "app_env": "production",
         "dev_auth_enabled": False,
+        "smtp_host": "smtp.example.com",
         "database_url": "postgresql+psycopg://trip:strong-pw@db.internal:5432/trip",
         "session_secret": "x" * 48,
         "token_encryption_key": base64.urlsafe_b64encode(b"k" * 32).decode("ascii"),

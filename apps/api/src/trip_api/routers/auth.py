@@ -1,14 +1,14 @@
-"""Authentication, invite-code registration, session cookie, CSRF, and dev-login endpoints."""
-
 from __future__ import annotations
 
+import asyncio
 import hashlib
-import hmac
+import logging
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response
 from sqlalchemy import case, delete, select
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
@@ -61,21 +61,30 @@ from trip_api.security import (
     verify_password,
 )
 from trip_api.services import user_to_out
+from trip_api.turnstile import verify_turnstile_token
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
+logger = logging.getLogger(__name__)
 
-# Precomputed valid Argon2id hash used for constant-time fallback when user is unknown.
 _DUMMY_ARGON2_HASH = hash_password("dummy-timing-guard-password-never-used")
+_REGISTER_GENERIC_MESSAGE = (
+    "If this email address is eligible, a verification link has been sent. "
+    "Please check your inbox before signing in."
+)
 
 
-def _verify_invite_code(provided_code: str, valid_codes: tuple[str, ...]) -> bool:
-    """Compare an invite code against all configured codes in constant time."""
-    provided_bytes = provided_code.strip().encode("utf-8")
-    matched = False
-    for valid_code in valid_codes:
-        if hmac.compare_digest(provided_bytes, valid_code.encode("utf-8")):
-            matched = True
-    return matched
+def _send_email_safe(
+    kind: str,
+    sender: Callable[[Settings, str, str, str], None],
+    settings: Settings,
+    recipient_email: str,
+    display_name: str,
+    action_url: str,
+) -> None:
+    try:
+        sender(settings, recipient_email, display_name, action_url)
+    except Exception as exc:
+        logger.error("Failed to send %s email: %s", kind, type(exc).__name__)
 
 
 def _issue_session(
@@ -120,7 +129,6 @@ def _hash_token(raw_token: str) -> str:
 
 
 def _issue_verification_token(db: Session, settings: Settings, user: User) -> str:
-    """Replace any unused verification tokens for the user and return a fresh raw token."""
     db.execute(
         delete(EmailVerificationToken).where(
             EmailVerificationToken.user_id == user.id,
@@ -140,7 +148,6 @@ def _issue_verification_token(db: Session, settings: Settings, user: User) -> st
 
 
 def _issue_password_reset_token(db: Session, settings: Settings, user: User) -> str:
-    """Replace any unused password reset tokens for the user and return a fresh raw token."""
     db.execute(
         delete(PasswordResetToken).where(
             PasswordResetToken.user_id == user.id,
@@ -207,10 +214,11 @@ def login(
     return _issue_session(db=db, response=response, settings=settings, user=user)
 
 
-@router.post("/register", response_model=RegisterResponse, status_code=201)
-def register(
+@router.post("/register", response_model=RegisterResponse, status_code=202)
+async def register(
     body: RegisterRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: DbSession,
     settings: AppSettings,
 ) -> RegisterResponse:
@@ -234,35 +242,73 @@ def register(
     if not settings.registration_enabled:
         raise HTTPException(status_code=403, detail="Account registration is disabled")
 
-    if not _verify_invite_code(body.invite_code, settings.registration_invite_codes):
-        raise HTTPException(status_code=403, detail="Invalid registration invite code")
+    await verify_turnstile_token(
+        settings=settings,
+        request=request,
+        token=body.turnstile_token,
+        remote_ip=client_ip,
+    )
 
     if "@" not in email or email.startswith("@") or email.endswith("@"):
         raise HTTPException(status_code=422, detail="Invalid email address")
 
     existing = db.scalar(select(User).where(User.email == email))
     if existing is not None:
-        raise HTTPException(
-            status_code=409,
-            detail="An account with this email already exists",
+        await asyncio.to_thread(verify_password, _DUMMY_ARGON2_HASH, body.password)
+        if existing.is_active and existing.email_verified_at is None:
+            raw_token = _issue_verification_token(db, settings, existing)
+            db.add(
+                AuditEvent(
+                    user_id=existing.id,
+                    event_type="auth.register_unverified_resend",
+                    metadata_json={},
+                )
+            )
+            db.commit()
+            verify_url = build_verification_url(settings.public_base_url, raw_token)
+            background_tasks.add_task(
+                _send_email_safe,
+                "verification",
+                send_verification_email,
+                settings,
+                existing.email,
+                existing.display_name,
+                verify_url,
+            )
+        else:
+            db.add(
+                AuditEvent(
+                    user_id=existing.id,
+                    event_type="auth.register_existing_ignored",
+                    metadata_json={},
+                )
+            )
+            db.commit()
+
+        return RegisterResponse(
+            status="verification_required",
+            email=email,
+            message=_REGISTER_GENERIC_MESSAGE,
         )
 
+    pw_hash = await asyncio.to_thread(hash_password, body.password)
     user = User(
         email=email,
         display_name=body.display_name.strip()[:120],
-        password_hash=hash_password(body.password),
+        password_hash=pw_hash,
         is_active=True,
         email_verified_at=None,
     )
     db.add(user)
     try:
         db.flush()
-    except IntegrityError as exc:
+    except IntegrityError:
         db.rollback()
-        raise HTTPException(
-            status_code=409,
-            detail="An account with this email already exists",
-        ) from exc
+        return RegisterResponse(
+            status="verification_required",
+            email=email,
+            message=_REGISTER_GENERIC_MESSAGE,
+        )
 
     raw_token = _issue_verification_token(db, settings, user)
     db.add(
@@ -275,12 +321,20 @@ def register(
     db.commit()
 
     verify_url = build_verification_url(settings.public_base_url, raw_token)
-    send_verification_email(settings, user.email, user.display_name, verify_url)
+    background_tasks.add_task(
+        _send_email_safe,
+        "verification",
+        send_verification_email,
+        settings,
+        user.email,
+        user.display_name,
+        verify_url,
+    )
 
     return RegisterResponse(
         status="verification_required",
         email=user.email,
-        message="Please check your email to verify your account before signing in.",
+        message=_REGISTER_GENERIC_MESSAGE,
     )
 
 
@@ -327,6 +381,7 @@ def verify_email(
 def resend_verification(
     body: ResendVerificationRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: DbSession,
     settings: AppSettings,
 ) -> ResendVerificationResponse:
@@ -363,7 +418,15 @@ def resend_verification(
         )
         db.commit()
         verify_url = build_verification_url(settings.public_base_url, raw_token)
-        send_verification_email(settings, user.email, user.display_name, verify_url)
+        background_tasks.add_task(
+            _send_email_safe,
+            "verification",
+            send_verification_email,
+            settings,
+            user.email,
+            user.display_name,
+            verify_url,
+        )
 
     return ResendVerificationResponse(status="accepted", message=generic_msg)
 
@@ -419,9 +482,10 @@ def logout(
 
 
 @router.post("/forgot-password", response_model=ForgotPasswordResponse, status_code=202)
-def forgot_password(
+async def forgot_password(
     body: ForgotPasswordRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: DbSession,
     settings: AppSettings,
 ) -> ForgotPasswordResponse:
@@ -442,6 +506,13 @@ def forgot_password(
         window_seconds=settings.rate_limit_forgot_password_window_s,
     )
 
+    await verify_turnstile_token(
+        settings=settings,
+        request=request,
+        token=body.turnstile_token,
+        remote_ip=client_ip,
+    )
+
     generic_msg = (
         "If an active account exists for that email address, a password reset link has been sent."
     )
@@ -451,7 +522,15 @@ def forgot_password(
         db.add(AuditEvent(user_id=user.id, event_type="auth.forgot_password", metadata_json={}))
         db.commit()
         reset_url = build_password_reset_url(settings.public_base_url, raw_token)
-        send_password_reset_email(settings, user.email, user.display_name, reset_url)
+        background_tasks.add_task(
+            _send_email_safe,
+            "password reset",
+            send_password_reset_email,
+            settings,
+            user.email,
+            user.display_name,
+            reset_url,
+        )
 
     return ForgotPasswordResponse(status="accepted", message=generic_msg)
 
