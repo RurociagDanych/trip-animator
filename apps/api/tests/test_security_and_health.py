@@ -608,7 +608,6 @@ def test_http_metrics_use_route_templates_and_count_failures_once(
         assert private not in scrape.text
 
 
-
 def test_unhandled_exception_handler_and_rate_limiter_branches(
     make_harness: HarnessFactory,
     monkeypatch: pytest.MonkeyPatch,
