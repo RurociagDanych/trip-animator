@@ -2,7 +2,7 @@
 
 > Purpose: Explain how to set up, run, integrate and maintain a self-hosted Trip Animator deployment.
 > Audience: operators
-> Last reviewed: 2026-11-24
+> Last reviewed: 2026-11-26
 
 Sections:
 
@@ -137,7 +137,7 @@ The optional **Synthetic editor startup** panel uses a dedicated verified non-ad
 
 Set `OBSERVABILITY_ENABLED=false` and rerun the same script to stop only monitoring and retain its data. Do not use `--remove-orphans` with the base file alone when monitoring is enabled: include `-f infra/compose.observability.yaml` so Compose recognizes its containers.
 
-In Grafana Explore, select **Trip Loki**. Use `{service="api"} | json` to view HTTP server errors by route template, or `{service="worker"} | json | job_id="…"` to find a render attempt. Only these explicitly emitted fields are collected; existing container logs are not ingested. The internal UDP transport is best effort: missing events do not imply success. Loki retains logs for seven days and rate-limits ingestion, but that is not a disk quota.
+In Grafana Explore, select **Trip Loki**. Alloy collects stdout/stderr logs from application containers (`api`, `worker`, `ingest`, `web`, `caddy`, `airflow`, `postgres`, `minio`) over a read-only Docker socket (`source="container"`), scoped to the Compose project and excluding monitoring containers to avoid feedback loops. It also receives reviewed operational UDP events on ports `1514` (`api`), `1515` (`worker`), and `1516` (`ingest`) (`source="operational"`), including startup and five-minute heartbeats so labels stay populated even on quiet deployments. Alloy promotes only low-cardinality labels (`service`, `source`, `stream`, `level`, and `event`) and keeps `job_id`, `route`, `status`, and `outcome` inside the JSON body. Use `{service="api"} | json` to inspect API server errors by route template, `{service="worker"} | json | job_id="…"` to trace a render attempt, `{service="ingest"}` for Strava ingest runs, or `{source="container",level="error"}` for container errors. The internal UDP transport is best effort: missing events do not imply success. Loki retains logs for seven days and rate-limits ingestion (`1 MB/s`, `4 MB` burst), which is not a hard disk quota.
 
 - **Liveness**: `GET /health` → `200 {"status":"ok","service":"trip-api","env":"..."}`
 - **Readiness**: `GET /ready` → `200` when `SELECT 1` succeeds against PostgreSQL, `503` otherwise

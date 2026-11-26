@@ -26,6 +26,10 @@ case "$flag" in
       exit 1
     fi
     export GRAFANA_ADMIN_PASSWORD
+    if [[ -z "${COMPOSE_PROJECT_NAME:-}" ]]; then
+      COMPOSE_PROJECT_NAME=$("${base[@]}" config | awk '/^name:/ {print $2; exit}')
+      export COMPOSE_PROJECT_NAME
+    fi
     "${stack[@]}" up -d --no-deps "${services[@]}"
     editor_config=$(dirname -- "$env_file")/secrets/editor_probe.json
     if [[ -s "$editor_config" ]]; then
