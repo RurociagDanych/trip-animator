@@ -127,6 +127,8 @@ Grafana uses the `admin` account on first launch. Open `http://127.0.0.1:3001` l
 
 The **Trip Animator — internal service health** dashboard probes Caddy and the web service for the React application shell, RustFS for readiness, and Airflow for scheduler, DAG processor, and metadata database health. A failed probe is `0`; an unavailable exporter or stale sample is unknown (no data). These probes do not verify public DNS/TLS, editor startup, or DAG run outcomes. The probe exporter has no published port.
 
+The same dashboard shows free bytes on the filesystem backing default local Docker volumes. It reads a dedicated empty volume, without access to application data, the Docker socket, or host mounts. This is a VPS disk headroom signal, not a storage cap; it does not measure volumes placed on separate filesystems.
+
 Set `OBSERVABILITY_ENABLED=false` and rerun the same script to stop only monitoring and retain its data. Do not use `--remove-orphans` with the base file alone when monitoring is enabled: include `-f infra/compose.observability.yaml` so Compose recognizes its containers. This slice does not collect logs yet.
 
 - **Liveness**: `GET /health` → `200 {"status":"ok","service":"trip-api","env":"..."}`

@@ -6,7 +6,7 @@ env_file=${1:-$root/.env}
 base=(docker compose --env-file "$env_file" -f "$root/infra/compose.yaml")
 stack=("${base[@]}" -f "$root/infra/compose.observability.yaml")
 services=(prometheus grafana)
-services+=(service-probes)
+services+=(service-probes disk-metrics)
 for override in "${@:2}"; do
   stack+=(-f "$override")
 done

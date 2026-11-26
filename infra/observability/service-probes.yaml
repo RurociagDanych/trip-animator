@@ -25,3 +25,6 @@ scrape_configs:
       - source_labels: [__name__]
         regex: probe_success
         action: keep
+  - job_name: trip-disk-metrics
+    static_configs:
+      - targets: ["disk-metrics:9100"]
