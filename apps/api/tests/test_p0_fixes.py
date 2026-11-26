@@ -585,6 +585,17 @@ def test_ingest_cli_loop_max_attempts_and_throttled_backoff(
     assert dry_rep.dry_run is True
     assert dry_rep.matched_jobs == 1
 
+    heartbeats: list[str] = []
+    outcomes: list[dict[str, int]] = []
+    monkeypatch.setattr(
+        "trip_api.cli.start_service_heartbeat",
+        lambda service, **kwargs: (heartbeats.append(service), kwargs["stop_event"])[1],
+    )
+    monkeypatch.setattr(
+        "trip_api.cli.record_ingest_outcome",
+        lambda **kwargs: outcomes.append(kwargs),
+    )
+
     stop_ev = threading.Event()
     loop_rep = run_ingest_worker_loop(
         h.settings,
@@ -595,6 +606,8 @@ def test_ingest_cli_loop_max_attempts_and_throttled_backoff(
     )
     assert loop_rep.matched_jobs == 1
     assert loop_rep.ignored_jobs == 1
+    assert heartbeats == ["ingest"]
+    assert outcomes == [{"claimed": 1, "succeeded": 0, "ignored": 1, "failed": 0, "deferred": 0}]
 
     assert cli_main(["process-ingest-jobs", "--dry-run", "--json", "--database-url", db_url]) == 0
     with h.session_factory() as db:

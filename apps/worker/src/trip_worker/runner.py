@@ -21,7 +21,7 @@ from typing import Any, Protocol
 import psycopg
 from pydantic import ValidationError
 from trip_telemetry import DEFAULT_ACTIVITY_TYPE, RenderSpecV2, normalize_activity_type
-from trip_telemetry.operational_events import record_render_outcome
+from trip_telemetry.operational_events import record_render_outcome, start_service_heartbeat
 
 from trip_worker.config import WorkerSettings
 from trip_worker.encoder import (
@@ -2020,7 +2020,8 @@ def process_claimed_job(
         )
         return status
     finally:
-        record_render_outcome(job.id, status)
+        if status != "chunked_in_progress":
+            record_render_outcome(job.id, status)
         logger.info(
             "Render job finished with status %s",
             status,
@@ -2444,7 +2445,8 @@ def run_once(
         return True
 
     if finalize_job is not None:
-        _finalize_chunked_job(cf, finalize_job, cfg, obj_store)
+        final_status = _finalize_chunked_job(cf, finalize_job, cfg, obj_store)
+        record_render_outcome(finalize_job.id, final_status)
         return True
 
     if job is None:
@@ -2514,6 +2516,7 @@ def run_worker_loop(settings: WorkerSettings | None = None, *, once: bool = Fals
         return
 
     stop_event = threading.Event()
+    heartbeat_stop = start_service_heartbeat("worker", stop_event=stop_event)
 
     def _handle_signal(_signum: int, _frame: Any) -> None:
         stop_event.set()
@@ -2521,20 +2524,23 @@ def run_worker_loop(settings: WorkerSettings | None = None, *, once: bool = Fals
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
-    if cfg.worker_concurrency <= 1:
-        _worker_thread_loop(cfg, stop_event, 0)
-        return
+    try:
+        if cfg.worker_concurrency <= 1:
+            _worker_thread_loop(cfg, stop_event, 0)
+            return
 
-    threads = [
-        threading.Thread(
-            target=_worker_thread_loop,
-            args=(cfg, stop_event, idx),
-            name=f"trip-worker-{idx}",
-            daemon=False,
-        )
-        for idx in range(cfg.worker_concurrency)
-    ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
+        threads = [
+            threading.Thread(
+                target=_worker_thread_loop,
+                args=(cfg, stop_event, idx),
+                name=f"trip-worker-{idx}",
+                daemon=False,
+            )
+            for idx in range(cfg.worker_concurrency)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        heartbeat_stop.set()

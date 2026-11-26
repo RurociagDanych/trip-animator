@@ -2243,3 +2243,38 @@ def test_run_once_signals_requeue_and_worker_loop_waits_backoff(
     loop_cfg = WorkerSettings(poll_interval_seconds=2.0, retry_backoff_seconds=7.5)
     _worker_thread_loop(loop_cfg, stop_event, 0)
     assert waits == [7.5]
+
+
+def test_run_once_records_render_outcome_on_chunked_finalization(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    db = InMemoryRenderDatabase()
+    job_id = uuid.uuid4()
+    job = ClaimedJob(
+        id=job_id,
+        project_id=uuid.uuid4(),
+        owner_user_id=uuid.uuid4(),
+        spec_json={},
+        attempt_count=1,
+    )
+    store = LocalObjectStore(tmp_path / "objects")
+    outcomes: list[tuple[uuid.UUID, str]] = []
+
+    monkeypatch.setattr("trip_worker.runner.reap_exhausted_jobs", lambda *_a, **_kw: 0)
+    monkeypatch.setattr("trip_worker.runner.reap_exhausted_chunks", lambda *_a, **_kw: 0)
+    monkeypatch.setattr("trip_worker.runner.claim_next_chunk", lambda *_a, **_kw: None)
+    monkeypatch.setattr("trip_worker.runner._claim_ready_finalize_job", lambda *_a, **_kw: job)
+    monkeypatch.setattr("trip_worker.runner._finalize_chunked_job", lambda *_a, **_kw: "succeeded")
+    monkeypatch.setattr(
+        "trip_worker.runner.record_render_outcome",
+        lambda jid, status: outcomes.append((jid, status)),
+    )
+
+    did_work = run_once(
+        WorkerSettings(),
+        conn_factory=db.conn_factory(),
+        store=store,
+    )
+    assert did_work is True
+    assert outcomes == [(job_id, "succeeded")]

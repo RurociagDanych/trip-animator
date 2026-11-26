@@ -106,9 +106,13 @@ services:
     profiles: [observability]
     image: grafana/alloy:v1.22.0
     restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
     command: [run, --disable-reporting, /etc/alloy/config.alloy]
+    environment:
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-.+}
     volumes:
       - ./observability/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     networks: [backend, observability]
 
 secrets:

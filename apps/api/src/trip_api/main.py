@@ -20,7 +20,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException
-from trip_telemetry.operational_events import record_api_failure
+from trip_telemetry.operational_events import record_api_failure, start_service_heartbeat
 
 from trip_api.config import Settings, get_settings
 from trip_api.db import (
@@ -124,6 +124,7 @@ def create_app(
                 await asyncio.to_thread(ensure_local_gold_duckdb, store, cfg)
             except Exception as exc:
                 logger.warning("Startup Gold DuckDB sync skipped: %s", type(exc).__name__)
+        heartbeat_stop = start_service_heartbeat("api")
         remote_task: asyncio.Task[None] | None = None
         if active_render_backend.is_remote and cfg.render_remote_dispatch_interval_s > 0:
 
@@ -153,6 +154,7 @@ def create_app(
                     await remote_task
                 except asyncio.CancelledError:
                     pass
+            heartbeat_stop.set()
 
     application = FastAPI(
         title="Trip Animator API",
