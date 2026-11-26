@@ -41,6 +41,25 @@ services:
       - observability
       - grafana_access
 
+  loki:
+    profiles: [observability]
+    image: grafana/loki:3.7.10
+    restart: unless-stopped
+    command: [-config.file=/etc/loki/trip.yaml]
+    volumes:
+      - ./observability/loki.yaml:/etc/loki/trip.yaml:ro
+      - loki_data:/loki
+    networks: [observability]
+
+  alloy:
+    profiles: [observability]
+    image: grafana/alloy:v1.22.0
+    restart: unless-stopped
+    command: [run, --disable-reporting, /etc/alloy/config.alloy]
+    volumes:
+      - ./observability/config.alloy:/etc/alloy/config.alloy:ro
+    networks: [backend, observability]
+
 secrets:
   metrics_token:
     environment: METRICS_TOKEN
@@ -50,6 +69,7 @@ secrets:
 volumes:
   prometheus_data:
   grafana_data:
+  loki_data:
 
 networks:
   observability:

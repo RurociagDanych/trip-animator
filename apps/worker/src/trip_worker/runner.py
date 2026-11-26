@@ -21,6 +21,7 @@ from typing import Any, Protocol
 import psycopg
 from pydantic import ValidationError
 from trip_telemetry import DEFAULT_ACTIVITY_TYPE, RenderSpecV2, normalize_activity_type
+from trip_telemetry.operational_events import record_render_outcome
 
 from trip_worker.config import WorkerSettings
 from trip_worker.encoder import (
@@ -2017,6 +2018,7 @@ def process_claimed_job(
         )
         return status
     finally:
+        record_render_outcome(job.id, status)
         logger.info(
             "Render job finished with status %s",
             status,

@@ -19,6 +19,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException
+from trip_telemetry.operational_events import record_api_failure
 
 from trip_api.config import Settings, get_settings
 from trip_api.db import (
@@ -145,6 +146,10 @@ def create_app(
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
         response = await call_next(request)
+        if response.status_code >= 500:
+            record_api_failure(
+                getattr(request.scope.get("route"), "path", None), response.status_code
+            )
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
@@ -175,7 +180,8 @@ def create_app(
         )
 
     @application.exception_handler(Exception)
-    async def unhandled_exception_handler(_: Request, exc: Exception) -> JSONResponse:
+    async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        record_api_failure(getattr(request.scope.get("route"), "path", None), 500)
         logger.error("Unhandled API exception: %s", type(exc).__name__)
         return _problem_response(
             status_code=500,

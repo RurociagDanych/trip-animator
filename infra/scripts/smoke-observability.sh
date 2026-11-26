@@ -11,7 +11,7 @@ stack=(docker compose --env-file "$conf" -f infra/compose.yaml -f infra/compose.
 fixture=("${stack[@]}" -f "$scratch/local.yaml")
 cleanup() {
   if [[ $1 != 0 ]]; then
-    "${fixture[@]}" --profile observability logs --tail=25 grafana prometheus >&2 || true
+    "${fixture[@]}" --profile observability logs --tail=25 grafana prometheus loki alloy >&2 || true
   fi
   "${fixture[@]}" --profile observability down -v --remove-orphans
   rm -rf -- "$scratch"
@@ -26,7 +26,7 @@ printf 'services:\n  postgres:\n    ports: !reset []\nnetworks:\n  edge:\n    ip
 
 # Other checkouts may already use the default static edge subnet or database port.
 "${fixture[@]}" config --quiet
-if "${stack[@]}" config --services | grep -Ex 'grafana|prometheus'; then
+if "${stack[@]}" config --services | grep -Ex 'grafana|prometheus|loki|alloy'; then
   printf '%s\n' 'Monitoring services must not be active in the default application model.' >&2
   exit 1
 fi
@@ -65,11 +65,47 @@ query "$queue_age_query" |
 printf '%s\n' 'Verified the dashboard queue age query against an empty PostgreSQL queue.'
 printf '%s\n' 'Verified the authenticated dashboard and live API/PostgreSQL scrape.'
 
-# Keep the running application container and both named volumes when switching off.
+loki_readable() {
+  curl_grafana -G "$grafana/api/datasources/proxy/uid/trip-loki/loki/api/v1/query_range" \
+    --data-urlencode 'query={service=~"api|worker"}' |
+    python3 -c 'import json, sys
+expected = {
+    "api": {"event": "http_server_error", "route": "/ready", "status": 503},
+    "worker": {"event": "render_attempt_finished", "job_id": "00000000-0000-0000-0000-000000000001", "outcome": "failed"},
+}
+for stream in json.load(sys.stdin)["data"]["result"]:
+    service = stream["stream"]["service"]
+    if service in expected and any(json.loads(value[1]) == expected[service] for value in stream["values"]):
+        del expected[service]
+assert not expected, expected'
+}
+"${fixture[@]}" stop postgres
+"${fixture[@]}" exec -T api python - <<'PY'
+from time import sleep
+from urllib.error import HTTPError
+from urllib.request import urlopen
+from uuid import UUID
+
+from trip_telemetry.operational_events import record_render_outcome
+
+for _ in range(10):
+    try:
+        with urlopen("http://localhost:8000/ready?fixture=not-in-logs", timeout=5):
+            raise AssertionError("Readiness should fail while PostgreSQL is stopped")
+    except HTTPError as exc:
+        assert exc.code == 503
+    record_render_outcome(UUID(int=1), "failed")
+    sleep(1)
+PY
+wait_for loki_readable 2>/dev/null || loki_readable
+"${fixture[@]}" up -d --wait postgres
+printf '%s\n' 'Verified a real API readiness failure and a worker fixture event through Alloy, Loki and Grafana.'
+
 api_id=$("${fixture[@]}" ps -q api)
 printf '\nOBSERVABILITY_ENABLED=false\n' >> "$conf"
 infra/scripts/apply-observability.sh "$conf"
-test -z "$("${fixture[@]}" --profile observability ps --status running --services prometheus grafana)"
+test -z "$("${fixture[@]}" --profile observability ps --status running --services prometheus grafana loki alloy)"
 test "$api_id" = "$("${fixture[@]}" ps --status running -q api)"
-docker volume inspect "${COMPOSE_PROJECT_NAME}_prometheus_data" "${COMPOSE_PROJECT_NAME}_grafana_data" >/dev/null
+docker volume inspect "${COMPOSE_PROJECT_NAME}_prometheus_data" "${COMPOSE_PROJECT_NAME}_grafana_data" \
+  "${COMPOSE_PROJECT_NAME}_loki_data" >/dev/null
 printf '%s\n' 'Disabling monitoring preserves the running API and monitoring volumes.'

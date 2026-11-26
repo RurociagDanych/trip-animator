@@ -125,7 +125,9 @@ The optional monitoring stack starts **off**. To enable it locally, start the ap
 
 Grafana uses the `admin` account on first launch. Open `http://127.0.0.1:3001` locally, or use `ssh -N -L 3001:127.0.0.1:3001 user@vps` before opening the same URL. Prometheus has no published port. The **Trip Animator — API and renders** dashboard shows scrape status, database health, render queue depth, and the age of the oldest queued render measured from job creation. The age is zero when the database confirms the queue is empty. Unavailable queue data is not rendered as zero. Prometheus keeps up to 15 days, with a 1 GB retention target for stored blocks; the WAL and head can use additional space. No history backup or alerts are configured.
 
-Set `OBSERVABILITY_ENABLED=false` and rerun the same script to stop only monitoring and retain its data. Do not use `--remove-orphans` with the base file alone when monitoring is enabled: include `-f infra/compose.observability.yaml` so Compose recognizes its containers. This slice does not collect logs yet.
+Set `OBSERVABILITY_ENABLED=false` and rerun the same script to stop only monitoring and retain its data. Do not use `--remove-orphans` with the base file alone when monitoring is enabled: include `-f infra/compose.observability.yaml` so Compose recognizes its containers.
+
+In Grafana Explore, select **Trip Loki**. Use `{service="api"} | json` to view HTTP server errors by route template, or `{service="worker"} | json | job_id="…"` to find a render attempt. Only these explicitly emitted fields are collected; existing container logs are not ingested. The internal UDP transport is best effort: missing events do not imply success. Loki retains logs for seven days and rate-limits ingestion, but that is not a disk quota.
 
 - **Liveness**: `GET /health` → `200 {"status":"ok","service":"trip-api","env":"..."}`
 - **Readiness**: `GET /ready` → `200` when `SELECT 1` succeeds against PostgreSQL, `503` otherwise
