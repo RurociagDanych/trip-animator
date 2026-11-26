@@ -8,6 +8,7 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from time import perf_counter
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -32,6 +33,7 @@ from trip_api.db import (
     create_session_factory,
 )
 from trip_api.gold_sync import ensure_local_gold_duckdb
+from trip_api.http_metrics import HttpMetrics
 from trip_api.reaper import build_object_store
 from trip_api.reuse_preview import ReusePreviewCache
 from trip_api.routers import (
@@ -108,6 +110,7 @@ def create_app(
     db_engine = engine or create_db_engine(cfg.database_url, settings=cfg)
     db_session_factory = session_factory or create_session_factory(db_engine)
     store = object_store or _build_object_store(cfg)
+    http_metrics = HttpMetrics()
 
     @asynccontextmanager
     async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -145,7 +148,13 @@ def create_app(
         request: Request,
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
-        response = await call_next(request)
+        start = perf_counter()
+        try:
+            response = await call_next(request)
+        except Exception:
+            http_metrics.observe(request, 500, perf_counter() - start)
+            raise
+        http_metrics.observe(request, response.status_code, perf_counter() - start)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
@@ -333,7 +342,7 @@ def create_app(
                 ]
             )
         return PlainTextResponse(
-            content="\n".join(lines) + "\n",
+            content="\n".join(lines) + "\n" + http_metrics.exposition(),
             media_type="text/plain; version=0.0.4; charset=utf-8",
         )
 

@@ -127,6 +127,8 @@ Grafana uses the `admin` account on first launch. Open `http://127.0.0.1:3001` l
 
 The **Trip Animator — ingest queue** dashboard shows the number of persisted jobs in `queued` status and the age of the oldest one since creation. Running and completed jobs are excluded. A confirmed empty queue reports zero; stale or unavailable measurements are not shown as zero.
 
+The **Trip Animator — API HTTP** dashboard shows 4xx/5xx responses per second and p95 time to response headers by route template, over a five-minute window. Requests without a matched route are grouped as `unmatched`; scrapes of `/metrics` are excluded. Client-side failures and errors after response headers (such as interrupted streams) are not measured. The dashboard needs multiple scrapes and does not replace missing data with zero.
+
 Set `OBSERVABILITY_ENABLED=false` and rerun the same script to stop only monitoring and retain its data. Do not use `--remove-orphans` with the base file alone when monitoring is enabled: include `-f infra/compose.observability.yaml` so Compose recognizes its containers. This slice does not collect logs yet.
 
 - **Liveness**: `GET /health` → `200 {"status":"ok","service":"trip-api","env":"..."}`
