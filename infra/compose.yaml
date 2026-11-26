@@ -197,6 +197,7 @@ services:
         required: false
     environment:
       <<: *app-env
+      OPERATIONAL_EVENTS_HOST: alloy
     command: ["python", "-m", "trip_api.cli", "process-ingest-jobs", "--loop", "--poll-interval-s", "5"]
     volumes:
       - object_data:/data/objects

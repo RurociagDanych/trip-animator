@@ -1,14 +1,136 @@
+discovery.docker "containers" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "5s"
+}
+
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    regex         = coalesce(sys.env("COMPOSE_PROJECT_NAME"), ".+")
+    action        = "keep"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex         = "api|worker|ingest|web|caddy|airflow|postgres|minio"
+    action        = "keep"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+
+  rule {
+    target_label = "source"
+    replacement  = "container"
+  }
+}
+
+loki.relabel "container_stream" {
+  forward_to = []
+
+  rule {
+    source_labels = ["__meta_docker_container_log_stream"]
+    target_label  = "stream"
+  }
+}
+
+loki.source.docker "containers" {
+  host             = "unix:///var/run/docker.sock"
+  targets          = discovery.relabel.containers.output
+  relabel_rules    = loki.relabel.container_stream.rules
+  refresh_interval = "5s"
+  forward_to       = [loki.process.container_labels.receiver]
+}
+
+loki.process "container_labels" {
+  stage.json {
+    expressions = {
+      raw_level = "level",
+      raw_event = "event",
+    }
+  }
+
+  stage.regex {
+    expression = "(?i)(?:\\blevel=(?P<kv_level>debug|info|warn|warning|error|critical|fatal)\\b|^\\s*(?P<prefix_level>debug|info|warn|warning|error|critical|fatal)\\s*:|(?:UTC|GMT|\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?)\\s+\\[\\d+\\]\\s+(?P<pg_level>LOG|INFO|WARNING|ERROR|FATAL|PANIC):|\\[(?P<bracket_level>DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL|FATAL)\\])"
+  }
+
+  stage.template {
+    source   = "level"
+    template = "{{ $v := lower (or .raw_level .kv_level .prefix_level .pg_level .bracket_level) }}{{ if or (eq $v \"debug\") (eq $v \"info\") (eq $v \"error\") }}{{ $v }}{{ else if or (eq $v \"warn\") (eq $v \"warning\") }}warn{{ else if or (eq $v \"critical\") (eq $v \"fatal\") (eq $v \"panic\") }}error{{ else if eq $v \"log\" }}info{{ end }}"
+  }
+
+  stage.labels {
+    values = {
+      level = "",
+    }
+  }
+
+  stage.match {
+    selector = "{service=\"worker\"}"
+
+    stage.template {
+      source   = "event"
+      template = "{{ if .raw_event }}{{ .raw_event }}{{ end }}"
+    }
+
+    stage.labels {
+      values = {
+        event = "",
+      }
+    }
+  }
+
+  forward_to = [loki.write.local.receiver]
+}
+
 loki.source.syslog "reviewed" {
   listener {
-    address = "0.0.0.0:1514"
+    address  = "0.0.0.0:1514"
     protocol = "udp"
-    labels = {service = "api"}
+    labels   = {service = "api", source = "operational"}
   }
   listener {
-    address = "0.0.0.0:1515"
+    address  = "0.0.0.0:1515"
     protocol = "udp"
-    labels = {service = "worker"}
+    labels   = {service = "worker", source = "operational"}
   }
+  listener {
+    address  = "0.0.0.0:1516"
+    protocol = "udp"
+    labels   = {service = "ingest", source = "operational"}
+  }
+  forward_to = [loki.process.operational_labels.receiver]
+}
+
+loki.process "operational_labels" {
+  stage.json {
+    expressions = {
+      raw_level = "level",
+      raw_event = "event",
+    }
+  }
+
+  stage.template {
+    source   = "level"
+    template = "{{ $v := lower .raw_level }}{{ if or (eq $v \"debug\") (eq $v \"info\") (eq $v \"warn\") (eq $v \"error\") }}{{ $v }}{{ else if eq $v \"warning\" }}warn{{ end }}"
+  }
+
+  stage.template {
+    source   = "event"
+    template = "{{ .raw_event }}"
+  }
+
+  stage.labels {
+    values = {
+      level = "",
+      event = "",
+    }
+  }
+
   forward_to = [loki.write.local.receiver]
 }
 

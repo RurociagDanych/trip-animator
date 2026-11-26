@@ -28,6 +28,11 @@ from trip_telemetry import (
     parse_track_with_timeout,
     write_silver_parquet,
 )
+from trip_telemetry.operational_events import (
+    record_ingest_error,
+    record_ingest_outcome,
+    start_service_heartbeat,
+)
 
 from trip_api.config import Settings, get_settings
 from trip_api.db import (
@@ -363,35 +368,51 @@ def run_ingest_worker_loop(
     total_deferred = 0
 
     iterations = 0
+    heartbeat_stop = start_service_heartbeat("ingest", stop_event=shutdown_event)
 
     try:
         while not shutdown_event.is_set():
-            with sf() as db:
-                if dry_run:
-                    matched = count_pending_ingest_jobs(
-                        db,
-                        batch_size=limit,
-                        max_attempts=max_attempts,
-                    )
-                    total_matched += matched
-                    claimed = 0
-                    deferred = 0
-                else:
-                    res = process_pending_ingest_jobs(
-                        db,
-                        store,
-                        cfg,
-                        batch_size=limit,
-                        max_attempts=max_attempts,
-                        http_client_factory=http_client_factory,
-                    )
-                    claimed = int(res["claimed"])
-                    deferred = int(res.get("deferred", 0))
-                    total_matched += claimed
-                    total_succeeded += int(res["succeeded"])
-                    total_ignored += int(res["ignored"])
-                    total_failed += int(res["failed"])
-                    total_deferred += deferred
+            try:
+                with sf() as db:
+                    if dry_run:
+                        matched = count_pending_ingest_jobs(
+                            db,
+                            batch_size=limit,
+                            max_attempts=max_attempts,
+                        )
+                        total_matched += matched
+                        claimed = 0
+                        deferred = 0
+                    else:
+                        res = process_pending_ingest_jobs(
+                            db,
+                            store,
+                            cfg,
+                            batch_size=limit,
+                            max_attempts=max_attempts,
+                            http_client_factory=http_client_factory,
+                        )
+                        claimed = int(res["claimed"])
+                        succeeded = int(res["succeeded"])
+                        ignored = int(res["ignored"])
+                        failed = int(res["failed"])
+                        deferred = int(res.get("deferred", 0))
+                        total_matched += claimed
+                        total_succeeded += succeeded
+                        total_ignored += ignored
+                        total_failed += failed
+                        total_deferred += deferred
+                        if claimed > 0 or deferred > 0 or failed > 0:
+                            record_ingest_outcome(
+                                claimed=claimed,
+                                succeeded=succeeded,
+                                ignored=ignored,
+                                failed=failed,
+                                deferred=deferred,
+                            )
+            except Exception as exc:
+                record_ingest_error(type(exc).__name__)
+                raise
 
             iterations += 1
             if max_iterations is not None and iterations >= max_iterations:
@@ -399,6 +420,7 @@ def run_ingest_worker_loop(
             if dry_run or claimed < limit or deferred > 0:
                 shutdown_event.wait(timeout=poll_interval_s)
     finally:
+        heartbeat_stop.set()
         if in_main_thread:
             if prev_sigterm is not None:
                 signal.signal(signal.SIGTERM, prev_sigterm)  # type: ignore[arg-type]

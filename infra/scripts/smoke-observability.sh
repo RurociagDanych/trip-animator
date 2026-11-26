@@ -26,7 +26,6 @@ printf 'services:\n  postgres:\n    ports: !reset []\nnetworks:\n  edge:\n    ip
 printf 'services:\n  caddy:\n    ports: !reset []\n    networks:\n      edge:\n        ipv4_address: !reset null\n  minio:\n    ports: !reset []\n  airflow:\n    ports: !reset []\n' > "$scratch/probes.yaml"
 fixture+=(-f "$scratch/probes.yaml")
 
-# Other checkouts may already use the default static edge subnet or database port.
 "${fixture[@]}" config --quiet
 if "${stack[@]}" config --services | grep -Ex 'grafana|prometheus|loki|alloy'; then
   printf '%s\n' 'Monitoring services must not be active in the default application model.' >&2
@@ -95,17 +94,54 @@ wait_for disk_matches absent 2>/dev/null
 "${fixture[@]}" --profile observability start disk-metrics
 printf '%s\n' 'Verified real Docker volume disk headroom and unknown state after exporter shutdown.'
 
+loki_baseline_labels() {
+  curl_grafana -G "$grafana/api/datasources/proxy/uid/trip-loki/loki/api/v1/labels" |
+    python3 -c 'import json, sys
+labels = set(json.load(sys.stdin).get("data") or [])
+assert {"service", "source", "stream"}.issubset(labels), labels
+assert not ({"job_id", "route", "status", "outcome"} & labels), labels' || return 1
+  curl_grafana -G "$grafana/api/datasources/proxy/uid/trip-loki/loki/api/v1/label/service/values" |
+    python3 -c 'import json, sys
+services = set(json.load(sys.stdin).get("data") or [])
+assert "api" in services, services
+forbidden = {"loki", "alloy", "grafana", "prometheus", "service-probes", "disk-metrics", "editor-probe"}
+assert not (services & forbidden), services' || return 1
+  curl_grafana -G "$grafana/api/datasources/proxy/uid/trip-loki/loki/api/v1/query_range" \
+    --data-urlencode 'query={source="container",service="api"}' |
+    python3 -c 'import json, sys
+streams = json.load(sys.stdin)["data"]["result"]
+assert any(stream.get("values") for stream in streams), streams'
+}
+wait_for loki_baseline_labels 2>/dev/null || loki_baseline_labels
+printf '%s\n' 'Verified Loki labels and container stdout/stderr logs exist before any failure injection.'
+
 loki_readable() {
   curl_grafana -G "$grafana/api/datasources/proxy/uid/trip-loki/loki/api/v1/query_range" \
-    --data-urlencode 'query={service=~"api|worker"}' |
+    --data-urlencode 'query={source="operational",service=~"api|worker|ingest"}' |
     python3 -c 'import json, sys
 expected = {
-    "api": {"event": "http_server_error", "route": "/ready", "status": 503},
-    "worker": {"event": "render_attempt_finished", "job_id": "00000000-0000-0000-0000-000000000001", "outcome": "failed"},
+    "api": (
+        {"level": "error", "event": "http_server_error"},
+        {"level": "error", "event": "http_server_error", "route": "/ready", "status": 503},
+    ),
+    "worker": (
+        {"level": "error", "event": "render_attempt_finished"},
+        {"level": "error", "event": "render_attempt_finished", "job_id": "00000000-0000-0000-0000-000000000001", "outcome": "failed"},
+    ),
+    "ingest": (
+        {"level": "info", "event": "ingest_batch_finished"},
+        {"level": "info", "event": "ingest_batch_finished", "claimed": 1, "succeeded": 1, "ignored": 0, "failed": 0, "deferred": 0},
+    ),
 }
 for stream in json.load(sys.stdin)["data"]["result"]:
-    service = stream["stream"]["service"]
-    if service in expected and any(json.loads(value[1]) == expected[service] for value in stream["values"]):
+    labels = stream["stream"]
+    service = labels.get("service")
+    if service not in expected:
+        continue
+    want_labels, want_body = expected[service]
+    if all(labels.get(k) == v for k, v in want_labels.items()) and any(
+        json.loads(value[1]) == want_body for value in stream["values"]
+    ):
         del expected[service]
 assert not expected, expected'
 }
@@ -116,7 +152,7 @@ from urllib.error import HTTPError
 from urllib.request import urlopen
 from uuid import UUID
 
-from trip_telemetry.operational_events import record_render_outcome
+from trip_telemetry.operational_events import record_ingest_outcome, record_render_outcome
 
 for _ in range(10):
     try:
@@ -125,11 +161,12 @@ for _ in range(10):
     except HTTPError as exc:
         assert exc.code == 503
     record_render_outcome(UUID(int=1), "failed")
+    record_ingest_outcome(claimed=1, succeeded=1, ignored=0, failed=0)
     sleep(1)
 PY
 wait_for loki_readable 2>/dev/null || loki_readable
 "${fixture[@]}" up -d --wait postgres
-printf '%s\n' 'Verified a real API readiness failure and a worker fixture event through Alloy, Loki and Grafana.'
+printf '%s\n' 'Verified API, worker, and ingest operational events with promoted level and event labels in Grafana.'
 
 ingest_dashboard="$grafana/api/dashboards/uid/trip-ingest-overview"
 wait_for curl_grafana "$ingest_dashboard" >/dev/null
@@ -153,7 +190,6 @@ http_expression() {
 error_expression=$(http_expression 0)
 latency_expression=$(http_expression 1)
 http_panels_readable() {
-  # Generate traffic across scrapes so both rate expressions have observations.
   "${fixture[@]}" exec -T api python -c 'import http.client; c = http.client.HTTPConnection("127.0.0.1", 8000, timeout=3); c.request("GET", "/_smoke_unmatched"); assert c.getresponse().status == 404' || return 1
   query "$error_expression" | python3 -c \
     'import json,sys; assert any(r["metric"] == {"route": "unmatched", "status_class": "4xx"} and float(r["value"][1]) > 0 for r in json.load(sys.stdin)["data"]["result"])' || return 1
@@ -214,7 +250,6 @@ mv "$scratch/secrets/editor_probe.json" "$scratch/disabled-project.json"
 infra/scripts/apply-observability.sh "$conf" "$scratch/local.yaml" "$scratch/probes.yaml"
 wait_for editor_matches '[]' 2>/dev/null || editor_matches '[]'
 
-# The application and monitoring data must survive disabling observability.
 api_id=$("${fixture[@]}" ps -q api)
 printf '\nOBSERVABILITY_ENABLED=false\n' >> "$conf"
 infra/scripts/apply-observability.sh "$conf" "$scratch/local.yaml" "$scratch/probes.yaml"

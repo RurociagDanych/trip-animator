@@ -26,7 +26,7 @@ compactor:
   delete_request_store: filesystem
 limits_config:
   retention_period: 168h
-  ingestion_rate_mb: 0.01
-  ingestion_burst_size_mb: 0.1
+  ingestion_rate_mb: 1
+  ingestion_burst_size_mb: 4
 analytics:
   reporting_enabled: false
