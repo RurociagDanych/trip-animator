@@ -10,6 +10,7 @@ services:
       - --storage.tsdb.retention.size=1GB
     volumes:
       - ./observability/prometheus.yaml:/etc/prometheus/trip.yaml:ro
+      - ./observability/service-probes.yaml:/etc/prometheus/service-probes.yaml:ro
       - prometheus_data:/prometheus
     secrets:
       - metrics_token
@@ -41,6 +42,23 @@ services:
       - observability
       - grafana_access
 
+
+  service-probes:
+    profiles: [observability]
+    image: prom/blackbox-exporter:v0.29.1
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    command:
+      - --config.file=/etc/blackbox/trip.yaml
+    volumes:
+      - ./observability/blackbox.yaml:/etc/blackbox/trip.yaml:ro
+    networks:
+      - observability
+      - backend
+      - edge
+
   loki:
     profiles: [observability]
     image: grafana/loki:3.7.10
@@ -59,6 +77,7 @@ services:
     volumes:
       - ./observability/config.alloy:/etc/alloy/config.alloy:ro
     networks: [backend, observability]
+
 
 secrets:
   metrics_token:
