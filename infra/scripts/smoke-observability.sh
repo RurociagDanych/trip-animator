@@ -101,6 +101,39 @@ wait_for loki_readable 2>/dev/null || loki_readable
 "${fixture[@]}" up -d --wait postgres
 printf '%s\n' 'Verified a real API readiness failure and a worker fixture event through Alloy, Loki and Grafana.'
 
+ingest_dashboard="$grafana/api/dashboards/uid/trip-ingest-overview"
+wait_for curl_grafana "$ingest_dashboard" >/dev/null
+empty_ingest_queue() {
+  query "$1" |
+    python3 -c 'import json,sys; assert [r["value"][1] for r in json.load(sys.stdin)["data"]["result"]] == ["0"]'
+}
+for panel in 1 2; do
+  expression=$(curl_grafana "$ingest_dashboard" |
+    python3 -c 'import json,sys; print(next(p["targets"][0]["expr"] for p in json.load(sys.stdin)["dashboard"]["panels"] if p["id"] == int(sys.argv[1])))' "$panel")
+  wait_for empty_ingest_queue "$expression" 2>/dev/null || empty_ingest_queue "$expression"
+done
+printf '%s\n' 'Verified both ingest dashboard queries against an empty PostgreSQL queue.'
+
+http_dashboard="$grafana/api/dashboards/uid/trip-api-http"
+wait_for curl_grafana "$http_dashboard" >/dev/null
+http_expression() {
+  curl_grafana "$http_dashboard" | python3 -c \
+    'import json,sys; print(json.load(sys.stdin)["dashboard"]["panels"][int(sys.argv[1])]["targets"][0]["expr"])' "$1"
+}
+error_expression=$(http_expression 0)
+latency_expression=$(http_expression 1)
+http_panels_readable() {
+  # Generate traffic across scrapes so both rate expressions have observations.
+  "${fixture[@]}" exec -T api python -c 'import http.client; c = http.client.HTTPConnection("127.0.0.1", 8000, timeout=3); c.request("GET", "/_smoke_unmatched"); assert c.getresponse().status == 404' || return 1
+  query "$error_expression" | python3 -c \
+    'import json,sys; assert any(r["metric"] == {"route": "unmatched", "status_class": "4xx"} and float(r["value"][1]) > 0 for r in json.load(sys.stdin)["data"]["result"])' || return 1
+  query "$latency_expression" | python3 -c \
+    'import json,math,sys; assert any(r["metric"] == {"route": "unmatched"} and math.isfinite(float(r["value"][1])) and float(r["value"][1]) > 0 for r in json.load(sys.stdin)["data"]["result"])'
+}
+wait_for http_panels_readable 2>/dev/null || http_panels_readable
+printf '%s\n' 'Verified live HTTP error rate and latency in Grafana from requests to the API.'
+
+# The application and monitoring data must survive disabling observability.
 api_id=$("${fixture[@]}" ps -q api)
 printf '\nOBSERVABILITY_ENABLED=false\n' >> "$conf"
 infra/scripts/apply-observability.sh "$conf"

@@ -8,6 +8,7 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from time import perf_counter
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -23,6 +24,7 @@ from trip_telemetry.operational_events import record_api_failure
 
 from trip_api.config import Settings, get_settings
 from trip_api.db import (
+    IngestJob,
     OAuthConnection,
     Project,
     RenderJob,
@@ -32,6 +34,7 @@ from trip_api.db import (
     create_session_factory,
 )
 from trip_api.gold_sync import ensure_local_gold_duckdb
+from trip_api.http_metrics import HttpMetrics
 from trip_api.reaper import build_object_store
 from trip_api.reuse_preview import ReusePreviewCache
 from trip_api.routers import (
@@ -108,6 +111,7 @@ def create_app(
     db_engine = engine or create_db_engine(cfg.database_url, settings=cfg)
     db_session_factory = session_factory or create_session_factory(db_engine)
     store = object_store or _build_object_store(cfg)
+    http_metrics = HttpMetrics()
 
     @asynccontextmanager
     async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -145,7 +149,13 @@ def create_app(
         request: Request,
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
-        response = await call_next(request)
+        start = perf_counter()
+        try:
+            response = await call_next(request)
+        except Exception:
+            http_metrics.observe(request, 500, perf_counter() - start)
+            raise
+        http_metrics.observe(request, response.status_code, perf_counter() - start)
         if response.status_code >= 500:
             record_api_failure(
                 getattr(request.scope.get("route"), "path", None), response.status_code
@@ -244,6 +254,7 @@ def create_app(
         stages_total = 0
         sessions_active = 0
         oauth_connections_total = 0
+        ingest_lines: list[str] = []
 
         try:
             with db_session_factory() as db:
@@ -276,6 +287,26 @@ def create_app(
                 oauth_connections_total = int(
                     db.scalar(select(func.count()).select_from(OAuthConnection)) or 0
                 )
+                ingest_depth, oldest_ingest = db.execute(
+                    select(func.count(), func.min(IngestJob.created_at)).where(
+                        IngestJob.status == "queued"
+                    )
+                ).one()
+                ingest_age = 0.0
+                if oldest_ingest is not None:
+                    # SQLite returns naive timestamps for columns stored in UTC.
+                    if oldest_ingest.tzinfo is None:
+                        oldest_ingest = oldest_ingest.replace(tzinfo=UTC)
+                    ingest_age = max(0.0, (now - oldest_ingest).total_seconds())
+                ingest_lines = [
+                    "# HELP trip_ingest_queue_depth Number of persisted queued ingest jobs.",
+                    "# TYPE trip_ingest_queue_depth gauge",
+                    f"trip_ingest_queue_depth {ingest_depth}",
+                    "# HELP trip_ingest_queue_oldest_age_seconds "
+                    "Age since creation of the oldest queued ingest job in seconds.",
+                    "# TYPE trip_ingest_queue_oldest_age_seconds gauge",
+                    f"trip_ingest_queue_oldest_age_seconds {ingest_age:g}",
+                ]
         except SQLAlchemyError as exc:
             logger.warning("Metrics DB query failed: %s", type(exc).__name__)
             db_up = 0
@@ -305,6 +336,7 @@ def create_app(
             "# HELP trip_oauth_connections_total Active OAuth provider connections.",
             "# TYPE trip_oauth_connections_total gauge",
             f"trip_oauth_connections_total {oauth_connections_total}",
+            *(ingest_lines if db_up else []),
         ]
         if db_up:
             lines.extend(
@@ -316,7 +348,7 @@ def create_app(
                 ]
             )
         return PlainTextResponse(
-            content="\n".join(lines) + "\n",
+            content="\n".join(lines) + "\n" + http_metrics.exposition(),
             media_type="text/plain; version=0.0.4; charset=utf-8",
         )
 

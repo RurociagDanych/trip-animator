@@ -10,5 +10,5 @@ scrape_configs:
       - targets: ["api:8000"]
     metric_relabel_configs:
       - source_labels: [__name__]
-        regex: trip_api_up|trip_db_up|trip_render_jobs_total|trip_render_queue_oldest_age_seconds
+        regex: trip_api_up|trip_db_up|trip_render_jobs_total|trip_render_queue_oldest_age_seconds|trip_ingest_queue_(depth|oldest_age_seconds)|trip_api_http_request_duration_seconds_(bucket|count|sum)
         action: keep
