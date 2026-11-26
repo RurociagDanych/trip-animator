@@ -1,0 +1,26 @@
+{
+  "uid": "trip-service-health",
+  "title": "Trip Animator — internal service health",
+  "tags": ["trip-animator", "observability"],
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "title": "Internal HTTP probe result",
+      "description": "1 = passed, 0 = failed, no data = unknown. Caddy and web must serve the application shell. Airflow must report healthy scheduler, DAG processor, and metadata database. This does not check public DNS/TLS or DAG run outcomes.",
+      "type": "timeseries",
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "trip-prometheus"},
+      "fieldConfig": {"defaults": {"min": 0, "max": 1}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "probe_success{job=\"trip-service-probes\"} and on (job,instance) (up{job=\"trip-service-probes\"} == 1) and on (job,instance) (time() - timestamp(probe_success{job=\"trip-service-probes\"}) < 90)",
+          "legendFormat": "{{service}}"
+        }
+      ]
+    }
+  ]
+}

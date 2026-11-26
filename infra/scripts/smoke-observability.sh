@@ -23,6 +23,8 @@ password=$(openssl rand -hex 24)
 printf '%s' "$password" > "$scratch/secrets/grafana_admin_password"
 printf 'OBSERVABILITY_ENABLED=true\nMETRICS_TOKEN=%s\nGRAFANA_LOCAL_PORT=%s\n' "$(openssl rand -hex 24)" "$port" > "$conf"
 printf 'services:\n  postgres:\n    ports: !reset []\nnetworks:\n  edge:\n    ipam: !reset null\n' > "$scratch/local.yaml"
+printf 'services:\n  caddy:\n    ports: !reset []\n    networks:\n      edge:\n        ipv4_address: !reset null\n  minio:\n    ports: !reset []\n  airflow:\n    ports: !reset []\n' > "$scratch/probes.yaml"
+fixture+=(-f "$scratch/probes.yaml")
 
 # Other checkouts may already use the default static edge subnet or database port.
 "${fixture[@]}" config --quiet
@@ -33,7 +35,10 @@ fi
 "${fixture[@]}" up -d --wait postgres
 "${fixture[@]}" run -T --no-deps --pull never --rm migrate
 "${fixture[@]}" up -d --no-deps --build --wait api
-infra/scripts/apply-observability.sh "$conf"
+"${fixture[@]}" up -d --no-deps --wait web caddy minio
+"${fixture[@]}" run -T --no-deps --rm airflow-init
+"${fixture[@]}" up -d --no-deps --wait --wait-timeout 180 airflow
+infra/scripts/apply-observability.sh "$conf" "$scratch/local.yaml" "$scratch/probes.yaml"
 
 grafana="http://127.0.0.1:$port"
 wait_for() {
@@ -65,11 +70,24 @@ query "$queue_age_query" |
 printf '%s\n' 'Verified the dashboard queue age query against an empty PostgreSQL queue.'
 printf '%s\n' 'Verified the authenticated dashboard and live API/PostgreSQL scrape.'
 
+probe_expression=$(curl_grafana "$grafana/api/dashboards/uid/trip-service-health" |
+  python3 -c 'import sys,json; print(json.load(sys.stdin)["dashboard"]["panels"][0]["targets"][0]["expr"])')
+probes_match() {
+  query "$probe_expression" | python3 -c 'import json, sys; rows = json.load(sys.stdin)["data"]["result"]; assert {r["metric"]["service"]: r["value"][1] for r in rows} == json.loads(sys.argv[1])' "$1"
+}
+wait_for probes_match '{"caddy":"1","web":"1","rustfs":"1","airflow":"1"}' 2>/dev/null
+"${fixture[@]}" stop web
+wait_for probes_match '{"caddy":"0","web":"0","rustfs":"1","airflow":"1"}' 2>/dev/null
+"${fixture[@]}" --profile observability stop service-probes
+wait_for probes_match '{}' 2>/dev/null
+"${fixture[@]}" --profile observability start service-probes
+printf '%s\n' 'Verified healthy, failed, and unknown internal service probes in Grafana.'
+
 # Keep the running application container and both named volumes when switching off.
 api_id=$("${fixture[@]}" ps -q api)
 printf '\nOBSERVABILITY_ENABLED=false\n' >> "$conf"
-infra/scripts/apply-observability.sh "$conf"
-test -z "$("${fixture[@]}" --profile observability ps --status running --services prometheus grafana)"
+infra/scripts/apply-observability.sh "$conf" "$scratch/local.yaml" "$scratch/probes.yaml"
+test -z "$("${fixture[@]}" --profile observability ps --status running --services prometheus grafana service-probes)"
 test "$api_id" = "$("${fixture[@]}" ps --status running -q api)"
 docker volume inspect "${COMPOSE_PROJECT_NAME}_prometheus_data" "${COMPOSE_PROJECT_NAME}_grafana_data" >/dev/null
 printf '%s\n' 'Disabling monitoring preserves the running API and monitoring volumes.'
