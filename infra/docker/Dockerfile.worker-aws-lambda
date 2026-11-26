@@ -1,0 +1,74 @@
+FROM node:24-slim AS web-build
+
+ENV COREPACK_ENABLE_STRICT=0
+RUN corepack enable && corepack prepare pnpm@11 --activate
+
+WORKDIR /src
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/web/package.json ./apps/web/package.json
+RUN pnpm install --frozen-lockfile --filter @trip-animator/web...
+
+COPY apps/web ./apps/web
+RUN pnpm --filter @trip-animator/web build
+
+FROM python:3.12-slim AS runtime
+
+COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /uvx /bin/
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        ffmpeg \
+        fonts-liberation \
+        fonts-noto-core \
+        libvulkan1 \
+        mesa-vulkan-drivers \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/app/.venv \
+    PATH="/app/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock* ./
+COPY packages/telemetry/pyproject.toml ./packages/telemetry/pyproject.toml
+COPY apps/api/pyproject.toml ./apps/api/pyproject.toml
+COPY apps/worker/pyproject.toml ./apps/worker/pyproject.toml
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-install-workspace --package trip-worker \
+    && uv pip install --python /app/.venv/bin/python awslambdaric
+
+RUN /app/.venv/bin/playwright install-deps chromium \
+    && /app/.venv/bin/playwright install chromium \
+    && chmod -R a+rX /opt/ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY packages/telemetry ./packages/telemetry
+COPY apps/worker ./apps/worker
+COPY --from=web-build /src/apps/web/dist /app/web-dist
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-editable --package trip-worker \
+    && uv pip install --python /app/.venv/bin/python awslambdaric
+
+RUN groupadd --system --gid 10001 appgroup \
+    && useradd --system --uid 10001 --gid appgroup --create-home --home-dir /home/appuser --shell /usr/sbin/nologin appuser
+
+ENV HOME=/tmp \
+    XDG_CONFIG_HOME=/tmp/.config \
+    XDG_CACHE_HOME=/tmp/.cache \
+    WORKER_GPU_ENABLED=false \
+    WORKER_CPU_RENDERER=lavapipe \
+    CHROMIUM_NO_SANDBOX=true \
+    WORKER_LOCAL_SPA_DIR=/app/web-dist
+
+USER 10001:10001
+
+ENTRYPOINT ["/app/.venv/bin/python", "-m", "awslambdaric"]
+CMD ["trip_worker.lambda_handler.handler"]

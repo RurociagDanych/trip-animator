@@ -31,6 +31,12 @@ from trip_api.deps import (
     ensure_utc,
 )
 from trip_api.rate_limit import check_rate_limit
+from trip_api.remote_renders import RenderCallbackPayload, handle_render_callback
+from trip_api.render_backends import (
+    RenderBackend,
+    build_render_backend,
+    verify_render_callback_signature,
+)
 from trip_api.schemas import RenderJobOut, validate_stage_maps_against_project
 from trip_api.services import (
     get_owned_project,
@@ -248,6 +254,7 @@ def create_render_job(
             status="succeeded",
             progress_pct=100,
             attempt_count=0,
+            render_backend=settings.render_backend,
             output_object_key=out_key,
             thumbnail_key=thumb_key,
             expires_at=now + timedelta(days=settings.render_retention_days),
@@ -266,6 +273,7 @@ def create_render_job(
             status="queued",
             progress_pct=0,
             attempt_count=0,
+            render_backend=settings.render_backend,
             created_at=now,
             updated_at=now,
         )
@@ -470,16 +478,24 @@ async def stream_render_events(
 @router.post("/api/v1/renders/{job_id}/cancel", response_model=RenderJobOut)
 def cancel_render_job(
     job_id: uuid.UUID,
+    request: Request,
     auth: CsrfAuth,
     db: DbSession,
     settings: AppSettings,
 ) -> RenderJobOut:
-    job = _get_owned_job(db, job_id, auth.user.id)
+    stmt = select(RenderJob).where(RenderJob.id == job_id, RenderJob.owner_user_id == auth.user.id)
+    if settings.database_url.startswith("postgresql"):
+        stmt = stmt.with_for_update()
+    job = db.scalar(stmt)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Render job not found")
     if job.status in _TERMINAL_STATES:
         raise HTTPException(
             status_code=409,
             detail=f"Cannot cancel render job in terminal state {job.status!r}",
         )
+    external_exec_id = job.external_execution_id
+    job_backend_name = job.render_backend
     job.status = "cancelled"
     job.updated_at = datetime.now(UTC)
     write_audit_event(
@@ -497,7 +513,60 @@ def cancel_render_job(
             logger.debug("pg_notify on cancel skipped: %s", exc)
     db.commit()
     db.refresh(job)
+    if external_exec_id:
+        backend = cast(
+            RenderBackend,
+            getattr(request.app.state, "render_backend", None) or build_render_backend(settings),
+        )
+        if backend.is_remote and backend.name == job_backend_name:
+            try:
+                backend.cancel(external_exec_id)
+            except Exception as exc:
+                logger.warning(
+                    "Best-effort remote cancel failed for job %s (%s): %s",
+                    job.id,
+                    external_exec_id,
+                    exc,
+                )
     return render_job_to_out(job)
+
+
+@router.post("/api/v1/internal/render-callbacks")
+async def receive_render_callback(
+    request: Request,
+    settings: AppSettings,
+    store: StoreDep,
+    x_trip_timestamp: Annotated[str | None, Header(alias="X-Trip-Timestamp")] = None,
+    x_trip_signature: Annotated[str | None, Header(alias="X-Trip-Signature")] = None,
+) -> dict[str, str]:
+    secret = settings.render_callback_secret.strip()
+    if not secret:
+        raise HTTPException(status_code=404, detail="Render callbacks are disabled")
+    raw_body = await request.body()
+    if not verify_render_callback_signature(secret, x_trip_timestamp, x_trip_signature, raw_body):
+        raise HTTPException(status_code=401, detail="Invalid render callback signature")
+    try:
+        payload = RenderCallbackPayload.model_validate_json(raw_body)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="Invalid render callback payload") from exc
+
+    session_factory = cast(sessionmaker[Session], request.app.state.session_factory)
+    backend = cast(
+        RenderBackend,
+        getattr(request.app.state, "render_backend", None) or build_render_backend(settings),
+    )
+    try:
+        status_after = await asyncio.to_thread(
+            handle_render_callback,
+            session_factory,
+            store,
+            settings,
+            backend,
+            payload,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": status_after}
 
 
 @router.get("/api/v1/renders/{job_id}/download")

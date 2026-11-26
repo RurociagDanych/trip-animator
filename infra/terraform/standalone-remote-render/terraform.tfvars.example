@@ -1,0 +1,9 @@
+aws_region             = "eu-central-1"
+name_prefix            = "trip-animator-remote-render"
+image_tag              = "latest"
+lambda_memory_mb       = 10240
+lambda_timeout_seconds = 900
+sfn_max_concurrency    = 8
+staging_retention_days = 3
+map_tile_allowlist     = "https://tiles.openfreemap.org"
+render_callback_secret = ""

@@ -88,6 +88,20 @@ class Settings(BaseSettings):
     google_redirect_uri: str = "http://localhost:5173/google-photos/callback"
 
     render_retention_days: int = Field(default=7, ge=1, le=3650)
+    render_backend: Literal["local", "aws_sfn_lambda"] = "local"
+    render_aws_region: str = "eu-central-1"
+    render_aws_state_machine_arn: str = ""
+    render_aws_staging_bucket: str = ""
+    render_aws_access_key_id: str = ""
+    render_aws_secret_access_key: str = ""
+    render_aws_endpoint_url: str = ""
+    render_callback_base_url: str = ""
+    render_callback_secret: str = ""
+    render_remote_chunk_threshold_frames: int = Field(default=300, ge=1, le=100_000)
+    render_remote_chunk_size_frames: int = Field(default=200, ge=1, le=10_000)
+    render_remote_preroll_frames: int = Field(default=15, ge=0, le=300)
+    render_remote_dispatch_interval_s: float = Field(default=2.0, ge=0.0, le=300.0)
+    render_remote_max_attempts: int = Field(default=3, ge=1, le=20)
     rate_limit_retention_hours: int = Field(default=24, ge=1, le=8760)
     metrics_token: str = ""
 
@@ -206,6 +220,38 @@ class Settings(BaseSettings):
                     "S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY must both be set or both omitted "
                     "for IAM role credentials when OBJECT_STORE_BACKEND=s3"
                 )
+            callback_base = self.render_callback_base_url.strip()
+            callback_secret = self.render_callback_secret.strip()
+            if callback_secret and len(callback_secret) < 32:
+                raise ValueError(
+                    "RENDER_CALLBACK_SECRET must be at least 32 characters in production"
+                )
+            if callback_base:
+                if not callback_base.startswith("https://"):
+                    raise ValueError("RENDER_CALLBACK_BASE_URL must use https:// in production")
+                if len(callback_secret) < 32:
+                    raise ValueError(
+                        "RENDER_CALLBACK_SECRET must be at least 32 characters in production "
+                        "when RENDER_CALLBACK_BASE_URL is set"
+                    )
+            if self.render_backend == "aws_sfn_lambda":
+                if not self.render_aws_state_machine_arn.strip():
+                    raise ValueError(
+                        "RENDER_AWS_STATE_MACHINE_ARN is required in production when "
+                        "RENDER_BACKEND=aws_sfn_lambda"
+                    )
+                if not self.render_aws_staging_bucket.strip():
+                    raise ValueError(
+                        "RENDER_AWS_STAGING_BUCKET is required in production when "
+                        "RENDER_BACKEND=aws_sfn_lambda"
+                    )
+                has_render_key = bool(self.render_aws_access_key_id.strip())
+                has_render_secret = bool(self.render_aws_secret_access_key.strip())
+                if has_render_key != has_render_secret:
+                    raise ValueError(
+                        "RENDER_AWS_ACCESS_KEY_ID and RENDER_AWS_SECRET_ACCESS_KEY must both be "
+                        "set or both omitted for IAM role credentials"
+                    )
         return self
 
 

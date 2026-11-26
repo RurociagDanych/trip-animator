@@ -36,6 +36,8 @@ from trip_api.db import (
 from trip_api.gold_sync import ensure_local_gold_duckdb
 from trip_api.http_metrics import HttpMetrics
 from trip_api.reaper import build_object_store
+from trip_api.remote_renders import process_remote_renders_once
+from trip_api.render_backends import RenderBackend, build_render_backend
 from trip_api.reuse_preview import ReusePreviewCache
 from trip_api.routers import (
     analytics,
@@ -104,6 +106,7 @@ def create_app(
     engine: Engine | None = None,
     session_factory: sessionmaker[Session] | None = None,
     object_store: ObjectStore | None = None,
+    render_backend: RenderBackend | None = None,
 ) -> FastAPI:
     cfg = settings or get_settings()
     _configure_package_logging(cfg)
@@ -111,6 +114,7 @@ def create_app(
     db_engine = engine or create_db_engine(cfg.database_url, settings=cfg)
     db_session_factory = session_factory or create_session_factory(db_engine)
     store = object_store or _build_object_store(cfg)
+    active_render_backend = render_backend or build_render_backend(cfg)
     http_metrics = HttpMetrics()
 
     @asynccontextmanager
@@ -121,9 +125,35 @@ def create_app(
             except Exception as exc:
                 logger.warning("Startup Gold DuckDB sync skipped: %s", type(exc).__name__)
         heartbeat_stop = start_service_heartbeat("api")
+        remote_task: asyncio.Task[None] | None = None
+        if active_render_backend.is_remote and cfg.render_remote_dispatch_interval_s > 0:
+
+            async def _remote_loop() -> None:
+                while True:
+                    try:
+                        await asyncio.to_thread(
+                            process_remote_renders_once,
+                            db_session_factory,
+                            store,
+                            cfg,
+                            active_render_backend,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.exception("Remote render outbox tick failed")
+                    await asyncio.sleep(cfg.render_remote_dispatch_interval_s)
+
+            remote_task = asyncio.create_task(_remote_loop())
         try:
             yield
         finally:
+            if remote_task is not None:
+                remote_task.cancel()
+                try:
+                    await remote_task
+                except asyncio.CancelledError:
+                    pass
             heartbeat_stop.set()
 
     application = FastAPI(
@@ -138,6 +168,7 @@ def create_app(
     application.state.engine = db_engine
     application.state.session_factory = db_session_factory
     application.state.object_store = store
+    application.state.render_backend = active_render_backend
     application.state.reuse_preview = ReusePreviewCache()
 
     application.add_middleware(

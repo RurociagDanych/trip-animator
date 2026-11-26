@@ -59,7 +59,8 @@ CLAIM_JOB_SQL = """
 WITH candidate AS (
     SELECT id
     FROM render_jobs
-    WHERE (
+    WHERE COALESCE(render_backend, 'local') = 'local'
+      AND (
         status = 'queued'
         OR (
             status = 'running'
@@ -92,7 +93,8 @@ SET status = 'failed',
         'Render job exceeded maximum retry attempts after lease expiration'
     ),
     updated_at = NOW()
-WHERE status = 'running'
+WHERE COALESCE(render_backend, 'local') = 'local'
+  AND status = 'running'
   AND COALESCE(is_chunked, FALSE) = FALSE
   AND lease_expires_at < NOW()
   AND attempt_count >= %(max_attempts)s

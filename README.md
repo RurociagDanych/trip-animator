@@ -129,7 +129,7 @@ Copy [`.env.example`](.env.example) to `.env` (`make bootstrap` does this when `
 | Security and encryption | `SESSION_SECRET`, `TOKEN_ENCRYPTION_KEY`, `ALLOWED_ORIGINS` |
 | Object storage (`local` or `s3`) | `OBJECT_STORE_BACKEND`, `LOCAL_OBJECT_STORE_DIR`, `S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET`, `S3_REGION` |
 | Strava OAuth2 | `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`, `STRAVA_REDIRECT_URI` |
-| Map tiles and render worker | `MAP_TILE_ALLOWLIST`, `RENDER_BASE_URL`, `WORKER_CONCURRENCY`, `WORKER_GPU_ENABLED`, `WORKER_CPU_RENDERER` |
+| Map tiles and render worker | `MAP_TILE_ALLOWLIST`, `RENDER_BASE_URL`, `WORKER_CONCURRENCY`, `WORKER_GPU_ENABLED`, `WORKER_CPU_RENDERER`, `RENDER_BACKEND`, `RENDER_AWS_*`, `RENDER_CALLBACK_*`, `RENDER_REMOTE_*` |
 | Apache Airflow 3 | `AIRFLOW_PORT`, `AIRFLOW_DB`, `AIRFLOW_FERNET_KEY`, `AIRFLOW_API_SECRET_KEY`, `AIRFLOW_JWT_SECRET`, `AIRFLOW_SIMPLE_AUTH_USERS`, `GOLD_OUTPUT_DIR` |
 | Docker Compose and reverse proxy | `DOMAIN`, `COMPOSE_ALLOWED_ORIGINS`, `CADDY_HTTP_PUBLISH`, `CADDY_HTTPS_PUBLISH` |
 
@@ -186,7 +186,8 @@ A VPS deployment exists.
 - [docs/specs/ACTIVITY_LIBRARY_SPEC.md](docs/specs/ACTIVITY_LIBRARY_SPEC.md): Activity Library specification.
 - [docs/specs/CINEMATIC_PHOTOS_SPEC.md](docs/specs/CINEMATIC_PHOTOS_SPEC.md): cinematic photo-stop specification.
 - [docs/specs/OBSERVABILITY_SPEC.md](docs/specs/OBSERVABILITY_SPEC.md): self-hosted observability specification.
-- [GLOSSARY.md](GLOSSARY.md): Activity Library and trip playback terminology.
+- [docs/specs/REMOTE_RENDER_BACKEND_SPEC.md](docs/specs/REMOTE_RENDER_BACKEND_SPEC.md): pluggable Render Backend and AWS Step Functions + Lambda specification.
+- [GLOSSARY.md](GLOSSARY.md): Activity Library, trip playback and render execution terminology.
 - [docs/demo/generate_synthetic_gpx.py](docs/demo/generate_synthetic_gpx.py): generates a synthetic GPX demo track.
 
 ## Known gaps

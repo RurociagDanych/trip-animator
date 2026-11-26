@@ -32,3 +32,17 @@ _Avoid_: Cinematic Ken Burns (a photo card style)
 
 **Photo Group**:
 A sequence of route photos shown in a single Cinematic Photo Stop because each consecutive pair is within the chosen marker travel-time threshold.
+
+## Render Execution
+
+**Render Backend**:
+A pluggable execution target responsible for turning a queued render job into an output video and thumbnail.
+_Avoid_: Worker mode, cloud flag, render driver
+
+**Render Bundle**:
+An immutable, self-contained package of a serialized render manifest and its required photo assets staged for a remote render backend.
+_Avoid_: Job payload, render zip, manifest dump
+
+**Remote Execution**:
+A single backend-managed render run tracked against a render job via an opaque backend reference.
+_Avoid_: Lambda job, cloud task, pipeline run
