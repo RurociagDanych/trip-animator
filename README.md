@@ -14,7 +14,7 @@ Basemap: [OpenFreeMap](https://openfreemap.org), © [OpenMapTiles](https://openm
 
 ## Status
 
-Active, self-hosted. Last substantive change: 2026-11-24. See [docs/OPERATIONS.md](docs/OPERATIONS.md) for what has and has not been validated.
+Active, self-hosted. Last substantive change: 2026-11-26. See [docs/OPERATIONS.md](docs/OPERATIONS.md) for what has and has not been validated.
 
 ## Architecture
 
@@ -185,6 +185,7 @@ A VPS deployment exists.
 - [docs/DEPLOY_VPS.md](docs/DEPLOY_VPS.md): manual VPS deployment through GitHub Actions.
 - [docs/specs/ACTIVITY_LIBRARY_SPEC.md](docs/specs/ACTIVITY_LIBRARY_SPEC.md): Activity Library specification.
 - [docs/specs/CINEMATIC_PHOTOS_SPEC.md](docs/specs/CINEMATIC_PHOTOS_SPEC.md): cinematic photo-stop specification.
+- [docs/specs/OBSERVABILITY_SPEC.md](docs/specs/OBSERVABILITY_SPEC.md): self-hosted observability specification.
 - [GLOSSARY.md](GLOSSARY.md): Activity Library and trip playback terminology.
 - [docs/demo/generate_synthetic_gpx.py](docs/demo/generate_synthetic_gpx.py): generates a synthetic GPX demo track.
 
