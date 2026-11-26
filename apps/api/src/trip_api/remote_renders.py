@@ -23,9 +23,14 @@ from trip_telemetry import (
 
 from trip_api.config import Settings
 from trip_api.db import Project, RenderJob
-from trip_api.render_backends import RemoteSubmitRequest, RenderBackend
+from trip_api.render_backends import (
+    AwsSfnLambdaBackend,
+    RemoteSubmitRequest,
+    RenderBackend,
+    sanitize_remote_error,
+)
 from trip_api.services import get_project_photos, get_project_stages, write_audit_event
-from trip_api.storage import ObjectStore
+from trip_api.storage import ObjectStore, S3ObjectStore
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +42,8 @@ class RenderCallbackPayload(BaseModel):
     job_id: uuid.UUID
     event: Literal["running", "succeeded", "failed"]
     progress_pct: int | None = Field(default=None, ge=0, le=100)
+    chunk_done: int | None = Field(default=None, ge=1, le=10_000)
+    total_chunks: int | None = Field(default=None, ge=1, le=10_000)
     output_key: str | None = Field(default=None, max_length=512)
     thumbnail_key: str | None = Field(default=None, max_length=512)
     error_message: str | None = Field(default=None, max_length=1000)
@@ -72,6 +79,13 @@ def _notify_job_event(
         logger.debug("pg_notify skipped for job %s: %s", job_id, exc)
 
 
+def _select_job_for_update(db: Session, job_id: uuid.UUID, database_url: str) -> RenderJob | None:
+    stmt = select(RenderJob).where(RenderJob.id == job_id)
+    if database_url.startswith("postgresql"):
+        stmt = stmt.with_for_update()
+    return db.scalar(stmt)
+
+
 def _validate_staging_key(job_id: uuid.UUID, key: str | None) -> str | None:
     if key is None:
         return None
@@ -89,6 +103,20 @@ def _resolve_callback_url(settings: Settings) -> str | None:
     if not base:
         return None
     return f"{base}/api/v1/internal/render-callbacks"
+
+
+def _can_use_direct_s3_copy(
+    store: ObjectStore,
+    backend: RenderBackend,
+    settings: Settings,
+) -> bool:
+    if not isinstance(store, S3ObjectStore) or not isinstance(backend, AwsSfnLambdaBackend):
+        return False
+    return (
+        settings.object_store_backend == "s3"
+        and store.bucket == backend.staging_bucket
+        and settings.s3_region.strip() == backend.region
+    )
 
 
 def _ingest_remote_outputs(
@@ -115,40 +143,57 @@ def _ingest_remote_outputs(
             if job.status == "cancelled":
                 backend.cleanup_staging(job_id)
             return job.status
+        execution_ref = job.external_execution_id or ""
 
     primary_output_key = f"outputs/{job_id}.mp4"
     primary_thumb_key: str | None = None
 
-    with tempfile.TemporaryDirectory(prefix="trip_remote_ingest_") as tmpdir:
-        tmp_root = Path(tmpdir)
-        local_mp4 = tmp_root / f"{job_id}.mp4"
-        backend.download_output(safe_output_key, local_mp4)
-        store.put_bytes(primary_output_key, local_mp4.read_bytes(), content_type="video/mp4")
-
+    if _can_use_direct_s3_copy(store, backend, settings):
+        store.copy(safe_output_key, primary_output_key, content_type="video/mp4")
         if safe_thumb_key is not None:
-            local_thumb = tmp_root / f"{job_id}.webp"
             try:
-                backend.download_output(safe_thumb_key, local_thumb)
+                store.copy(safe_thumb_key, f"outputs/{job_id}.webp", content_type="image/webp")
                 primary_thumb_key = f"outputs/{job_id}.webp"
-                store.put_bytes(
-                    primary_thumb_key,
-                    local_thumb.read_bytes(),
-                    content_type="image/webp",
-                )
             except FileNotFoundError:
                 primary_thumb_key = None
+    else:
+        with tempfile.TemporaryDirectory(prefix="trip_remote_ingest_") as tmpdir:
+            tmp_root = Path(tmpdir)
+            local_mp4 = tmp_root / f"{job_id}.mp4"
+            backend.download_output(execution_ref, safe_output_key, local_mp4)
+            store.put_bytes(primary_output_key, local_mp4.read_bytes(), content_type="video/mp4")
+
+            if safe_thumb_key is not None:
+                local_thumb = tmp_root / f"{job_id}.webp"
+                try:
+                    backend.download_output(execution_ref, safe_thumb_key, local_thumb)
+                    primary_thumb_key = f"outputs/{job_id}.webp"
+                    store.put_bytes(
+                        primary_thumb_key,
+                        local_thumb.read_bytes(),
+                        content_type="image/webp",
+                    )
+                except FileNotFoundError:
+                    primary_thumb_key = None
 
     now = datetime.now(UTC)
     expires_at = now + timedelta(days=settings.render_retention_days)
 
     with session_factory() as db:
-        job = db.scalar(select(RenderJob).where(RenderJob.id == job_id))
-        if job is None or job.status in _TERMINAL_STATES:
+        job = _select_job_for_update(db, job_id, settings.database_url)
+        if job is None:
             store.delete(primary_output_key)
             if primary_thumb_key is not None:
                 store.delete(primary_thumb_key)
             backend.cleanup_staging(job_id)
-            return job.status if job is not None else "missing"
+            return "missing"
+        if job.status in _TERMINAL_STATES:
+            if job.status != "succeeded":
+                store.delete(primary_output_key)
+                if primary_thumb_key is not None:
+                    store.delete(primary_thumb_key)
+                backend.cleanup_staging(job_id)
+            return job.status
 
         job.status = "succeeded"
         job.progress_pct = 100
@@ -195,9 +240,9 @@ def _mark_remote_failed(
     error_message: str,
 ) -> str:
     now = datetime.now(UTC)
-    sanitized = (error_message or "Remote render failed").strip()[:500]
+    sanitized = sanitize_remote_error(error_message)
     with session_factory() as db:
-        job = db.scalar(select(RenderJob).where(RenderJob.id == job_id))
+        job = _select_job_for_update(db, job_id, settings.database_url)
         if job is None:
             return "missing"
         if job.status in _TERMINAL_STATES:
@@ -238,7 +283,7 @@ def _mark_remote_cancelled(
 ) -> str:
     now = datetime.now(UTC)
     with session_factory() as db:
-        job = db.scalar(select(RenderJob).where(RenderJob.id == job_id))
+        job = _select_job_for_update(db, job_id, settings.database_url)
         if job is None:
             return "missing"
         if job.status in _TERMINAL_STATES:
@@ -263,19 +308,25 @@ def _update_remote_progress(
     settings: Settings,
     *,
     job_id: uuid.UUID,
-    progress_pct: int | None,
+    progress_pct: int | None = None,
+    chunk_done: int | None = None,
+    total_chunks: int | None = None,
 ) -> str:
     now = datetime.now(UTC)
     with session_factory() as db:
-        job = db.scalar(select(RenderJob).where(RenderJob.id == job_id))
+        job = _select_job_for_update(db, job_id, settings.database_url)
         if job is None:
             return "missing"
         if job.status in _TERMINAL_STATES:
             return job.status
-        clamped = (
-            max(0, min(99, int(progress_pct))) if progress_pct is not None else job.progress_pct
-        )
-        new_pct = max(job.progress_pct, clamped)
+        if progress_pct is not None:
+            target = max(0, min(99, int(progress_pct)))
+            new_pct = max(job.progress_pct, target)
+        elif chunk_done is not None and total_chunks is not None and total_chunks > 0:
+            step = max(1, round((chunk_done / total_chunks) * 90))
+            new_pct = min(95, job.progress_pct + step)
+        else:
+            new_pct = job.progress_pct
         changed = job.status != "running" or new_pct != job.progress_pct
         job.status = "running"
         job.progress_pct = new_pct
@@ -305,6 +356,8 @@ def handle_render_callback(
             settings,
             job_id=payload.job_id,
             progress_pct=payload.progress_pct,
+            chunk_done=payload.chunk_done,
+            total_chunks=payload.total_chunks,
         )
     if payload.event == "succeeded":
         return _ingest_remote_outputs(
@@ -336,6 +389,47 @@ class _ClaimedDispatchJob:
     attempt_count: int
     stages: list[StageRecord]
     photos: list[PhotoRecord]
+
+
+def _reap_exhausted_remote_dispatches(
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+    backend_name: str,
+) -> int:
+    now = datetime.now(UTC)
+    reaped = 0
+    with session_factory() as db:
+        stmt = select(RenderJob).where(
+            RenderJob.render_backend == backend_name,
+            RenderJob.status == "queued",
+            RenderJob.external_execution_id.is_(None),
+            RenderJob.attempt_count >= settings.render_remote_max_attempts,
+            or_(
+                RenderJob.lease_expires_at.is_(None),
+                RenderJob.lease_expires_at < now,
+            ),
+        )
+        if settings.database_url.startswith("postgresql"):
+            stmt = stmt.with_for_update(skip_locked=True)
+        stranded = list(db.scalars(stmt).all())
+        for job in stranded:
+            job.status = "failed"
+            job.lease_expires_at = None
+            job.error_message = (
+                job.error_message or "Remote render dispatch exceeded maximum retry attempts"
+            )
+            job.updated_at = now
+            _notify_job_event(
+                db,
+                job_id=job.id,
+                status="failed",
+                progress_pct=job.progress_pct,
+                database_url=settings.database_url,
+            )
+            reaped += 1
+        if reaped:
+            db.commit()
+    return reaped
 
 
 def _claim_undispatched_remote_job(
@@ -446,7 +540,11 @@ def process_remote_renders_once(
         return RemoteRenderCycleReport()
 
     dispatched = 0
-    dispatch_failed = 0
+    dispatch_failed = _reap_exhausted_remote_dispatches(
+        session_factory,
+        settings,
+        backend.name,
+    )
     reconciled_running = 0
     reconciled_succeeded = 0
     reconciled_failed = 0
@@ -486,12 +584,12 @@ def process_remote_renders_once(
                 )
             )
         except Exception as exc:
-            msg = str(exc)[:500] or type(exc).__name__
+            msg = sanitize_remote_error(exc, fallback="Remote render dispatch failed")
             logger.warning("Remote dispatch failed for job %s: %s", claimed.job_id, msg)
             now = datetime.now(UTC)
             exhausted = claimed.attempt_count >= settings.render_remote_max_attempts
             with session_factory() as db:
-                job = db.scalar(select(RenderJob).where(RenderJob.id == claimed.job_id))
+                job = _select_job_for_update(db, claimed.job_id, settings.database_url)
                 if job is not None and job.status not in _TERMINAL_STATES:
                     job.status = "failed" if exhausted else "queued"
                     job.lease_expires_at = None
@@ -511,7 +609,7 @@ def process_remote_renders_once(
         now = datetime.now(UTC)
         cancelled_mid_dispatch = False
         with session_factory() as db:
-            job = db.scalar(select(RenderJob).where(RenderJob.id == claimed.job_id))
+            job = _select_job_for_update(db, claimed.job_id, settings.database_url)
             if job is None or job.status == "cancelled":
                 cancelled_mid_dispatch = True
             elif job.status not in _TERMINAL_STATES:
@@ -590,7 +688,7 @@ def process_remote_renders_once(
                     settings,
                     backend,
                     job_id=active_job_id,
-                    error_message=f"Output ingest failed: {exc}",
+                    error_message="Remote render output ingest failed",
                 )
                 reconciled_failed += 1
         elif remote_status.state == "cancelled":

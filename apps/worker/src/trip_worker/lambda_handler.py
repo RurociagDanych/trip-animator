@@ -1,21 +1,20 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import hmac
 import inspect
 import json
 import logging
 import os
+import re
 import tempfile
 import time
 from collections.abc import Callable, Mapping
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
-import httpx
-from trip_telemetry import RenderManifest
+from trip_telemetry import RenderManifest, sign_render_callback
 
 from trip_worker.config import WorkerSettings
 from trip_worker.encoder import (
@@ -27,23 +26,60 @@ from trip_worker.encoder import (
 from trip_worker.local_spa import LocalSpaServer
 from trip_worker.logging_setup import configure_logging
 from trip_worker.renderer import probe_manifest_frame_count, render_manifest_to_mp4
+from trip_worker.ssrf import (
+    build_external_request_kwargs,
+    build_pinned_external_http_client,
+    pin_external_target,
+    resolve_and_validate_external_target_async,
+)
 from trip_worker.storage import ObjectStore, S3ObjectStore, build_object_store
 
 logger = logging.getLogger(__name__)
 
 CallbackPostFn = Callable[[str, dict[str, str], bytes], None]
 
+_PATH_RE = re.compile(r"(?:/[\w.\-]+){2,}")
+_CRED_URL_RE = re.compile(r"://[^/\s@]+@")
 
-def _sign_callback(secret: str, timestamp: int, raw_body: bytes) -> str:
-    msg = f"{timestamp}.".encode("ascii") + raw_body
-    digest = hmac.new(secret.encode("utf-8"), msg, hashlib.sha256).hexdigest()
-    return f"sha256={digest}"
+
+def _sanitize_error_text(raw: object) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return "Remote render failed"
+    first_line = text.splitlines()[0].strip()
+    redacted = _CRED_URL_RE.sub("://[redacted]@", first_line)
+    redacted = _PATH_RE.sub("[path]", redacted)
+    return redacted[:300] or "Remote render failed"
+
+
+async def _post_callback_pinned(url: str, headers: dict[str, str], body: bytes) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme.lower() != "https" or not parsed.hostname:
+        raise ValueError("Render callback URL must use https:// with a valid hostname")
+    host = parsed.hostname.strip().lower()
+    decision = await resolve_and_validate_external_target_async(
+        url,
+        render_origin="https://callback-origin.invalid",
+        allowed_external_hosts=frozenset({host}),
+        resolve_dns=True,
+    )
+    if not decision.allowed or decision.target is None:
+        raise ValueError("Render callback target rejected by SSRF guard")
+    pinned_kwargs = build_external_request_kwargs(decision.target)
+    merged_headers = {**pinned_kwargs["headers"], **headers}
+    async with build_pinned_external_http_client(resolve_dns=True, timeout=15.0) as client:
+        with pin_external_target(decision.target):
+            resp = await client.post(
+                url,
+                headers=merged_headers,
+                content=body,
+                extensions=pinned_kwargs["extensions"],
+            )
+            resp.raise_for_status()
 
 
 def _default_post_callback(url: str, headers: dict[str, str], body: bytes) -> None:
-    with httpx.Client(timeout=15.0, follow_redirects=False) as client:
-        resp = client.post(url, content=body, headers=headers)
-        resp.raise_for_status()
+    asyncio.run(_post_callback_pinned(url, headers, body))
 
 
 def _send_callback_best_effort(
@@ -66,7 +102,7 @@ def _send_callback_best_effort(
     headers = {
         "Content-Type": "application/json",
         "X-Trip-Timestamp": str(ts),
-        "X-Trip-Signature": _sign_callback(secret, ts, raw_body),
+        "X-Trip-Signature": sign_render_callback(secret, ts, raw_body),
     }
     sender = post_fn or _default_post_callback
     try:
@@ -126,6 +162,69 @@ def _probe_to_dict(probe: ProbeResult) -> dict[str, Any]:
         "height": probe.height,
         "duration_s": probe.duration_s,
         "nb_frames": probe.nb_frames,
+    }
+
+
+def _invoke_render_fn(render_fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    result = render_fn(*args, **kwargs)
+    if inspect.iscoroutine(result):
+        return asyncio.run(result)
+    return result
+
+
+def _verify_thumb_upload_and_notify(
+    *,
+    job_id: str,
+    manifest: RenderManifest,
+    mp4_path: Path,
+    thumb_path: Path,
+    output_key: str,
+    thumbnail_key: str,
+    settings: WorkerSettings,
+    store: ObjectStore,
+    verify_fn: Callable[..., ProbeResult],
+    thumb_fn: Callable[..., Path],
+    callback_url: str,
+    callback_secret: str | None,
+    callback_post_fn: CallbackPostFn | None,
+) -> dict[str, Any]:
+    probe = verify_fn(
+        mp4_path,
+        expected_width=manifest.width,
+        expected_height=manifest.height,
+        expected_duration_s=manifest.duration_s,
+        duration_tolerance_s=max(1.5, manifest.duration_s * 0.25),
+        timeout_seconds=settings.ffprobe_timeout_seconds,
+    )
+    thumb_fn(
+        mp4_path,
+        thumb_path,
+        seek_seconds=min(0.5, manifest.duration_s * 0.25),
+        width=min(640, manifest.width),
+        timeout_seconds=settings.ffmpeg_timeout_seconds,
+    )
+    store.put_file(output_key, mp4_path, content_type="video/mp4")
+    store.put_bytes(thumbnail_key, thumb_path.read_bytes(), content_type="image/webp")
+
+    probe_dict = _probe_to_dict(probe)
+    _send_callback_best_effort(
+        callback_url=callback_url,
+        callback_secret=callback_secret,
+        payload={
+            "job_id": job_id,
+            "event": "succeeded",
+            "progress_pct": 100,
+            "output_key": output_key,
+            "thumbnail_key": thumbnail_key,
+            "probe": probe_dict,
+        },
+        post_fn=callback_post_fn,
+    )
+    return {
+        "job_id": job_id,
+        "output_key": output_key,
+        "thumbnail_key": thumbnail_key,
+        "probe": probe_dict,
     }
 
 
@@ -195,13 +294,6 @@ def _handle_prepare(
     }
 
 
-def _invoke_render_fn(render_fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    result = render_fn(*args, **kwargs)
-    if inspect.iscoroutine(result):
-        return asyncio.run(result)
-    return result
-
-
 def _handle_render_single(
     event: Mapping[str, Any],
     *,
@@ -216,8 +308,6 @@ def _handle_render_single(
     job_id = str(event["job_id"])
     manifest = _load_manifest(store, str(event["manifest_key"]))
     photo_assets = _load_photos(store, event.get("photo_keys"))
-    output_key = str(event["output_key"])
-    thumbnail_key = str(event["thumbnail_key"])
 
     with ExitStack() as stack:
         effective = _with_local_spa_if_configured(settings, stack)
@@ -232,44 +322,21 @@ def _handle_render_single(
             effective,
             photo_assets=photo_assets,
         )
-        probe = verify_fn(
-            mp4_path,
-            expected_width=manifest.width,
-            expected_height=manifest.height,
-            expected_duration_s=manifest.duration_s,
-            duration_tolerance_s=max(1.5, manifest.duration_s * 0.25),
-            timeout_seconds=effective.ffprobe_timeout_seconds,
+        return _verify_thumb_upload_and_notify(
+            job_id=job_id,
+            manifest=manifest,
+            mp4_path=mp4_path,
+            thumb_path=thumb_path,
+            output_key=str(event["output_key"]),
+            thumbnail_key=str(event["thumbnail_key"]),
+            settings=effective,
+            store=store,
+            verify_fn=verify_fn,
+            thumb_fn=thumb_fn,
+            callback_url=str(event.get("callback_url") or ""),
+            callback_secret=callback_secret,
+            callback_post_fn=callback_post_fn,
         )
-        thumb_fn(
-            mp4_path,
-            thumb_path,
-            seek_seconds=min(0.5, manifest.duration_s * 0.25),
-            width=min(640, manifest.width),
-            timeout_seconds=effective.ffmpeg_timeout_seconds,
-        )
-        store.put_file(output_key, mp4_path, content_type="video/mp4")
-        store.put_bytes(thumbnail_key, thumb_path.read_bytes(), content_type="image/webp")
-
-    probe_dict = _probe_to_dict(probe)
-    _send_callback_best_effort(
-        callback_url=str(event.get("callback_url") or ""),
-        callback_secret=callback_secret,
-        payload={
-            "job_id": job_id,
-            "event": "succeeded",
-            "progress_pct": 100,
-            "output_key": output_key,
-            "thumbnail_key": thumbnail_key,
-            "probe": probe_dict,
-        },
-        post_fn=callback_post_fn,
-    )
-    return {
-        "job_id": job_id,
-        "output_key": output_key,
-        "thumbnail_key": thumbnail_key,
-        "probe": probe_dict,
-    }
 
 
 def _handle_render_chunk(
@@ -310,14 +377,14 @@ def _handle_render_chunk(
         )
         store.put_file(chunk_key, chunk_mp4, content_type="video/mp4")
 
-    progress_pct = max(5, min(95, round(((chunk_index + 1) / total_chunks) * 90)))
     _send_callback_best_effort(
         callback_url=str(event.get("callback_url") or ""),
         callback_secret=callback_secret,
         payload={
             "job_id": job_id,
             "event": "running",
-            "progress_pct": progress_pct,
+            "chunk_done": 1,
+            "total_chunks": total_chunks,
         },
         post_fn=callback_post_fn,
     )
@@ -340,8 +407,6 @@ def _handle_finalize(
 ) -> dict[str, Any]:
     job_id = str(event["job_id"])
     manifest = _load_manifest(store, str(event["manifest_key"]))
-    output_key = str(event["output_key"])
-    thumbnail_key = str(event["thumbnail_key"])
     raw_chunks = list(event.get("chunk_results") or [])
     ordered_chunks = sorted(raw_chunks, key=lambda item: int(item["chunk_index"]))
     if not ordered_chunks:
@@ -359,46 +424,22 @@ def _handle_finalize(
 
         mp4_path = tmpdir / f"{job_id}.mp4"
         thumb_path = tmpdir / f"{job_id}.webp"
-
         concat_fn(chunk_paths, mp4_path, timeout_seconds=settings.ffmpeg_timeout_seconds)
-        probe = verify_fn(
-            mp4_path,
-            expected_width=manifest.width,
-            expected_height=manifest.height,
-            expected_duration_s=manifest.duration_s,
-            duration_tolerance_s=max(1.5, manifest.duration_s * 0.25),
-            timeout_seconds=settings.ffprobe_timeout_seconds,
+        return _verify_thumb_upload_and_notify(
+            job_id=job_id,
+            manifest=manifest,
+            mp4_path=mp4_path,
+            thumb_path=thumb_path,
+            output_key=str(event["output_key"]),
+            thumbnail_key=str(event["thumbnail_key"]),
+            settings=settings,
+            store=store,
+            verify_fn=verify_fn,
+            thumb_fn=thumb_fn,
+            callback_url=str(event.get("callback_url") or ""),
+            callback_secret=callback_secret,
+            callback_post_fn=callback_post_fn,
         )
-        thumb_fn(
-            mp4_path,
-            thumb_path,
-            seek_seconds=min(0.5, manifest.duration_s * 0.25),
-            width=min(640, manifest.width),
-            timeout_seconds=settings.ffmpeg_timeout_seconds,
-        )
-        store.put_file(output_key, mp4_path, content_type="video/mp4")
-        store.put_bytes(thumbnail_key, thumb_path.read_bytes(), content_type="image/webp")
-
-    probe_dict = _probe_to_dict(probe)
-    _send_callback_best_effort(
-        callback_url=str(event.get("callback_url") or ""),
-        callback_secret=callback_secret,
-        payload={
-            "job_id": job_id,
-            "event": "succeeded",
-            "progress_pct": 100,
-            "output_key": output_key,
-            "thumbnail_key": thumbnail_key,
-            "probe": probe_dict,
-        },
-        post_fn=callback_post_fn,
-    )
-    return {
-        "job_id": job_id,
-        "output_key": output_key,
-        "thumbnail_key": thumbnail_key,
-        "probe": probe_dict,
-    }
 
 
 def _handle_report_failure(
@@ -410,20 +451,20 @@ def _handle_report_failure(
     job_id = str(event.get("job_id") or "")
     raw_error = event.get("error_detail") or event.get("cause") or event.get("error")
     if isinstance(raw_error, Mapping):
-        message = str(raw_error.get("Cause") or raw_error.get("Error") or "Remote render failed")
+        message = _sanitize_error_text(raw_error.get("Error") or "Remote render failed")
     else:
-        message = str(raw_error or "Remote render failed")
+        message = _sanitize_error_text(raw_error)
     _send_callback_best_effort(
         callback_url=str(event.get("callback_url") or ""),
         callback_secret=callback_secret,
         payload={
             "job_id": job_id,
             "event": "failed",
-            "error_message": message[:500],
+            "error_message": message,
         },
         post_fn=callback_post_fn,
     )
-    return {"job_id": job_id, "reported": True, "error_message": message[:500]}
+    return {"job_id": job_id, "reported": True, "error_message": message}
 
 
 def handle_event(

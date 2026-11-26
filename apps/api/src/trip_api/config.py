@@ -220,6 +220,20 @@ class Settings(BaseSettings):
                     "S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY must both be set or both omitted "
                     "for IAM role credentials when OBJECT_STORE_BACKEND=s3"
                 )
+            callback_base = self.render_callback_base_url.strip()
+            callback_secret = self.render_callback_secret.strip()
+            if callback_secret and len(callback_secret) < 32:
+                raise ValueError(
+                    "RENDER_CALLBACK_SECRET must be at least 32 characters in production"
+                )
+            if callback_base:
+                if not callback_base.startswith("https://"):
+                    raise ValueError("RENDER_CALLBACK_BASE_URL must use https:// in production")
+                if len(callback_secret) < 32:
+                    raise ValueError(
+                        "RENDER_CALLBACK_SECRET must be at least 32 characters in production "
+                        "when RENDER_CALLBACK_BASE_URL is set"
+                    )
             if self.render_backend == "aws_sfn_lambda":
                 if not self.render_aws_state_machine_arn.strip():
                     raise ValueError(
@@ -237,14 +251,6 @@ class Settings(BaseSettings):
                     raise ValueError(
                         "RENDER_AWS_ACCESS_KEY_ID and RENDER_AWS_SECRET_ACCESS_KEY must both be "
                         "set or both omitted for IAM role credentials"
-                    )
-                if (
-                    self.render_callback_base_url.strip()
-                    and len(self.render_callback_secret.strip()) < 32
-                ):
-                    raise ValueError(
-                        "RENDER_CALLBACK_SECRET must be at least 32 characters in production "
-                        "when RENDER_CALLBACK_BASE_URL is set"
                     )
         return self
 

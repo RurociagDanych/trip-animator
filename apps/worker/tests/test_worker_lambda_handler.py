@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -8,10 +9,13 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from trip_telemetry import ManifestStage, RenderManifest, RenderSpecV2
+import pytest
+from trip_telemetry import ManifestPhoto, ManifestStage, RenderManifest, RenderSpecV2
 from trip_worker.encoder import ProbeResult
-from trip_worker.lambda_handler import handle_event
+from trip_worker.lambda_handler import _post_callback_pinned, handle_event
 from trip_worker.local_spa import LocalSpaServer
+from trip_worker.runner import CLAIM_JOB_SQL
+from trip_worker.ssrf import _classify_render_request
 from trip_worker.storage import LocalObjectStore
 
 
@@ -236,11 +240,97 @@ def test_lambda_handler_single_and_chunked_workflow_with_signed_callbacks(
             "action": "report_failure",
             "job_id": str(long_job),
             "callback_url": prep_long["callback_url"],
-            "error_detail": {"Error": "States.TaskFailed", "Cause": "Out of memory"},
+            "error_detail": {"Error": "States.TaskFailed", "Cause": "/app/secret/trace.py"},
         },
         callback_secret=secret,
         callback_post_fn=_fake_post,
     )
     assert fail_res["reported"] is True
     assert json.loads(callback_requests[-1][2])["event"] == "failed"
-    assert "Out of memory" in json.loads(callback_requests[-1][2])["error_message"]
+    assert json.loads(callback_requests[-1][2])["error_message"] == "States.TaskFailed"
+
+
+def test_prepare_probes_cinematic_stop_and_local_spa_ssrf_and_callback_guards(
+    tmp_path: Path,
+) -> None:
+    store = LocalObjectStore(tmp_path / "staging")
+    job_id = uuid.uuid4()
+    manifest = _make_manifest(job_id, duration_s=10.0, fps=30).model_copy(
+        update={
+            "spec": RenderSpecV2(
+                resolution="1280x720",
+                fps=30,
+                duration_seconds=10.0,
+                photo_card_style="cinematic_stop",
+                show_photos=True,
+            ),
+            "photos": [
+                ManifestPhoto(
+                    id=str(uuid.uuid4()),
+                    width=800,
+                    height=600,
+                    matched_progress=0.5,
+                    match_method="timestamp",
+                    asset_url="https://render-assets.local/p1",
+                )
+            ],
+        }
+    )
+    m_key = f"staging/{job_id}/manifest.json"
+    store.put_bytes(m_key, manifest.model_dump_json().encode("utf-8"))
+
+    probed_calls: list[str] = []
+
+    def _fake_probe(m: RenderManifest, _settings: Any) -> int:
+        probed_calls.append(m.job_id)
+        return 450
+
+    prep = handle_event(
+        {
+            "action": "prepare",
+            "job_id": str(job_id),
+            "manifest_key": m_key,
+            "photo_keys": {},
+            "output_key": f"staging/{job_id}/output.mp4",
+            "thumbnail_key": f"staging/{job_id}/output.webp",
+            "chunk_threshold_frames": 300,
+            "chunk_size_frames": 200,
+            "preroll_frames": 15,
+        },
+        store=store,
+        frame_count_fn=_fake_probe,
+    )
+    assert probed_calls == [str(job_id)]
+    assert prep["mode"] == "chunked"
+    assert prep["total_frames"] == 450
+    updated_manifest = RenderManifest.model_validate_json(store.get_bytes(m_key).decode("utf-8"))
+    assert updated_manifest.total_frames == 450
+
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<html>OK</html>", encoding="utf-8")
+    with LocalSpaServer(dist) as srv:
+        kind_ok, _, _ = _classify_render_request(
+            f"{srv.base_url}/render/{job_id}",
+            render_origin=srv.base_url,
+            allowed_external_hosts=frozenset({"tiles.openfreemap.org"}),
+        )
+        kind_api, _, _ = _classify_render_request(
+            f"{srv.base_url}/api/v1/projects",
+            render_origin=srv.base_url,
+            allowed_external_hosts=frozenset({"tiles.openfreemap.org"}),
+        )
+        kind_meta, _, _ = _classify_render_request(
+            "http://169.254.169.254/latest/meta-data/",
+            render_origin=srv.base_url,
+            allowed_external_hosts=frozenset({"tiles.openfreemap.org"}),
+        )
+        assert kind_ok == "render_origin"
+        assert kind_api == "blocked"
+        assert kind_meta == "blocked"
+
+    with pytest.raises(ValueError, match="https://"):
+        asyncio.run(_post_callback_pinned("http://example.com/cb", {}, b"{}"))
+    with pytest.raises(ValueError, match="SSRF"):
+        asyncio.run(_post_callback_pinned("https://169.254.169.254/cb", {}, b"{}"))
+    assert "COALESCE(render_backend, 'local') = 'local'" in CLAIM_JOB_SQL

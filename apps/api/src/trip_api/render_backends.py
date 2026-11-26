@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import logging
-import time
+import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,7 +10,11 @@ from typing import Any, Literal, Protocol
 
 import boto3
 from botocore.exceptions import ClientError
-from trip_telemetry import RenderBundle
+from trip_telemetry import (
+    RenderBundle,
+    sign_render_callback,
+    verify_render_callback_signature,
+)
 
 from trip_api.config import Settings
 
@@ -20,6 +22,24 @@ logger = logging.getLogger(__name__)
 
 RenderBackendName = Literal["local", "aws_sfn_lambda"]
 RemoteExecutionState = Literal["queued", "running", "succeeded", "failed", "cancelled"]
+
+_PATH_RE = re.compile(r"(?:/[\w.\-]+){2,}")
+_CRED_URL_RE = re.compile(r"://[^/\s@]+@")
+
+__all__ = [
+    "AwsSfnLambdaBackend",
+    "LocalRenderBackend",
+    "RemoteExecutionRef",
+    "RemoteExecutionState",
+    "RemoteExecutionStatus",
+    "RemoteSubmitRequest",
+    "RenderBackend",
+    "RenderBackendName",
+    "build_render_backend",
+    "sanitize_remote_error",
+    "sign_render_callback",
+    "verify_render_callback_signature",
+]
 
 
 def _normalize_optional_str(value: str | None) -> str | None:
@@ -29,32 +49,14 @@ def _normalize_optional_str(value: str | None) -> str | None:
     return stripped or None
 
 
-def sign_render_callback(secret: str, timestamp: int, raw_body: bytes) -> str:
-    msg = f"{timestamp}.".encode("ascii") + raw_body
-    digest = hmac.new(secret.encode("utf-8"), msg, hashlib.sha256).hexdigest()
-    return f"sha256={digest}"
-
-
-def verify_render_callback_signature(
-    secret: str,
-    timestamp_header: str | None,
-    signature_header: str | None,
-    raw_body: bytes,
-    *,
-    now_ts: int | None = None,
-    max_skew_s: int = 300,
-) -> bool:
-    if not secret or not timestamp_header or not signature_header:
-        return False
-    ts_clean = timestamp_header.strip()
-    if not ts_clean.isascii() or not ts_clean.isdigit():
-        return False
-    ts = int(ts_clean)
-    current = int(time.time()) if now_ts is None else now_ts
-    if abs(current - ts) > max_skew_s:
-        return False
-    expected = sign_render_callback(secret, ts, raw_body)
-    return hmac.compare_digest(signature_header.strip(), expected)
+def sanitize_remote_error(raw: object, *, fallback: str = "Remote render failed") -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return fallback
+    first_line = text.splitlines()[0].strip()
+    redacted = _CRED_URL_RE.sub("://[redacted]@", first_line)
+    redacted = _PATH_RE.sub("[path]", redacted)
+    return redacted[:300] or fallback
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,7 +92,7 @@ class RenderBackend(Protocol):
     def submit(self, request: RemoteSubmitRequest) -> RemoteExecutionRef: ...
     def get_status(self, execution_ref: str) -> RemoteExecutionStatus: ...
     def cancel(self, execution_ref: str) -> None: ...
-    def download_output(self, key: str, dest: Path) -> None: ...
+    def download_output(self, execution_ref: str, key: str, dest: Path) -> None: ...
     def cleanup_staging(self, job_id: uuid.UUID) -> None: ...
 
 
@@ -107,8 +109,10 @@ class LocalRenderBackend:
     def cancel(self, execution_ref: str) -> None:
         _ = execution_ref
 
-    def download_output(self, key: str, dest: Path) -> None:
-        raise RuntimeError(f"LocalRenderBackend does not support download_output ({key} -> {dest})")
+    def download_output(self, execution_ref: str, key: str, dest: Path) -> None:
+        raise RuntimeError(
+            f"LocalRenderBackend does not support download_output ({execution_ref}: {key}, {dest})"
+        )
 
     def cleanup_staging(self, job_id: uuid.UUID) -> None:
         _ = job_id
@@ -215,8 +219,13 @@ class AwsSfnLambdaBackend:
             )
         if raw_status == "ABORTED":
             return RemoteExecutionStatus(state="cancelled")
-        cause = str(resp.get("cause") or resp.get("error") or f"Remote execution {raw_status}")
-        return RemoteExecutionStatus(state="failed", error_message=cause[:500])
+        err_code = str(resp.get("error") or f"Remote execution {raw_status}")
+        return RemoteExecutionStatus(
+            state="failed",
+            error_message=sanitize_remote_error(
+                err_code, fallback=f"Remote execution {raw_status}"
+            ),
+        )
 
     def cancel(self, execution_ref: str) -> None:
         try:
@@ -227,7 +236,8 @@ class AwsSfnLambdaBackend:
                 return
             raise
 
-    def download_output(self, key: str, dest: Path) -> None:
+    def download_output(self, execution_ref: str, key: str, dest: Path) -> None:
+        _ = execution_ref
         dest.parent.mkdir(parents=True, exist_ok=True)
         self._s3.download_file(self.staging_bucket, key, str(dest))
 

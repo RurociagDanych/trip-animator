@@ -163,6 +163,7 @@ All new variables are optional and default to preserving current local behavior:
 | `RENDER_REMOTE_CHUNK_SIZE_FRAMES` | `200` | Target frame count per parallel chunk Lambda. |
 | `RENDER_REMOTE_PREROLL_FRAMES` | `15` | Silent preroll settle frames per non-zero chunk. |
 | `RENDER_REMOTE_DISPATCH_INTERVAL_S` | `2.0` | Poll interval for outbox dispatch and reconciliation loop. |
+| `RENDER_REMOTE_MAX_ATTEMPTS` | `3` | Maximum outbox dispatch attempts before failing a remote job. |
 
 Fail-closed production validation (`APP_ENV=production`):
 - When `RENDER_BACKEND=aws_sfn_lambda`, startup refuses empty `RENDER_AWS_STATE_MACHINE_ARN` or `RENDER_AWS_STAGING_BUCKET`, refuses asymmetric AWS key pairs, and requires `RENDER_CALLBACK_SECRET` (>= 32 chars) whenever `RENDER_CALLBACK_BASE_URL` is non-empty.

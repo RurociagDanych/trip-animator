@@ -55,7 +55,8 @@ class _FakeRemoteBackend:
         self.cancelled.append(execution_ref)
         self.statuses[execution_ref] = RemoteExecutionStatus(state="cancelled")
 
-    def download_output(self, key: str, dest: Path) -> None:
+    def download_output(self, execution_ref: str, key: str, dest: Path) -> None:
+        _ = execution_ref
         if key not in self.artifacts:
             raise FileNotFoundError(key)
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -401,7 +402,7 @@ def test_aws_sfn_lambda_backend_stages_bundle_and_maps_sfn_states(tmp_path: Path
     assert st.output_key == f"staging/{job_id}/output.mp4"
 
     dest = tmp_path / "out.mp4"
-    backend.download_output(st.output_key, dest)
+    backend.download_output(ref.execution_id, st.output_key, dest)
     assert dest.read_bytes() == b"mp4-ok"
 
     backend.cancel(ref.execution_id)
@@ -473,3 +474,79 @@ def test_outbox_retry_exhaustion_and_callback_key_guard(
         },
     )
     assert bad_key_resp.status_code == 400
+
+
+def test_duplicate_succeeded_callback_preserves_output_and_chunk_progress(
+    make_harness: HarnessFactory,
+) -> None:
+    secret = "callback-hmac-secret-at-least-32-characters"
+    backend = _FakeRemoteBackend()
+    harness = make_harness(
+        render_backend="aws_sfn_lambda",
+        render_aws_state_machine_arn="arn:aws:states:eu-central-1:123456789012:stateMachine:trip",
+        render_aws_staging_bucket="trip-staging",
+        render_callback_base_url="https://trips.example.com",
+        render_callback_secret=secret,
+        render_remote_dispatch_interval_s=0.0,
+    )
+    harness.app = create_app(
+        harness.settings,
+        engine=harness.engine,
+        session_factory=harness.session_factory,
+        object_store=harness.store,
+        render_backend=backend,
+    )
+    harness.create_user("rider@example.com")
+    client, csrf = harness.login_client("rider@example.com")
+    project_id = _create_project_with_stage(client, csrf)
+
+    resp = client.post(
+        f"/api/v1/projects/{project_id}/renders",
+        json={"resolution": "1280x720", "fps": 30, "duration_seconds": 10.0},
+        headers={"X-CSRF-Token": csrf, "Idempotency-Key": "dup-success-key-001"},
+    )
+    job_id = uuid.UUID(resp.json()["id"])
+    process_remote_renders_once(harness.session_factory, harness.store, harness.settings, backend)
+
+    now_ts = int(time.time())
+    chunk_cb = json.dumps(
+        {"job_id": str(job_id), "event": "running", "chunk_done": 1, "total_chunks": 3}
+    ).encode("utf-8")
+    r_chunk = client.post(
+        "/api/v1/internal/render-callbacks",
+        content=chunk_cb,
+        headers={
+            "Content-Type": "application/json",
+            "X-Trip-Timestamp": str(now_ts),
+            "X-Trip-Signature": sign_render_callback(secret, now_ts, chunk_cb),
+        },
+    )
+    assert r_chunk.status_code == 200
+    assert client.get(f"/api/v1/renders/{job_id}").json()["progress_pct"] == 40
+
+    out_key = f"staging/{job_id}/output.mp4"
+    thumb_key = f"staging/{job_id}/output.webp"
+    backend.artifacts[out_key] = b"final-mp4-bytes"
+    backend.artifacts[thumb_key] = b"final-webp-bytes"
+    ok_cb = json.dumps(
+        {
+            "job_id": str(job_id),
+            "event": "succeeded",
+            "output_key": out_key,
+            "thumbnail_key": thumb_key,
+        }
+    ).encode("utf-8")
+    for _ in range(2):
+        r_ok = client.post(
+            "/api/v1/internal/render-callbacks",
+            content=ok_cb,
+            headers={
+                "Content-Type": "application/json",
+                "X-Trip-Timestamp": str(now_ts),
+                "X-Trip-Signature": sign_render_callback(secret, now_ts, ok_cb),
+            },
+        )
+        assert r_ok.status_code == 200
+
+    assert harness.store.get_bytes(f"outputs/{job_id}.mp4") == b"final-mp4-bytes"
+    assert harness.store.get_bytes(f"outputs/{job_id}.webp") == b"final-webp-bytes"

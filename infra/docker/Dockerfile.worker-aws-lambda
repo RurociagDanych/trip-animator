@@ -57,6 +57,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-editable --package trip-worker \
     && uv pip install --python /app/.venv/bin/python awslambdaric
 
+RUN groupadd --system --gid 10001 appgroup \
+    && useradd --system --uid 10001 --gid appgroup --create-home --home-dir /home/appuser --shell /usr/sbin/nologin appuser
+
 ENV HOME=/tmp \
     XDG_CONFIG_HOME=/tmp/.config \
     XDG_CACHE_HOME=/tmp/.cache \
@@ -64,6 +67,8 @@ ENV HOME=/tmp \
     WORKER_CPU_RENDERER=lavapipe \
     CHROMIUM_NO_SANDBOX=true \
     WORKER_LOCAL_SPA_DIR=/app/web-dist
+
+USER 10001:10001
 
 ENTRYPOINT ["/app/.venv/bin/python", "-m", "awslambdaric"]
 CMD ["trip_worker.lambda_handler.handler"]

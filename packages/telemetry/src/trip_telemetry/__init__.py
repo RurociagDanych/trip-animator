@@ -104,6 +104,8 @@ from trip_telemetry.render_manifest import (
     load_photo_asset,
     photo_asset_key,
     query_stage_manifest_points,
+    sign_render_callback,
+    verify_render_callback_signature,
 )
 from trip_telemetry.schemas import (
     CURRENT_ETL_VERSION,
@@ -202,6 +204,8 @@ __all__ = [
     "load_photo_asset",
     "photo_asset_key",
     "query_stage_manifest_points",
+    "sign_render_callback",
+    "verify_render_callback_signature",
     "CURRENT_ETL_VERSION",
     "CameraKeyframe",
     "CameraMode",

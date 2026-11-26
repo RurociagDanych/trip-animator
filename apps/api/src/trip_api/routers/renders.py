@@ -483,7 +483,12 @@ def cancel_render_job(
     db: DbSession,
     settings: AppSettings,
 ) -> RenderJobOut:
-    job = _get_owned_job(db, job_id, auth.user.id)
+    stmt = select(RenderJob).where(RenderJob.id == job_id, RenderJob.owner_user_id == auth.user.id)
+    if settings.database_url.startswith("postgresql"):
+        stmt = stmt.with_for_update()
+    job = db.scalar(stmt)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Render job not found")
     if job.status in _TERMINAL_STATES:
         raise HTTPException(
             status_code=409,

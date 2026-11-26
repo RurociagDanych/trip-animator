@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import logging
 import tempfile
+import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -179,6 +182,34 @@ class RenderManifest(BaseModel):
 class RenderBundle:
     manifest: RenderManifest
     photo_assets: dict[str, bytes]
+
+
+def sign_render_callback(secret: str, timestamp: int, raw_body: bytes) -> str:
+    msg = f"{timestamp}.".encode("ascii") + raw_body
+    digest = hmac.new(secret.encode("utf-8"), msg, hashlib.sha256).hexdigest()
+    return f"sha256={digest}"
+
+
+def verify_render_callback_signature(
+    secret: str,
+    timestamp_header: str | None,
+    signature_header: str | None,
+    raw_body: bytes,
+    *,
+    now_ts: int | None = None,
+    max_skew_s: int = 300,
+) -> bool:
+    if not secret or not timestamp_header or not signature_header:
+        return False
+    ts_clean = timestamp_header.strip()
+    if not ts_clean.isascii() or not ts_clean.isdigit():
+        return False
+    ts = int(ts_clean)
+    current = int(time.time()) if now_ts is None else now_ts
+    if abs(current - ts) > max_skew_s:
+        return False
+    expected = sign_render_callback(secret, ts, raw_body)
+    return hmac.compare_digest(signature_header.strip(), expected)
 
 
 def _materialize_parquet_path(
