@@ -1,5 +1,10 @@
+"""Verify bucket bootstrap and its standalone entry point."""
+
 from __future__ import annotations
 
+import subprocess  # noqa: S404  # Exercise the Compose entry point in a fresh interpreter.
+import sys
+from pathlib import Path
 from typing import Any
 
 import boto3
@@ -20,6 +25,21 @@ def _make_stub_client() -> Any:
         aws_secret_access_key="test",
         region_name="us-east-1",
     )
+
+
+def test_bootstrap_cli_validates_s3_without_api_settings(tmp_path: Path) -> None:
+    result = subprocess.run(  # noqa: S603  # The executable and arguments are fixed.
+        [sys.executable, "-m", "trip_api.s3_bootstrap"],
+        env={"APP_ENV": "production"},
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "S3_BUCKET environment variable is required" in result.stderr
 
 
 @pytest.mark.parametrize("missing_code", ["404", "NoSuchBucket", "NotFound"])
