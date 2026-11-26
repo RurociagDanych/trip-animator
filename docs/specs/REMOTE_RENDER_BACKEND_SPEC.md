@@ -207,7 +207,7 @@ Following TDD at the highest stable public seams:
 
 Before enabling `RENDER_BACKEND=aws_sfn_lambda` in production, run one live smoke test in AWS:
 
-1. Apply `infra/terraform/standalone-remote-render` and push `Dockerfile.worker-aws-lambda` to ECR.
+1. Run `make remote-render-deploy` (bootstraps ECR, builds and pushes `Dockerfile.worker-aws-lambda` tagged with the current Git SHA, and applies `infra/terraform/standalone-remote-render`). Subsequent image updates can use `make remote-render-push` followed by `terraform apply`.
 2. Invoke `prepare` + `render_single` on a 5-second sample bundle and confirm CloudWatch logs report `Worker CPU renderer: ... llvmpipe/lavapipe` with zero Chromium sandbox errors.
 3. Run a 1,800-frame (60s 1080p/30fps) Step Functions execution and record wall-time, peak `/tmp` usage, and CloudWatch billed GB-seconds.
 

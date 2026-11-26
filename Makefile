@@ -1,7 +1,12 @@
-.PHONY: help setup bootstrap lint format format-check typecheck test test-pg dbt-parse dbt-build reap-dry-run check dev-api dev-web compose-config airflow-up airflow-down test-airflow lint-airflow
+.PHONY: help setup bootstrap lint format format-check typecheck test test-pg dbt-parse dbt-build reap-dry-run check dev-api dev-web compose-config airflow-up airflow-down test-airflow lint-airflow remote-render-push remote-render-deploy
+
+REMOTE_RENDER_TF_DIR ?= infra/terraform/standalone-remote-render
+REMOTE_RENDER_AWS_REGION ?= eu-central-1
+REMOTE_RENDER_IMAGE_TAG ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo latest)
+REMOTE_RENDER_TF_ARGS ?=
 
 help:
-	@printf '%-16s %s\n' \
+	@printf '%-22s %s\n' \
 		help 'List the available targets' \
 		setup 'Install Python and JavaScript dependencies' \
 		bootstrap 'Create .env, install dependencies, start PostgreSQL, run migrations' \
@@ -21,7 +26,9 @@ help:
 		airflow-up 'Build and start Airflow' \
 		airflow-down 'Stop Airflow' \
 		test-airflow 'Run the Airflow and infra script tests' \
-		lint-airflow 'Run Ruff and mypy on the Airflow project'
+		lint-airflow 'Run Ruff and mypy on the Airflow project' \
+		remote-render-push 'Build and push the AWS Lambda render image to ECR' \
+		remote-render-deploy 'Bootstrap ECR, push Lambda image, and apply standalone AWS Terraform'
 
 setup:
 	uv sync --all-packages
@@ -114,3 +121,29 @@ test-airflow:
 lint-airflow:
 	uv run ruff check airflow
 	uv run mypy airflow/src
+
+remote-render-push:
+	@set -eu; \
+	ecr_url="$$(terraform -chdir="$(REMOTE_RENDER_TF_DIR)" output -raw ecr_repository_url)"; \
+	aws ecr get-login-password --region "$(REMOTE_RENDER_AWS_REGION)" \
+		| docker login --username AWS --password-stdin "$$ecr_url"; \
+	docker build --platform linux/amd64 \
+		-f infra/docker/Dockerfile.worker-aws-lambda \
+		-t "$$ecr_url:$(REMOTE_RENDER_IMAGE_TAG)" \
+		.; \
+	docker push "$$ecr_url:$(REMOTE_RENDER_IMAGE_TAG)"
+
+remote-render-deploy:
+	terraform -chdir="$(REMOTE_RENDER_TF_DIR)" init
+	terraform -chdir="$(REMOTE_RENDER_TF_DIR)" apply \
+		-target=aws_ecr_repository.worker \
+		-var="aws_region=$(REMOTE_RENDER_AWS_REGION)" \
+		-auto-approve
+	$(MAKE) remote-render-push \
+		REMOTE_RENDER_TF_DIR="$(REMOTE_RENDER_TF_DIR)" \
+		REMOTE_RENDER_AWS_REGION="$(REMOTE_RENDER_AWS_REGION)" \
+		REMOTE_RENDER_IMAGE_TAG="$(REMOTE_RENDER_IMAGE_TAG)"
+	terraform -chdir="$(REMOTE_RENDER_TF_DIR)" apply \
+		-var="aws_region=$(REMOTE_RENDER_AWS_REGION)" \
+		-var="image_tag=$(REMOTE_RENDER_IMAGE_TAG)" \
+		$(REMOTE_RENDER_TF_ARGS)
