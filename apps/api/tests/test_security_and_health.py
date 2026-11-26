@@ -16,6 +16,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from trip_api.config import Settings
 from trip_api.db import (
     Base,
+    IngestJob,
     Project,
     RateLimitRecord,
     RenderJob,
@@ -452,6 +453,38 @@ def test_metrics_prometheus_exposition_gating_and_zero_pii(tmp_path: Path) -> No
         ]
         assert 120 <= float(age_value) < 150
 
+        assert "\ntrip_ingest_queue_depth 0\n" in body
+        assert "\ntrip_ingest_queue_oldest_age_seconds 0\n" in body
+        with sf() as db:
+            now = datetime.now(UTC)
+            db.add_all(
+                IngestJob(
+                    event_type="create",
+                    external_owner_id="private-owner",
+                    external_object_id=object_id,
+                    status=job_status,
+                    created_at=now - timedelta(seconds=age),
+                )
+                for object_id, job_status, age in (
+                    (1, "queued", 60),
+                    (2, "queued", 120),
+                    (3, "running", 3600),
+                    (4, "failed", 7200),
+                )
+            )
+            db.commit()
+        populated = client.get(
+            "/metrics", headers={"Authorization": "Bearer super-secret-metrics-token"}
+        )
+        values = dict(
+            line.split(" ", 1)
+            for line in populated.text.splitlines()
+            if line.startswith("trip_ingest_")
+        )
+        assert values["trip_ingest_queue_depth"] == "2"
+        assert 120 <= float(values["trip_ingest_queue_oldest_age_seconds"]) < 130
+        assert "private-owner" not in populated.text
+
         prod_no_token = create_app(
             Settings(
                 app_env="production",
@@ -486,6 +519,7 @@ def test_metrics_prometheus_exposition_gating_and_zero_pii(tmp_path: Path) -> No
         assert down_resp.status_code == 200
         assert "trip_db_up 0" in down_resp.text
         assert not any(line.startswith(f"{metric_name} ") for line in down_resp.text.splitlines())
+        assert "\ntrip_ingest_" not in down_resp.text
     finally:
         engine.dispose()
 
