@@ -65,6 +65,16 @@ query "$queue_age_query" |
 printf '%s\n' 'Verified the dashboard queue age query against an empty PostgreSQL queue.'
 printf '%s\n' 'Verified the authenticated dashboard and live API/PostgreSQL scrape.'
 
+ingest_dashboard="$grafana/api/dashboards/uid/trip-ingest-overview"
+wait_for curl_grafana "$ingest_dashboard" >/dev/null
+for panel in 1 2; do
+  expression=$(curl_grafana "$ingest_dashboard" |
+    python3 -c 'import json,sys; print(next(p["targets"][0]["expr"] for p in json.load(sys.stdin)["dashboard"]["panels"] if p["id"] == int(sys.argv[1])))' "$panel")
+  query "$expression" |
+    python3 -c 'import json,sys; assert [r["value"][1] for r in json.load(sys.stdin)["data"]["result"]] == ["0"]'
+done
+printf '%s\n' 'Verified both ingest dashboard queries against an empty PostgreSQL queue.'
+
 http_dashboard="$grafana/api/dashboards/uid/trip-api-http"
 wait_for curl_grafana "$http_dashboard" >/dev/null
 http_expression() {
@@ -83,6 +93,7 @@ http_panels_readable() {
 }
 wait_for http_panels_readable 2>/dev/null || http_panels_readable
 printf '%s\n' 'Verified live HTTP error rate and latency in Grafana from requests to the API.'
+
 
 # Keep the running application container and both named volumes when switching off.
 api_id=$("${fixture[@]}" ps -q api)
