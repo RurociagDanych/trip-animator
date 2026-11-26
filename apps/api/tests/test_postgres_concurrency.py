@@ -285,10 +285,14 @@ def test_postgres_alembic_upgrade_downgrade_upgrade_roundtrip(pg_temp_db_url: st
 
     engine_reup = create_db_engine(pg_temp_db_url)
     try:
-        assert expected_tables <= set(inspect(engine_reup).get_table_names())
+        insp_reup = inspect(engine_reup)
+        assert expected_tables <= set(insp_reup.get_table_names())
+        assert {"render_backend", "external_execution_id", "remote_dispatched_at"} <= {
+            c["name"] for c in insp_reup.get_columns("render_jobs")
+        }
         with engine_reup.connect() as conn:
             ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-            assert ver == "0012_vault_original_artifacts"
+            assert ver == "0013_render_job_remote_backend"
     finally:
         engine_reup.dispose()
 
