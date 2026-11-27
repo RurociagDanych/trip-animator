@@ -80,6 +80,30 @@ The target builds the builder image (osmium, Planetiler and the `trip-marked-tra
 
 `make dev-web` serves the store at `/tiles/marked-trails/`, and `make dev-api` sets `MARKED_TRAILS_BASE_URL` to that path unless the environment sets it; `.env.example` leaves it empty. With `MARKED_TRAILS_BASE_URL` empty, the editor shows no Marked Trails toggle. `make test-marked-trails-image` runs the Docker test of the builder image on a committed fixture; `make test` skips it.
 
+### Marked Trails on AWS
+
+Production serves the trail store from a private S3 bucket behind CloudFront. Both come from `infra/terraform/standalone-remote-render`, the root that deploys the render Lambdas, in `us-east-1` (the root rejects another region for the bucket). A cloud build needs these steps, in order:
+
+1. Set `marked_trails_app_origins` in that root's `terraform.tfvars` to the app origins that read the tiles in the browser, for example `["https://trips.example.com"]`. The CloudFront response headers policy answers only those origins, allows `GET` and `HEAD` with `Range`, and exposes `Content-Range`, `ETag` and `Accept-Ranges`. `marked_trails_prefix` (default `marked-trails`) is the key prefix of the store.
+2. Review `terraform plan`, then `terraform apply`. Read the outputs: `marked_trails_bucket_name`, `marked_trails_base_url`, `marked_trails_cloudfront_origin` and `marked_trails_publisher_policy_arn`.
+3. Attach the policy of `marked_trails_publisher_policy_arn` to the IAM user or role that Airflow uses. It allows get, put, delete and list under the prefix only.
+4. Add the CloudFront origin (`https://<id>.cloudfront.net`, from `marked_trails_cloudfront_origin`) to the render tile allowlist and to the edge CSP tile origins, keeping the origins that are already there:
+   - Lambda renders: append it to `map_tile_allowlist` in the Terraform tfvars (comma-separated, for example `https://tiles.openfreemap.org,https://<id>.cloudfront.net`), then apply.
+   - VPS renders: append it to `MAP_TILE_ALLOWLIST` in `.env`.
+   - Edge CSP: append it, space-separated, to `CADDY_TILE_CSP_ORIGINS` in `.env` (read by `infra/Caddyfile` through `infra/compose.yaml`) and recreate the `caddy` service.
+5. Set `MARKED_TRAILS_BASE_URL` in `.env` to `marked_trails_base_url` (it already ends in the prefix and serves `current.json`) and recreate the API.
+6. Publish with the CLI, selecting the S3 store by environment or flags. Credentials come from the default AWS chain (`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, or a role), never from flags:
+
+```bash
+export MARKED_TRAILS_STORE=s3
+export MARKED_TRAILS_S3_BUCKET=<marked_trails_bucket_name>
+export MARKED_TRAILS_S3_PREFIX=marked-trails
+export MARKED_TRAILS_S3_REGION=us-east-1
+trip-marked-trails build-publish --region europe/andorra --work-dir /work
+```
+
+`MARKED_TRAILS_S3_PREFIX` must equal `marked_trails_prefix`. Build files are uploaded as `application/vnd.pmtiles` with `public, max-age=31536000, immutable`; `current.json` is uploaded as `application/json` with `no-cache, no-store, must-revalidate`. The bucket has no expiration rule: only the publisher deletes builds.
+
 ## Strava OAuth2 setup
 
 1. In your [Strava API Application settings](https://www.strava.com/settings/api), set **Authorization Callback Domain** to:
