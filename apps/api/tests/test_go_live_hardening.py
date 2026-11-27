@@ -18,7 +18,7 @@ from trip_api.main import create_app
 from trip_api.remote_renders import process_remote_renders_once
 from trip_api.render_backends import RemoteExecutionRef, RemoteExecutionStatus, RemoteSubmitRequest
 from trip_api.render_events import RenderEventHub
-from trip_api.storage import LocalObjectStore
+from trip_object_store import LocalObjectStore
 
 _VALID_GPX = b"""<?xml version="1.0" encoding="UTF-8"?>
 <gpx version="1.1" creator="test" xmlns="http://www.topografix.com/GPX/1/1">
