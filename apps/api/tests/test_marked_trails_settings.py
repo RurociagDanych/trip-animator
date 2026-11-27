@@ -34,14 +34,17 @@ def test_marked_trail_types_default_off_and_round_trip_through_project_settings(
 
     patch = client.patch(
         f"/api/v1/projects/{project_id}",
-        json={"revision": detail["revision"], "settings": {"marked_trail_types": ["hiking"]}},
+        json={
+            "revision": detail["revision"],
+            "settings": {"marked_trail_types": ["hiking", "cycling", "mtb"]},
+        },
         headers={"X-CSRF-Token": csrf},
     )
     assert patch.status_code == 200, patch.text
-    assert patch.json()["settings"]["marked_trail_types"] == ["hiking"]
+    assert patch.json()["settings"]["marked_trail_types"] == ["hiking", "cycling", "mtb"]
 
     reloaded = client.get(f"/api/v1/projects/{project_id}").json()
-    assert reloaded["settings"]["marked_trail_types"] == ["hiking"]
+    assert reloaded["settings"]["marked_trail_types"] == ["hiking", "cycling", "mtb"]
 
 
 def test_unknown_marked_trail_type_is_rejected_and_stored_value_is_kept(
@@ -53,7 +56,15 @@ def test_unknown_marked_trail_type_is_rejected_and_stored_value_is_kept(
     project_id = _create_project(client, csrf)
     revision = client.get(f"/api/v1/projects/{project_id}").json()["revision"]
 
-    for bad_value in (["skiing"], ["hiking", "trail"], "hiking", ["hiking", "hiking"]):
+    for bad_value in (
+        ["skiing"],
+        ["hiking", "trail"],
+        "hiking",
+        ["hiking", "hiking"],
+        ["cycling", "cycling"],
+        ["mtb", "hiking", "mtb"],
+        ["bicycle"],
+    ):
         response = client.patch(
             f"/api/v1/projects/{project_id}",
             json={"revision": revision, "settings": {"marked_trail_types": bad_value}},

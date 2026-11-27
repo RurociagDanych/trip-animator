@@ -65,8 +65,7 @@ export type MapStylePreset =
   | "topo-relief"
   | "satellite-hybrid"
   | "editorial-mono";
-// Only hiking is styled in this build; cycling and MTB join with their styling.
-export type MarkedTrailType = "hiking";
+export type MarkedTrailType = "hiking" | "cycling" | "mtb";
 export type TimelineMode = "distance" | "recorded-time";
 export type CameraMode = "fit-track" | "follow-marker";
 export type CameraPreset = "flat" | "dynamic-3d" | "drone-orbit";
@@ -1078,7 +1077,7 @@ export function createDefaultRenderSpecV2(): RenderSpecV2 {
 
 const VALID_FPS_SET = new Set<RenderFps>(RENDER_FPS_VALUES);
 const VALID_RESOLUTION_SET = new Set<ResolutionPreset>(RESOLUTION_PRESETS);
-const VALID_MARKED_TRAIL_TYPE_SET = new Set<MarkedTrailType>(["hiking"]);
+const VALID_MARKED_TRAIL_TYPE_SET = new Set<MarkedTrailType>(["hiking", "cycling", "mtb"]);
 
 const VALID_MAP_STYLE_SET = new Set<MapStylePreset>([
   "liberty",

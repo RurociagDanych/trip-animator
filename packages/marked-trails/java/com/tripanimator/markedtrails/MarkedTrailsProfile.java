@@ -114,7 +114,7 @@ public class MarkedTrailsProfile implements Profile {
     return value.isEmpty() ? null : value;
   }
 
-  /** Folds `foot` into `hiking`, the only trail type the app reads in this build. */
+  /** Maps an OSM route value to a trail type; `foot` is folded into `hiking`. */
   static String markedTrailType(String route) {
     return switch (route) {
       case "hiking", "foot" -> "hiking";
