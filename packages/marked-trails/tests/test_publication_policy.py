@@ -371,3 +371,45 @@ def test_upload_with_a_different_size_is_removed_and_the_pointer_kept(
 
     assert (tmp_path / "store" / "current.json").read_bytes() == pointer_before
     assert build_ids(tmp_path) == ["2026-11-02"]
+
+
+def test_pointer_records_the_highest_build_id_allocated(tmp_path: Path) -> None:
+    for _ in range(2):
+        assert publish(tmp_path, "2026-11-27", build_of(1000)) == 0
+
+    assert pointer_of(tmp_path)["last_build_id"] == "2026-11-27-2"
+
+
+def test_rollback_to_the_first_build_with_last_build_id_kept_never_reuses_an_id(
+    tmp_path: Path,
+) -> None:
+    for _ in range(2):
+        assert publish(tmp_path, "2026-11-27", build_of(1000)) == 0
+    rolled_back = {
+        **pointer_of(tmp_path),
+        "current_build_id": "2026-11-27",
+        "previous_build_id": None,
+        "pmtiles_key": "builds/2026-11-27/marked-trails.pmtiles",
+    }
+    LocalObjectStore(tmp_path / "store").put_bytes(
+        "current.json", json.dumps(rolled_back).encode("utf-8")
+    )
+
+    assert publish(tmp_path, "2026-11-27", build_of(1000)) == 0
+
+    pointer = pointer_of(tmp_path)
+    assert pointer["current_build_id"] == "2026-11-27-3"
+    assert pointer["last_build_id"] == "2026-11-27-3"
+
+
+def test_failed_pointer_write_is_logged_as_possibly_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    seed_published(tmp_path)
+    monkeypatch.setattr(
+        cli, "build_object_store", lambda config: FailingPointerStore(tmp_path / "store")
+    )
+
+    assert publish(tmp_path, "2026-11-03", build_of(1000)) == 1
+
+    assert "published pointer may have changed" in caplog.text

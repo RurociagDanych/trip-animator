@@ -33,6 +33,10 @@ class PointerError(Exception):
     """`current.json` does not describe a build that is safe to keep or to prune around."""
 
 
+class PointerWriteError(Exception):
+    """Writing `current.json` failed, so the published pointer may or may not have changed."""
+
+
 class ValidationError(Exception):
     """A built file failed the checks that guard the switch of `current.json`."""
 
@@ -42,6 +46,8 @@ class CurrentPointer:
     """Contents of `current.json`: the active build and the previous one for rollback.
 
     Fields added after schema version 1 have defaults, so older pointers still load.
+    `last_build_id` is the highest build id ever allocated. A rollback must keep it, because
+    the build ids of deleted builds would otherwise be allocated again.
     """
 
     region: str
@@ -53,6 +59,7 @@ class CurrentPointer:
     osm_data_date: str | None
     built_at: str
     marked_trail_count: int | None = None
+    last_build_id: str | None = None
 
 
 def build_pmtiles_key(build_id: str) -> str:
@@ -82,13 +89,18 @@ def allocate_build_id(
     """Return a build id for `build_date` that no build or pointer has used.
 
     The first build of a day is the bare date, later ones get a numeric suffix one above the
-    highest seen in the store and in the pointer. Ids of deleted builds are never reused, so
-    a cached immutable object can never be shadowed by different content.
+    highest seen in the store and in the pointer, including its `last_build_id`. Ids of deleted
+    builds are never reused, so a cached immutable object can never be shadowed by different
+    content.
     """
     base = build_date.isoformat()
     seen = [*_store_build_ids(store)]
     if pointer is not None:
-        seen += [pointer.current_build_id, pointer.previous_build_id or ""]
+        seen += [
+            pointer.current_build_id,
+            pointer.previous_build_id or "",
+            pointer.last_build_id or "",
+        ]
     highest = 0
     for build_id in seen:
         if build_id == base:
@@ -222,14 +234,18 @@ def publish_build(
         osm_data_date=artifact.osm_data_date,
         built_at=datetime.now(UTC).isoformat(timespec="seconds"),
         marked_trail_count=artifact.marked_trail_count,
+        last_build_id=build_id,
     )
     payload = {"schema_version": POINTER_SCHEMA_VERSION, **asdict(pointer)}
-    store.put_bytes(
-        POINTER_KEY,
-        json.dumps(payload, indent=2, sort_keys=True).encode("utf-8") + b"\n",
-        content_type="application/json",
-        cache_control=POINTER_CACHE_CONTROL,
-    )
+    try:
+        store.put_bytes(
+            POINTER_KEY,
+            json.dumps(payload, indent=2, sort_keys=True).encode("utf-8") + b"\n",
+            content_type="application/json",
+            cache_control=POINTER_CACHE_CONTROL,
+        )
+    except Exception as exc:
+        raise PointerWriteError(f"Could not write {POINTER_KEY}: {exc}") from exc
     return pointer
 
 

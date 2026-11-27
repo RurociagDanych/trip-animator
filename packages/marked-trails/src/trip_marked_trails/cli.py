@@ -20,6 +20,7 @@ from trip_marked_trails.pipeline import (
 )
 from trip_marked_trails.publish import (
     DEFAULT_SIZE_BUDGET_BYTES,
+    PointerWriteError,
     delete_superseded_builds,
     publish_build,
     read_pointer,
@@ -87,8 +88,9 @@ def main(argv: Sequence[str] | None = None, *, build_step: BuildStep | None = No
 
     Order: check the pointer and delete the builds older than the current one, run the build,
     validate the local file, upload it under its own prefix, then overwrite `current.json`.
-    Any failure returns 1 and leaves `current.json` as it was; an invalid pointer deletes
-    nothing.
+    Any failure returns 1. Before the pointer write `current.json` is left as it was; if the
+    pointer write itself fails it may or may not have changed, and the log says so. An invalid
+    pointer deletes nothing.
 
     `build_step` replaces the osmium and Planetiler build in tests; publication policy is
     the same either way. The built file in the work directory is deleted once published.
@@ -110,6 +112,13 @@ def main(argv: Sequence[str] | None = None, *, build_step: BuildStep | None = No
             previous=pointer,
             size_budget_bytes=args.size_budget_bytes,
         )
+    except PointerWriteError:
+        logger.exception(
+            "Marked Trails build for %s failed while writing the pointer; "
+            "the published pointer may have changed",
+            args.region,
+        )
+        return 1
     except Exception:
         logger.exception(
             "Marked Trails build for %s failed; the published pointer is unchanged", args.region
