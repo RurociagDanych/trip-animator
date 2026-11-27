@@ -14,6 +14,7 @@ from trip_marked_trails.pipeline import (
     DEFAULT_PLANETILER_CLASSPATH,
     BuildArtifact,
     BuildTools,
+    ResourceLimits,
     run_build,
     validate_region,
 )
@@ -24,6 +25,7 @@ from trip_marked_trails.publish import (
     publish_build,
     read_pointer,
 )
+from trip_marked_trails.regional import run_regional_build
 from trip_marked_trails.trail_store import (
     DEFAULT_S3_PREFIX,
     TrailStoreSettings,
@@ -35,6 +37,9 @@ logger = logging.getLogger("trip_marked_trails")
 STORE_CHOICES = ("local", "s3")
 
 BuildStep = Callable[[str, Path], BuildArtifact]
+
+# The production host has 8 GB and no swap; osmium needs about 2.4 GB and Planetiler about 2.3 GB.
+TOOL_MEMORY_LIMIT_BYTES = 3 * 1024**3
 
 
 def positive_int(value: str) -> int:
@@ -70,7 +75,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("MARKED_TRAILS_STORE") or "local",
         help="Trail store backend; defaults to MARKED_TRAILS_STORE, then local",
     )
-    publish.add_argument("--store-dir", type=Path, default=None, help="Local trail store root")
+    publish.add_argument(
+        "--store-dir",
+        type=Path,
+        default=os.environ.get("MARKED_TRAILS_STORE_DIR") or None,
+        help="Local trail store root; defaults to MARKED_TRAILS_STORE_DIR",
+    )
     publish.add_argument(
         "--s3-bucket",
         default=os.environ.get("MARKED_TRAILS_S3_BUCKET", ""),
@@ -107,6 +117,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("MARKED_TRAILS_SIZE_BUDGET_BYTES") or DEFAULT_SIZE_BUDGET_BYTES,
         help="Largest PMTiles file a build may have, in bytes; defaults to 1 GiB",
     )
+    publish.add_argument(
+        "--cap-resources",
+        action="store_true",
+        help="Run osmium and Planetiler niced, on one CPU and with a 3 GB memory cap, for hosts "
+        "where the CLI is not already limited by its container",
+    )
     return parser
 
 
@@ -122,7 +138,8 @@ def main(
     validate the local file, upload it under its own prefix, then overwrite `current.json`.
     Any failure returns 1. Before the pointer write `current.json` is left as it was; if the
     pointer write itself fails it may or may not have changed, and the log says so. An invalid
-    pointer deletes nothing.
+    pointer deletes nothing. A parent region such as `europe` is built one Geofabrik child extract
+    at a time; a leaf region or a local `--extract` is built directly.
 
     `build_step` replaces the osmium and Planetiler build in tests and `s3_client` replaces
     the boto3 client; publication policy is the same either way. The built file in the work
@@ -154,7 +171,9 @@ def main(
         ),
         s3_client=s3_client,
     )
-    step = build_step or _default_build_step(args.planetiler_classpath, args.extract)
+    step = build_step or _default_build_step(
+        args.planetiler_classpath, args.extract, args.cap_resources
+    )
     try:
         pointer = read_pointer(store)
         for key in delete_superseded_builds(store, pointer):
@@ -192,11 +211,18 @@ def main(
     return 0
 
 
-def _default_build_step(planetiler_classpath: str, extract_path: Path | None) -> BuildStep:
-    tools = BuildTools(planetiler_classpath=planetiler_classpath)
+def _default_build_step(
+    planetiler_classpath: str, extract_path: Path | None, cap_resources: bool
+) -> BuildStep:
+    tools = BuildTools(
+        planetiler_classpath=planetiler_classpath,
+        limits=ResourceLimits(memory_bytes=TOOL_MEMORY_LIMIT_BYTES) if cap_resources else None,
+    )
 
     def step(region: str, work_dir: Path) -> BuildArtifact:
-        return run_build(region, work_dir, tools, extract_path=extract_path)
+        if extract_path is not None:
+            return run_build(region, work_dir, tools, extract_path=extract_path)
+        return run_regional_build(region, work_dir, tools)
 
     return step
 

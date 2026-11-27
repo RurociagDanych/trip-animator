@@ -5,12 +5,15 @@ from __future__ import annotations
 import collections
 import hashlib
 import logging
+import os
 import re
 import shutil
 import subprocess  # noqa: S404 - the CLI runs the osmium and Java tools it was packaged with
 import threading
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 import httpx
 
@@ -47,13 +50,92 @@ class BuildArtifact:
 
 
 @dataclass(frozen=True, slots=True)
+class ResourceLimits:
+    """Caps for one tool process: `memory_bytes` of data memory, a `nice` level, one `cpu`.
+
+    `cpu` is the CPU number to pin to; None pins to the lowest CPU the process may use.
+    """
+
+    memory_bytes: int
+    nice: int = 10
+    cpu: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class BuildTools:
-    """Executables, classpath and time limit used by the build, defaulting to the builder image."""
+    """Executables, classpath, time and resource limits used by the build.
+
+    Defaults match the builder image. Without `limits` tools run uncapped, which suits a
+    container that Docker already limits.
+    """
 
     osmium: str = "osmium"
     java: str = "java"
     planetiler_classpath: str = DEFAULT_PLANETILER_CLASSPATH
     tool_timeout_seconds: float = TOOL_TIMEOUT_SECONDS
+    limits: ResourceLimits | None = None
+
+
+class ToolRunner(Protocol):
+    """Runs the external tools of a build; tests replace it with a fake."""
+
+    def run(self, args: Sequence[str]) -> None:
+        """Run a tool to completion and raise `BuildToolError` if it fails."""
+        ...
+
+    def capture(self, args: Sequence[str]) -> str:
+        """Run a tool and return its standard output."""
+        ...
+
+
+Downloader = Callable[[str, Path], None]
+
+
+def limited_command(args: Sequence[str], limits: ResourceLimits | None) -> list[str]:
+    """Wrap a command so it runs niced, pinned to one CPU and with a data memory cap.
+
+    This must work in the Airflow container: it is unprivileged, has no capabilities and a
+    read-only root, so cgroups and `docker run` limits are unavailable. `prlimit --data`
+    (RLIMIT_DATA) counts heap and private anonymous mappings, which is the memory osmium and the
+    Planetiler JVM use, so a tool that needs more fails with an allocation error instead of
+    taking the host's memory. RLIMIT_AS would also count the JVM's reserved address space and
+    RLIMIT_RSS is not enforced by Linux. The JVM heap is capped separately by -Xmx.
+    """
+    if limits is None:
+        return list(args)
+    cpu = limits.cpu if limits.cpu is not None else min(os.sched_getaffinity(0))
+    return [
+        "nice",
+        "-n",
+        str(limits.nice),
+        "prlimit",
+        f"--data={limits.memory_bytes}",
+        "taskset",
+        "-c",
+        str(cpu),
+        *args,
+    ]
+
+
+class SubprocessToolRunner:
+    """`ToolRunner` that starts real processes with the limits of `BuildTools`."""
+
+    def __init__(self, tools: BuildTools) -> None:
+        self._tools = tools
+
+    def run(self, args: Sequence[str]) -> None:
+        _run(
+            limited_command(args, self._tools.limits),
+            self._tools.tool_timeout_seconds,
+            tool=Path(args[0]).name,
+        )
+
+    def capture(self, args: Sequence[str]) -> str:
+        return _capture(
+            limited_command(args, self._tools.limits),
+            self._tools.tool_timeout_seconds,
+            tool=Path(args[0]).name,
+        )
 
 
 def validate_region(region: str) -> str:
@@ -108,6 +190,8 @@ def run_build(
     tools: BuildTools,
     *,
     extract_path: Path | None = None,
+    runner: ToolRunner | None = None,
+    downloader: Downloader | None = None,
 ) -> BuildArtifact:
     """Filter and render one region; intermediate files are deleted on success.
 
@@ -117,19 +201,26 @@ def run_build(
     """
     validate_region(region)
     work_dir.mkdir(parents=True, exist_ok=True)
+    runner = runner or SubprocessToolRunner(tools)
     filtered = work_dir / "marked-trails-filtered.osm.pbf"
-    pmtiles = work_dir / PMTILES_NAME
-    count_file = work_dir / MARKED_TRAIL_COUNT_NAME
-    tmp_dir = work_dir / "tmp"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
 
     if extract_path is None:
         extract = work_dir / "extract.osm.pbf"
-        download_extract(region, extract)
+        (downloader or download_extract)(region, extract)
     else:
         extract = extract_path
-    osm_data_date = _osm_data_date(tools, extract)
-    _run(
+    osm_data_date = filter_extract(extract, filtered, tools, runner)
+    if extract_path is None:
+        extract.unlink()
+    return build_tiles(filtered, work_dir, osm_data_date, tools, runner)
+
+
+def filter_extract(
+    extract: Path, filtered: Path, tools: BuildTools, runner: ToolRunner
+) -> str | None:
+    """Keep only the Marked Trail relations of `extract` in `filtered`; return its data date."""
+    osm_data_date = _osm_data_date(tools, extract, runner)
+    runner.run(
         [
             tools.osmium,
             "tags-filter",
@@ -138,13 +229,24 @@ def run_build(
             str(filtered),
             str(extract),
             FILTER_EXPRESSION,
-        ],
-        tools.tool_timeout_seconds,
+        ]
     )
-    if extract_path is None:
-        extract.unlink()
+    return osm_data_date
 
-    _run(
+
+def build_tiles(
+    filtered: Path,
+    work_dir: Path,
+    osm_data_date: str | None,
+    tools: BuildTools,
+    runner: ToolRunner,
+) -> BuildArtifact:
+    """Run Planetiler on a filtered file and delete it; the PMTiles file lands in `work_dir`."""
+    pmtiles = work_dir / PMTILES_NAME
+    count_file = work_dir / MARKED_TRAIL_COUNT_NAME
+    tmp_dir = work_dir / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    runner.run(
         [
             tools.java,
             PLANETILER_HEAP_OPTION,
@@ -158,8 +260,7 @@ def run_build(
             f"--maxzoom={TILE_MAX_ZOOM}",
             f"--marked_trail_count_path={count_file}",
             "--force",
-        ],
-        tools.tool_timeout_seconds,
+        ]
     )
     filtered.unlink()
     shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -181,31 +282,36 @@ def _read_marked_trail_count(count_file: Path) -> int:
         raise BuildToolError(f"Planetiler wrote no Marked Trail count at {count_file}") from exc
 
 
-def _osm_data_date(tools: BuildTools, extract: Path) -> str | None:
-    args = [
-        tools.osmium,
-        "fileinfo",
-        "-g",
-        "header.option.osmosis_replication_timestamp",
-        str(extract),
-    ]
+def _osm_data_date(tools: BuildTools, extract: Path, runner: ToolRunner) -> str | None:
+    value = runner.capture(
+        [
+            tools.osmium,
+            "fileinfo",
+            "-g",
+            "header.option.osmosis_replication_timestamp",
+            str(extract),
+        ]
+    ).strip()
+    return value or None
+
+
+def _capture(args: Sequence[str], timeout_seconds: float, *, tool: str) -> str:
+    """Run a short tool and return its stdout; a missing timestamp is not an error."""
     try:
         result = subprocess.run(  # noqa: S603 - argument list built from validated values, no shell
             args,
             capture_output=True,
             text=True,
             check=False,
-            timeout=tools.tool_timeout_seconds,
+            timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:
-        raise BuildToolError(f"{args[0]} timed out after {exc.timeout} s") from exc
-    value = result.stdout.strip()
-    return value or None
+        raise BuildToolError(f"{tool} timed out after {exc.timeout:g} s") from exc
+    return result.stdout
 
 
-def _run(args: list[str], timeout_seconds: float) -> None:
+def _run(args: Sequence[str], timeout_seconds: float, *, tool: str) -> None:
     """Run a tool, logging each output line as it arrives so long builds show progress."""
-    tool = Path(args[0]).name
     tail: collections.deque[str] = collections.deque(maxlen=_OUTPUT_TAIL_LINES)
     process = subprocess.Popen(  # noqa: S603 - argument list built from validated values, no shell
         args,
