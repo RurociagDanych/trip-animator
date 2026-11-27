@@ -198,7 +198,7 @@ describe("Trip Animator web routes and config builders", () => {
     expect(screen.queryByRole("checkbox", { name: "Hiking Marked Trails" })).not.toBeInTheDocument();
   });
 
-  it("toggles hiking Marked Trails in the route inspector and saves them to the project", async () => {
+  it("toggles hiking, cycling and MTB Marked Trails independently and saves each to the project", async () => {
     const fetchSpy = mockStandardApiFetch({ marked_trails_base_url: "/tiles/marked-trails" });
     const router = createAppRouter(
       createMemoryHistory({ initialEntries: ["/projects/fictional-route-2040"] }),
@@ -206,9 +206,20 @@ describe("Trip Animator web routes and config builders", () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<App router={router} queryClient={queryClient} />);
 
-    const toggle = await screen.findByRole("checkbox", { name: "Hiking Marked Trails" });
-    expect(toggle).not.toBeChecked();
-    fireEvent.click(toggle);
+    const hiking = await screen.findByRole("checkbox", { name: "Hiking Marked Trails" });
+    const cycling = await screen.findByRole("checkbox", { name: "Cycling Marked Trails" });
+    const mtb = await screen.findByRole("checkbox", { name: "MTB Marked Trails" });
+    for (const toggle of [hiking, cycling, mtb]) {
+      expect(toggle).not.toBeChecked();
+    }
+    fireEvent.click(cycling);
+    expect(cycling).toBeChecked();
+    expect(hiking).not.toBeChecked();
+    expect(mtb).not.toBeChecked();
+    fireEvent.click(hiking);
+    fireEvent.click(cycling);
+    expect(cycling).not.toBeChecked();
+    expect(hiking).toBeChecked();
 
     await waitFor(
       () => {

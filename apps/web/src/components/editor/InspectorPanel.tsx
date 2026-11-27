@@ -18,6 +18,7 @@ import type {
   FollowZoomMode,
   InvalidRenderSpecValue,
   MapStylePreset,
+  MarkedTrailType,
   PanelPosition,
   PhotoCardStyle,
   RenderFps,
@@ -35,6 +36,12 @@ import { toggleMarkedTrailType } from "../../lib/geo/marked-trails";
 import type { InspectorSection } from "../../lib/state/editor-store";
 import { ExportPanel } from "./ExportPanel";
 import type { LocalExportSource } from "./LocalExportControls";
+
+const MARKED_TRAIL_TOGGLES: readonly { type: MarkedTrailType; label: string }[] = [
+  { type: "hiking", label: "Hiking Marked Trails" },
+  { type: "cycling", label: "Cycling Marked Trails" },
+  { type: "mtb", label: "MTB Marked Trails" },
+];
 
 const INSPECTOR_TABS: readonly { id: InspectorSection; label: string }[] = [
   { id: "route", label: "Route" },
@@ -259,23 +266,27 @@ export function InspectorPanel({
             </label>
 
             {markedTrailsConfigured ? (
-              <label className="flex items-center gap-2 text-ink">
-                <input
-                  type="checkbox"
-                  checked={spec.marked_trail_types.includes("hiking")}
-                  onChange={(e) =>
-                    onUpdateSpec({
-                      marked_trail_types: toggleMarkedTrailType(
-                        spec.marked_trail_types,
-                        "hiking",
-                        e.currentTarget.checked,
-                      ),
-                    })
-                  }
-                  className="h-4 w-4 accent-sky-accent"
-                />
-                <span className="font-medium">Hiking Marked Trails</span>
-              </label>
+              <div className="space-y-2">
+                {MARKED_TRAIL_TOGGLES.map(({ type, label }) => (
+                  <label key={type} className="flex items-center gap-2 text-ink">
+                    <input
+                      type="checkbox"
+                      checked={spec.marked_trail_types.includes(type)}
+                      onChange={(e) =>
+                        onUpdateSpec({
+                          marked_trail_types: toggleMarkedTrailType(
+                            spec.marked_trail_types,
+                            type,
+                            e.currentTarget.checked,
+                          ),
+                        })
+                      }
+                      className="h-4 w-4 accent-sky-accent"
+                    />
+                    <span className="font-medium">{label}</span>
+                  </label>
+                ))}
+              </div>
             ) : null}
 
             <label className="block space-y-1.5">

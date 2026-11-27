@@ -7,7 +7,10 @@ import {
   normalizeRenderSpecV2,
 } from "../lib/api/types";
 import {
+  MARKED_TRAILS_CYCLING_LAYER_ID,
   MARKED_TRAILS_HIKING_LAYER_ID,
+  MARKED_TRAILS_MTB_LAYER_ID,
+  MARKED_TRAILS_LABEL_LAYER_IDS,
   MARKED_TRAILS_SOURCE_ID,
   mapStyleKey,
   resolveMarkedTrailsOverlay,
@@ -74,6 +77,7 @@ describe("Marked Trails map style", () => {
     expect(style.sources[MARKED_TRAILS_SOURCE_ID]).toEqual({
       type: "vector",
       url: `pmtiles://${PMTILES_URL}`,
+      maxzoom: 13,
     });
     const index = style.layers.findIndex((layer) => layer.id === MARKED_TRAILS_HIKING_LAYER_ID);
     expect(index).toBeGreaterThanOrEqual(0);
@@ -98,6 +102,115 @@ describe("Marked Trails map style", () => {
       const style = sanitizeMapStyle(basemapStyle(), preset, markedTrails);
       expect(style.sources[MARKED_TRAILS_SOURCE_ID]).toBeUndefined();
       expect(style.layers.some((layer) => layer.id === MARKED_TRAILS_HIKING_LAYER_ID)).toBe(false);
+    }
+  });
+});
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- style expressions are untyped nested arrays
+type LooseLayer = Record<string, any>;
+
+const ALL_TYPES: MarkedTrailType[] = ["hiking", "cycling", "mtb"];
+const LINE_LAYER_IDS = {
+  hiking: MARKED_TRAILS_HIKING_LAYER_ID,
+  cycling: MARKED_TRAILS_CYCLING_LAYER_ID,
+  mtb: MARKED_TRAILS_MTB_LAYER_ID,
+} as const;
+
+function markedTrailLayerIds(style: StyleSpecification): string[] {
+  return style.layers.filter((l) => l.id.startsWith("trip-marked-trails")).map((l) => l.id);
+}
+
+describe("Marked Trails cycling and MTB styling", () => {
+  it.each(PRESETS)("draws only the enabled types, each below the route, for %s", (preset) => {
+    for (const types of [["cycling"], ["mtb"], ["hiking", "mtb"], ALL_TYPES] as MarkedTrailType[][]) {
+      const style = sanitizeMapStyle(basemapStyle(), preset, {
+        markedTrailTypes: types,
+        pmtilesUrl: PMTILES_URL,
+      });
+      for (const type of ALL_TYPES) {
+        const lineLayers = style.layers.filter((l) => l.id === LINE_LAYER_IDS[type]);
+        expect(lineLayers.length, `${type} in ${types.join(",")}`).toBe(types.includes(type) ? 1 : 0);
+      }
+      const ids = markedTrailLayerIds(style);
+      expect(ids.every((id) => !id.includes("undefined"))).toBe(true);
+      for (const type of ALL_TYPES.filter((t) => !types.includes(t))) {
+        expect(ids.some((id) => id.includes(type))).toBe(false);
+      }
+    }
+  });
+
+  it("filters each type from the same source and gives cycling and MTB their own dash and colour", () => {
+    const style = sanitizeMapStyle(basemapStyle(), "liberty", {
+      markedTrailTypes: ALL_TYPES,
+      pmtilesUrl: PMTILES_URL,
+    });
+    const byId = new Map(style.layers.map((l) => [l.id, l as unknown as LooseLayer]));
+    const colours = new Set<string>();
+    const dashes = new Set<string>();
+    for (const type of ALL_TYPES) {
+      const layer = byId.get(LINE_LAYER_IDS[type])!;
+      expect(layer.source).toBe(MARKED_TRAILS_SOURCE_ID);
+      expect(layer.filter).toEqual(["==", ["get", "type"], type]);
+      expect(layer.paint["line-color"][0]).toBe("to-color");
+      expect(layer.paint["line-color"][1]).toEqual(["get", "colour"]);
+      colours.add(layer.paint["line-color"][2]);
+      dashes.add(JSON.stringify(layer.paint["line-dasharray"] ?? null));
+    }
+    expect(colours.size).toBe(3);
+    expect(dashes.size).toBe(3);
+    expect(byId.get(MARKED_TRAILS_HIKING_LAYER_ID)!.paint["line-dasharray"]).toBeUndefined();
+  });
+
+  it("scales line width by network level and treats an unknown network as local", () => {
+    const style = sanitizeMapStyle(basemapStyle(), "liberty", {
+      markedTrailTypes: ["cycling"],
+      pmtilesUrl: PMTILES_URL,
+    });
+    const width = (style.layers.find((l) => l.id === MARKED_TRAILS_CYCLING_LAYER_ID) as unknown as LooseLayer).paint[
+      "line-width"
+    ];
+    expect(width[0]).toBe("interpolate");
+    expect(width[2]).toEqual(["zoom"]);
+    for (let i = 3; i < width.length; i += 2) {
+      const match = width[i + 1];
+      expect(match[0]).toBe("match");
+      expect(match[1]).toEqual(["get", "network"]);
+      const widths = new Map<string, number>();
+      for (let j = 2; j + 1 < match.length - 1; j += 2) {
+        widths.set(match[j], match[j + 1]);
+      }
+      const fallback = match[match.length - 1];
+      expect(widths.get("international")!).toBeGreaterThan(widths.get("national")!);
+      expect(widths.get("national")!).toBeGreaterThan(widths.get("regional")!);
+      expect(widths.get("regional")!).toBeGreaterThan(fallback);
+      expect(widths.has("local")).toBe(false);
+    }
+  });
+
+  it("draws every type from z5 semi-transparent and relies on the tiles for the z9 local cut", () => {
+    const style = sanitizeMapStyle(basemapStyle(), "liberty", {
+      markedTrailTypes: ALL_TYPES,
+      pmtilesUrl: PMTILES_URL,
+    });
+    for (const type of ALL_TYPES) {
+      const layer = style.layers.find((l) => l.id === LINE_LAYER_IDS[type]) as unknown as LooseLayer;
+      expect(layer.minzoom).toBe(5);
+      expect(layer.paint["line-opacity"]).toBeLessThan(1);
+    }
+  });
+
+  it("labels trails with ref or name from z13 and keeps the labels below the route", () => {
+    const style = sanitizeMapStyle(basemapStyle(), "liberty", {
+      markedTrailTypes: ALL_TYPES,
+      pmtilesUrl: PMTILES_URL,
+    });
+    expect(MARKED_TRAILS_LABEL_LAYER_IDS.length).toBe(3);
+    for (const id of MARKED_TRAILS_LABEL_LAYER_IDS) {
+      const label = style.layers.find((l) => l.id === id) as unknown as LooseLayer;
+      expect(label.type).toBe("symbol");
+      expect(label.minzoom).toBe(13);
+      expect(label.layout["symbol-placement"]).toBe("line");
+      expect(label.layout["text-field"]).toEqual(["coalesce", ["get", "ref"], ["get", "name"]]);
     }
   });
 });

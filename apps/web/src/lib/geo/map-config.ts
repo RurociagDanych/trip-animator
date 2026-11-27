@@ -14,8 +14,73 @@ export const TERRAIN_SOURCE_ID = "trip-terrarium-dem";
 export const HILLSHADE_SOURCE_ID = "trip-terrarium-hillshade";
 export const MARKED_TRAILS_SOURCE_ID = "trip-marked-trails";
 export const MARKED_TRAILS_HIKING_LAYER_ID = "trip-marked-trails-hiking";
-// Used when OSM carries no colour tag for the relation.
-const HIKING_DEFAULT_COLOUR = "#b91c1c";
+export const MARKED_TRAILS_CYCLING_LAYER_ID = "trip-marked-trails-cycling";
+export const MARKED_TRAILS_MTB_LAYER_ID = "trip-marked-trails-mtb";
+export const MARKED_TRAILS_LABEL_LAYER_IDS = [
+  "trip-marked-trails-hiking-label",
+  "trip-marked-trails-cycling-label",
+  "trip-marked-trails-mtb-label",
+] as const;
+// Matches the profile: tiles stop at z13 and MapLibre overzooms above it.
+const MARKED_TRAILS_MAX_ZOOM = 13;
+const MARKED_TRAILS_MIN_ZOOM = 5;
+const MARKED_TRAILS_LABEL_MIN_ZOOM = 13;
+const MARKED_TRAILS_LABEL_FONT = ["Noto Sans Regular"];
+
+interface MarkedTrailTypeStyle {
+  lineLayerId: string;
+  labelLayerId: string;
+  defaultColour: string;
+  dashArray: number[] | null;
+}
+
+// Hiking stays solid; the dashes differ so cycling and MTB read apart from it and from each other.
+const MARKED_TRAIL_TYPE_STYLES: Record<MarkedTrailType, MarkedTrailTypeStyle> = {
+  hiking: {
+    lineLayerId: MARKED_TRAILS_HIKING_LAYER_ID,
+    labelLayerId: MARKED_TRAILS_LABEL_LAYER_IDS[0],
+    defaultColour: "#b91c1c",
+    dashArray: null,
+  },
+  cycling: {
+    lineLayerId: MARKED_TRAILS_CYCLING_LAYER_ID,
+    labelLayerId: MARKED_TRAILS_LABEL_LAYER_IDS[1],
+    defaultColour: "#1d4ed8",
+    dashArray: [3, 2],
+  },
+  mtb: {
+    lineLayerId: MARKED_TRAILS_MTB_LAYER_ID,
+    labelLayerId: MARKED_TRAILS_LABEL_LAYER_IDS[2],
+    defaultColour: "#7e22ce",
+    dashArray: [1, 1.5],
+  },
+};
+const MARKED_TRAIL_TYPE_ORDER: readonly MarkedTrailType[] = ["hiking", "cycling", "mtb"];
+
+// Widths in px at the zoom stops; an unknown or missing network falls through to the local width.
+const NETWORK_WIDTHS: Array<{ zoom: number; international: number; national: number; regional: number; local: number }> = [
+  { zoom: 5, international: 2, national: 1.5, regional: 1, local: 0.6 },
+  { zoom: 9, international: 2.5, national: 2, regional: 1.5, local: 1 },
+  { zoom: 13, international: 4, national: 3.25, regional: 2.5, local: 1.75 },
+];
+
+function networkWidthExpression(): unknown[] {
+  const stops = NETWORK_WIDTHS.flatMap((stop) => [
+    stop.zoom,
+    [
+      "match",
+      ["get", "network"],
+      "international",
+      stop.international,
+      "national",
+      stop.national,
+      "regional",
+      stop.regional,
+      stop.local,
+    ],
+  ]);
+  return ["interpolate", ["linear"], ["zoom"], ...stops];
+}
 
 export interface MarkedTrailsStyleOverlay {
   markedTrailTypes: readonly MarkedTrailType[];
@@ -108,14 +173,15 @@ function coerceNumericPaintExpr(expr: unknown, fallback: number): unknown {
 
 /**
  * Applies the basemap fixes and, when `markedTrails` names a published build and a trail
- * type, the Marked Trail source and layer.
+ * type, the Marked Trail source and layers.
  *
  * The basemap fixes guard bare `["get", ...]` numeric expressions in OpenFreeMap styles so MapLibre v5
  * does not emit "Expected value to be of type number, but found null instead" warnings when
  * vector tile features omit optional attributes like `ref_length`, `rank`, or `render_height`,
  * and apply preset transforms for `topo-relief`, `satellite-hybrid`, and `editorial-mono`.
- * The trail layer goes before the first symbol layer so labels stay on top of it; deck.gl
- * draws the user's route above the whole style.
+ * The trail lines go before the first symbol layer so basemap labels stay on top of them; the
+ * trail labels are added last. deck.gl draws the user's route above the whole style, so every
+ * trail layer is below the route.
  */
 export function sanitizeMapStyle(
   style: StyleSpecification,
@@ -126,31 +192,67 @@ export function sanitizeMapStyle(
   return markedTrails ? injectMarkedTrailLayers(basemap, markedTrails) : basemap;
 }
 
+function markedTrailLineLayer(type: MarkedTrailType) {
+  const config = MARKED_TRAIL_TYPE_STYLES[type];
+  return {
+    id: config.lineLayerId,
+    type: "line",
+    source: MARKED_TRAILS_SOURCE_ID,
+    "source-layer": "marked_trails",
+    minzoom: MARKED_TRAILS_MIN_ZOOM,
+    filter: ["==", ["get", "type"], type],
+    layout: { "line-cap": config.dashArray ? "butt" : "round", "line-join": "round" },
+    paint: {
+      // OSM colour values such as "red;white" do not parse; to-color falls back to the default.
+      "line-color": ["to-color", ["get", "colour"], config.defaultColour],
+      "line-width": networkWidthExpression(),
+      "line-opacity": 0.75,
+      ...(config.dashArray ? { "line-dasharray": config.dashArray } : {}),
+    },
+  };
+}
+
+function markedTrailLabelLayer(type: MarkedTrailType) {
+  const config = MARKED_TRAIL_TYPE_STYLES[type];
+  return {
+    id: config.labelLayerId,
+    type: "symbol",
+    source: MARKED_TRAILS_SOURCE_ID,
+    "source-layer": "marked_trails",
+    minzoom: MARKED_TRAILS_LABEL_MIN_ZOOM,
+    filter: ["==", ["get", "type"], type],
+    layout: {
+      "symbol-placement": "line",
+      "text-field": ["coalesce", ["get", "ref"], ["get", "name"]],
+      "text-font": MARKED_TRAILS_LABEL_FONT,
+      "text-size": 11,
+    },
+    paint: {
+      "text-color": "#1f2937",
+      "text-halo-color": "rgba(255,255,255,0.9)",
+      "text-halo-width": 1.5,
+    },
+  };
+}
+
 function injectMarkedTrailLayers(
   style: StyleSpecification,
   overlay: MarkedTrailsStyleOverlay,
 ): StyleSpecification {
-  if (!overlay.pmtilesUrl || !overlay.markedTrailTypes.includes("hiking")) {
+  const enabled = MARKED_TRAIL_TYPE_ORDER.filter((type) => overlay.markedTrailTypes.includes(type));
+  if (!overlay.pmtilesUrl || enabled.length === 0) {
     return style;
   }
-  const hikingLayer = {
-    id: MARKED_TRAILS_HIKING_LAYER_ID,
-    type: "line",
-    source: MARKED_TRAILS_SOURCE_ID,
-    "source-layer": "marked_trails",
-    minzoom: 5,
-    filter: ["==", ["get", "type"], "hiking"],
-    layout: { "line-cap": "round", "line-join": "round" },
-    paint: {
-      // OSM colour values such as "red;white" do not parse; to-color falls back to the default.
-      "line-color": ["to-color", ["get", "colour"], HIKING_DEFAULT_COLOUR],
-      "line-width": ["interpolate", ["linear"], ["zoom"], 9, 1, 13, 2.5],
-      "line-opacity": 0.75,
-    },
-  } as unknown as StyleSpecification["layers"][number];
+  const lineLayers = enabled.map(markedTrailLineLayer);
+  const labelLayers = enabled.map(markedTrailLabelLayer);
   const layers = [...style.layers];
   const firstSymbolIndex = layers.findIndex((layer) => layer.type === "symbol");
-  layers.splice(firstSymbolIndex >= 0 ? firstSymbolIndex : layers.length, 0, hikingLayer);
+  layers.splice(
+    firstSymbolIndex >= 0 ? firstSymbolIndex : layers.length,
+    0,
+    ...(lineLayers as unknown as StyleSpecification["layers"]),
+  );
+  layers.push(...(labelLayers as unknown as StyleSpecification["layers"]));
   return {
     ...style,
     sources: {
@@ -158,6 +260,7 @@ function injectMarkedTrailLayers(
       [MARKED_TRAILS_SOURCE_ID]: {
         type: "vector",
         url: `pmtiles://${overlay.pmtilesUrl}`,
+        maxzoom: MARKED_TRAILS_MAX_ZOOM,
       },
     } as StyleSpecification["sources"],
     layers,
