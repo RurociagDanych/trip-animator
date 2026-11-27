@@ -847,6 +847,7 @@ export interface RenderJobOut {
   status: RenderJobStatus;
   progress_pct: number;
   attempt_count: number;
+  credits_charged?: number;
   spec: RenderSpecV2;
   idempotency_key: string;
   output_object_key: string | null;
@@ -854,6 +855,47 @@ export interface RenderJobOut {
   error_message: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export type CreditLedgerEntryType =
+  | "voucher_grant"
+  | "render_debit"
+  | "render_refund"
+  | "admin_adjustment";
+
+export interface CreditLedgerEntryOut {
+  id: string;
+  delta: number;
+  entry_type: CreditLedgerEntryType;
+  render_job_id: string | null;
+  voucher_id: string | null;
+  note: string;
+  created_at: string;
+}
+
+export interface CreditsSummaryOut {
+  balance: number;
+  ledger: CreditLedgerEntryOut[];
+}
+
+export interface RedeemVoucherOut {
+  credits_granted: number;
+  balance: number;
+  entry: CreditLedgerEntryOut;
+}
+
+export interface RenderQuoteOut {
+  credits: number;
+  width: number;
+  height: number;
+  fps: number;
+  film_seconds: number;
+  cinematic_photo_stop_seconds: number;
+  terrain_3d: boolean;
+  terrain_multiplier: number;
+  cached: boolean;
+  balance: number;
+  sufficient: boolean;
 }
 
 export interface RenderManifestPoint {

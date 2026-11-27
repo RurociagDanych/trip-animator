@@ -13,14 +13,19 @@ from fastapi.testclient import TestClient
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 from trip_api.config import Settings
-from trip_api.db import Base, User, create_db_engine, create_session_factory
+from trip_api.db import (
+    Base,
+    CreditLedgerEntry,
+    User,
+    create_db_engine,
+    create_session_factory,
+)
 from trip_api.main import create_app
 from trip_api.security import hash_password
 from trip_api.storage import LocalObjectStore
 
 _DEFAULT_PW = "correct-horse-battery-staple"
 
-# Constructed telemetry fixture; coordinates and timestamps are synthetic.
 SAMPLE_GPX = b"""<?xml version="1.0" encoding="UTF-8"?>
 <gpx version="1.1" creator="pytest" xmlns="http://www.topografix.com/GPX/1/1"
      xmlns:gpxtpx="http://www.garmin.com/xmlschemas/TrackPointExtension/v1">
@@ -62,7 +67,12 @@ class AppHarness:
     db_path: Path
 
     def create_user(
-        self, email: str, password: str | None = None, *, verified: bool = True
+        self,
+        email: str,
+        password: str | None = None,
+        *,
+        verified: bool = True,
+        initial_credits: int = 10_000,
     ) -> User:
         pw = password or _DEFAULT_PW
         with self.session_factory() as db:
@@ -74,6 +84,16 @@ class AppHarness:
                 email_verified_at=datetime.now(UTC) if verified else None,
             )
             db.add(user)
+            db.flush()
+            if initial_credits > 0:
+                db.add(
+                    CreditLedgerEntry(
+                        user_id=user.id,
+                        delta=initial_credits,
+                        entry_type="admin_adjustment",
+                        note="Test fixture credit seed",
+                    )
+                )
             db.commit()
             db.refresh(user)
             return user

@@ -158,10 +158,15 @@ def test_alembic_vault_sqlite_upgrade_downgrade_roundtrip(
         assert {"render_backend", "external_execution_id", "remote_dispatched_at"} <= {
             c["name"] for c in insp.get_columns("render_jobs")
         }
-        assert "user_identities" in set(insp.get_table_names())
+        assert {
+            "user_identities",
+            "credit_vouchers",
+            "credit_voucher_redemptions",
+            "credit_ledger_entries",
+        } <= set(insp.get_table_names())
         with engine.connect() as conn:
             ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-            assert ver == "0014_user_identities"
+            assert ver == "0015_render_credits_vouchers"
     finally:
         engine.dispose()
 

@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from trip_api.config import Settings
 from trip_api.db import (
     AuditEvent,
+    CreditLedgerEntry,
     IngestJob,
     OAuthConnection,
     OAuthState,
@@ -183,6 +184,7 @@ def _create_pg_user(
     password: str = _DEFAULT_PW,
     *,
     verified: bool = True,
+    initial_credits: int = 10_000,
 ) -> User:
     with sf() as db:
         user = User(
@@ -193,6 +195,16 @@ def _create_pg_user(
             email_verified_at=datetime.now(UTC) if verified else None,
         )
         db.add(user)
+        db.flush()
+        if initial_credits > 0:
+            db.add(
+                CreditLedgerEntry(
+                    user_id=user.id,
+                    delta=initial_credits,
+                    entry_type="admin_adjustment",
+                    note="PG test credit seed",
+                )
+            )
         db.commit()
         db.refresh(user)
         return user
@@ -288,10 +300,15 @@ def test_postgres_alembic_upgrade_downgrade_upgrade_roundtrip(pg_temp_db_url: st
         assert {"render_backend", "external_execution_id", "remote_dispatched_at"} <= {
             c["name"] for c in insp_reup.get_columns("render_jobs")
         }
-        assert "user_identities" in set(insp_reup.get_table_names())
+        assert {
+            "user_identities",
+            "credit_vouchers",
+            "credit_voucher_redemptions",
+            "credit_ledger_entries",
+        } <= set(insp_reup.get_table_names())
         with engine_reup.connect() as conn:
             ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-            assert ver == "0014_user_identities"
+            assert ver == "0015_render_credits_vouchers"
     finally:
         engine_reup.dispose()
 
@@ -522,6 +539,99 @@ def test_postgres_concurrent_render_idempotency_and_project_delete_audit_set_nul
         audits = db.scalars(select(AuditEvent)).all()
         assert any(a.event_type == "project.deleted" and a.project_id is None for a in audits)
         assert any(a.event_type == "project.created" and a.project_id is None for a in audits)
+
+
+def test_postgres_concurrent_render_credit_debit_prevents_overdraft(
+    pg_app_factory: Any,
+    sample_gpx: bytes,
+) -> None:
+    app, _settings, _engine, sf, _store = pg_app_factory()
+    _create_pg_user(sf, "credit-race@example.com", initial_credits=100)
+    client, csrf = _login_pg_client(app, "credit-race@example.com")
+    cookies = dict(client.cookies)
+
+    proj_id = client.post(
+        "/api/v1/projects",
+        json={"title": "Credit Race Project"},
+        headers={"X-CSRF-Token": csrf},
+    ).json()["id"]
+
+    up = client.post(
+        f"/api/v1/projects/{proj_id}/gpx",
+        files={"file": ("race_stage.gpx", sample_gpx, "application/gpx+xml")},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert up.status_code == 201
+
+    workers = 4
+    barrier = Barrier(workers)
+
+    def _submit_distinct(idx: int) -> int:
+        c = TestClient(app, cookies=cookies)
+        barrier.wait(timeout=10.0)
+        r = c.post(
+            f"/api/v1/projects/{proj_id}/renders",
+            json={
+                "resolution": "1920x1080",
+                "fps": 30,
+                "duration_seconds": 60.0,
+                "intro_hold_seconds": 0.0,
+                "outro_hold_seconds": 0.0,
+                "terrain_3d": False,
+                "show_photos": False,
+            },
+            headers={"X-CSRF-Token": csrf, "Idempotency-Key": f"pg-credit-race-{idx:04d}"},
+        )
+        return int(r.status_code)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        statuses = list(pool.map(_submit_distinct, range(workers)))
+
+    assert statuses.count(202) == 1
+    assert statuses.count(402) == workers - 1
+    assert client.get("/api/v1/credits").json()["balance"] == 0
+
+
+def test_postgres_concurrent_voucher_redemption_respects_max_redemptions(
+    pg_app_factory: Any,
+) -> None:
+    from trip_api.credits import create_voucher_record
+
+    app, _settings, _engine, sf, _store = pg_app_factory()
+    with sf() as db:
+        voucher = create_voucher_record(
+            db,
+            credits_amount=200,
+            max_redemptions=2,
+            code="PG-RACE-VOUCHER",
+        )
+
+    workers = 4
+    clients: list[tuple[dict[str, str], str]] = []
+    for idx in range(workers):
+        email = f"voucher-race-{idx}@example.com"
+        _create_pg_user(sf, email, initial_credits=0)
+        c, csrf = _login_pg_client(app, email)
+        clients.append((dict(c.cookies), csrf))
+
+    barrier = Barrier(workers)
+
+    def _redeem(idx: int) -> int:
+        cookies, csrf = clients[idx]
+        c = TestClient(app, cookies=cookies)
+        barrier.wait(timeout=10.0)
+        r = c.post(
+            "/api/v1/credits/redeem",
+            headers={"X-CSRF-Token": csrf},
+            json={"code": voucher.code},
+        )
+        return int(r.status_code)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        statuses = list(pool.map(_redeem, range(workers)))
+
+    assert statuses.count(200) == 2
+    assert statuses.count(400) == workers - 2
 
 
 def test_postgres_concurrent_photo_upload_quota_for_update(

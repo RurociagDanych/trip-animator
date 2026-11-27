@@ -22,6 +22,7 @@ from trip_telemetry import (
 )
 
 from trip_api.config import Settings
+from trip_api.credits import refund_render_credits_idempotent
 from trip_api.db import Project, RenderJob
 from trip_api.render_backends import (
     AwsSfnLambdaBackend,
@@ -251,6 +252,11 @@ def _mark_remote_failed(
         job.lease_expires_at = None
         job.error_message = sanitized
         job.updated_at = now
+        refund_render_credits_idempotent(
+            db,
+            job=job,
+            note="Refund for failed remote render",
+        )
         write_audit_event(
             db,
             user_id=job.owner_user_id,
@@ -419,6 +425,11 @@ def _reap_exhausted_remote_dispatches(
                 job.error_message or "Remote render dispatch exceeded maximum retry attempts"
             )
             job.updated_at = now
+            refund_render_credits_idempotent(
+                db,
+                job=job,
+                note="Refund for exhausted remote render dispatch",
+            )
             _notify_job_event(
                 db,
                 job_id=job.id,
@@ -595,6 +606,12 @@ def process_remote_renders_once(
                     job.lease_expires_at = None
                     job.error_message = msg
                     job.updated_at = now
+                    if exhausted:
+                        refund_render_credits_idempotent(
+                            db,
+                            job=job,
+                            note="Refund for failed remote render dispatch",
+                        )
                     _notify_job_event(
                         db,
                         job_id=job.id,

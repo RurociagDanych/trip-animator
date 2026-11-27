@@ -1,20 +1,26 @@
-/** Coordinates server exports and the project's combined render history. */
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
   CheckCircle2,
+  Coins,
   Download,
   FileCode2,
   Loader2,
   Map as MapIcon,
   PlayCircle,
   Square,
+  Ticket,
   XCircle,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { ApiError } from "../../lib/api/client";
-import { projectsApi, rendersApi } from "../../lib/api/endpoints";
-import type { RenderJobOut, RenderSpecV2 } from "../../lib/api/types";
+import { creditsApi, projectsApi, rendersApi } from "../../lib/api/endpoints";
+import type {
+  CreditsSummaryOut,
+  RenderJobOut,
+  RenderSpecV2,
+} from "../../lib/api/types";
+import { calculateRenderCreditQuote } from "../../lib/credits";
 import { listLocalRenders, type LocalRenderRecord } from "../../lib/export/local-history";
 import { LocalExportControls, type LocalExportSource } from "./LocalExportControls";
 import { VideoExportButton } from "./VideoExportButton";
@@ -76,15 +82,18 @@ function LocalVideoActions({ record, expanded, onToggle }: {
   return url ? <VideoActions id={record.id} url={url} expanded={expanded} onToggle={onToggle} /> : null;
 }
 
-/** Submits full server renders and shows the project's local and server exports. */
 export function ExportPanel({ projectId, spec, stageCount, onFlushSave, localExportSource }: ExportPanelProps) {
   const queryClient = useQueryClient();
+  const voucherInputId = useId();
   const [submitting, setSubmitting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [liveJob, setLiveJob] = useState<RenderJobOut | null>(null);
   const [expandedVideoId, setExpandedVideoId] = useState<string | null>(null);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
+  const [voucherCode, setVoucherCode] = useState("");
+  const [voucherFeedback, setVoucherFeedback] = useState<string | null>(null);
+  const [voucherError, setVoucherError] = useState<string | null>(null);
 
   const rendersQuery = useQuery<RenderJobOut[]>({
     queryKey: ["projects", projectId, "renders"],
@@ -92,6 +101,34 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave, localExp
     enabled: Boolean(projectId),
     retry: false,
   });
+
+  const creditsQuery = useQuery<CreditsSummaryOut>({
+    queryKey: ["credits"],
+    queryFn: ({ signal }) => creditsApi.getSummary(10, signal),
+    retry: false,
+  });
+
+  const redeemVoucherMutation = useMutation({
+    mutationFn: (code: string) => creditsApi.redeem(code),
+    onSuccess: (res) => {
+      setVoucherCode("");
+      setVoucherError(null);
+      setVoucherFeedback(`+${res.credits_granted} credits added (balance: ${res.balance}).`);
+      void queryClient.invalidateQueries({ queryKey: ["credits"] });
+    },
+    onError: (err) => {
+      setVoucherFeedback(null);
+      setVoucherError(err instanceof ApiError ? err.message : "Unable to redeem voucher.");
+    },
+  });
+
+  const estimatedQuote = useMemo(
+    () => calculateRenderCreditQuote(spec, localExportSource?.matchedPhotos.length ?? 0, false),
+    [spec, localExportSource?.matchedPhotos.length],
+  );
+  const estimatedCredits = estimatedQuote.credits;
+  const creditBalance = creditsQuery.data?.balance ?? null;
+  const insufficientCredits = creditBalance !== null && creditBalance < estimatedCredits;
 
   const localHistoryKey = ["projects", projectId, "local-renders"] as const;
   const localHistory = useQuery({
@@ -126,6 +163,7 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave, localExp
 
     const refreshList = () => {
       void queryClient.invalidateQueries({ queryKey: ["projects", projectId, "renders"] });
+      void queryClient.invalidateQueries({ queryKey: ["credits"] });
     };
 
     const startFallbackPoll = () => {
@@ -140,7 +178,7 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave, localExp
             refreshList();
           }
         } catch {
-          // Ignore transient poll error
+          return;
         }
       }, 1500);
     };
@@ -160,7 +198,7 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave, localExp
             refreshList();
           }
         } catch {
-          // Ignore malformed event
+          return;
         }
       });
 
@@ -205,6 +243,7 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave, localExp
       setActiveJobId(job.id);
       setLiveJob(job);
       await queryClient.invalidateQueries({ queryKey: ["projects", projectId, "renders"] });
+      await queryClient.invalidateQueries({ queryKey: ["credits"] });
     } catch (err) {
       setExportError(err instanceof ApiError ? err.message : "Failed to submit render job.");
     } finally {
@@ -219,6 +258,7 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave, localExp
       const cancelled = await rendersApi.cancel(jobId);
       setLiveJob(cancelled);
       await queryClient.invalidateQueries({ queryKey: ["projects", projectId, "renders"] });
+      await queryClient.invalidateQueries({ queryKey: ["credits"] });
     } catch (err) {
       setExportError(err instanceof ApiError ? err.message : "Unable to cancel render job.");
     } finally {
@@ -250,9 +290,91 @@ export function ExportPanel({ projectId, spec, stageCount, onFlushSave, localExp
 
   return (
     <div className="space-y-4 text-xs">
+      <div className="space-y-2 rounded-lg border border-border bg-canvas/80 p-3">
+        <div className="flex items-center justify-between gap-2">
+          <span className="inline-flex items-center gap-1.5 font-medium text-ink">
+            <Coins className="h-3.5 w-3.5 text-amber-accent" aria-hidden="true" />
+            <span>Server Render cost</span>
+          </span>
+          <span className="tabular-telemetry font-semibold text-sky-accent">
+            {`${estimatedCredits} credits`}
+          </span>
+        </div>
+
+        {creditBalance !== null ? (
+          <div className="flex items-center justify-between gap-2 text-[11px] text-ink-muted">
+            <span>Available balance</span>
+            <span
+              className={`tabular-telemetry font-medium ${
+                insufficientCredits ? "text-amber-accent" : "text-teal-accent"
+              }`}
+            >
+              {creditBalance} credits
+            </span>
+          </div>
+        ) : null}
+
+        {insufficientCredits ? (
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              const trimmed = voucherCode.trim();
+              if (trimmed.length < 4) {
+                setVoucherError("Enter a valid voucher code (at least 4 characters).");
+                return;
+              }
+              setVoucherError(null);
+              setVoucherFeedback(null);
+              redeemVoucherMutation.mutate(trimmed);
+            }}
+            className="space-y-2 border-t border-border pt-2"
+          >
+            <p className="text-[11px] text-amber-accent">
+              Need {estimatedCredits - creditBalance} more credits for Server Render. Redeem a
+              voucher or use free Local Export below.
+            </p>
+            <div className="flex items-center gap-1.5">
+              <label htmlFor={voucherInputId} className="sr-only">
+                Voucher code
+              </label>
+              <input
+                id={voucherInputId}
+                type="text"
+                name="inline_voucher_code"
+                autoComplete="off"
+                spellCheck={false}
+                value={voucherCode}
+                onChange={(event) => setVoucherCode(event.currentTarget.value)}
+                placeholder="TRIP-XXXX-XXXX-XXXX"
+                className="min-w-0 flex-1 rounded border border-border bg-surface px-2 py-1 font-mono text-[11px] uppercase text-ink placeholder:text-ink-muted/60 focus:border-sky-accent focus:outline-none"
+              />
+              <button
+                type="submit"
+                disabled={redeemVoucherMutation.isPending}
+                className="inline-flex shrink-0 items-center gap-1 rounded bg-sky-accent px-2.5 py-1 text-[11px] font-medium text-canvas hover:bg-sky-accent/90 disabled:opacity-60"
+              >
+                <Ticket className="h-3 w-3" aria-hidden="true" />
+                <span>{redeemVoucherMutation.isPending ? "..." : "Redeem"}</span>
+              </button>
+            </div>
+            {voucherError ? (
+              <p role="alert" className="text-[11px] text-coral-accent">
+                {voucherError}
+              </p>
+            ) : null}
+          </form>
+        ) : null}
+
+        {voucherFeedback ? (
+          <p role="status" className="text-[11px] text-teal-accent">
+            {voucherFeedback}
+          </p>
+        ) : null}
+      </div>
+
       <div className="grid grid-cols-1 gap-2">
         <VideoExportButton mode="Server" resolution={spec.resolution} busy={submitting}
-          disabled={submitting} onClick={() => void startRender()} />
+          disabled={submitting || insufficientCredits} onClick={() => void startRender()} />
         {localExportSource && (
           <LocalExportControls
             key={projectId}

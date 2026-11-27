@@ -19,6 +19,8 @@ from sqlalchemy.orm import Session
 from trip_api.config import Settings
 from trip_api.db import (
     AuditEvent,
+    CreditLedgerEntry,
+    CreditVoucherRedemption,
     EmailVerificationToken,
     OAuthConnection,
     OAuthState,
@@ -1193,6 +1195,8 @@ async def delete_account(
         if activity.silver_object_key:
             keys_to_delete.append(activity.silver_object_key)
 
+    db.execute(delete(CreditLedgerEntry).where(CreditLedgerEntry.user_id == user_id))
+    db.execute(delete(CreditVoucherRedemption).where(CreditVoucherRedemption.user_id == user_id))
     db.execute(delete(LibraryView).where(LibraryView.user_id == user_id))
     db.execute(delete(VaultActivityTile).where(VaultActivityTile.user_id == user_id))
     db.execute(delete(VaultActivity).where(VaultActivity.user_id == user_id))
