@@ -673,6 +673,7 @@ def test_render_sse_deleted_job_and_idempotency_integrity_race(
         row = db.scalar(select(RenderJob).where(RenderJob.idempotency_key == "race-render-key"))
         assert row is not None
         row.idempotency_hash = "different" * 7
+        row.status = "succeeded"
         db.commit()
     state["triggered"] = False
 

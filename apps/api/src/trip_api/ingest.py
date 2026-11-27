@@ -857,6 +857,7 @@ def process_pending_ingest_jobs(
                     activity_type=resolved_activity,
                     external_source_id=str(job.external_object_id),
                     strava_activity_id=job.external_object_id,
+                    max_stages_per_project=settings.max_stages_per_project,
                 )
                 mirror_stage_to_vault(
                     db,

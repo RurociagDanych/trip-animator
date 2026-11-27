@@ -1,5 +1,3 @@
-"""Project CRUD, sharing, audit log, and GPX/GeoJSON export endpoints."""
-
 from __future__ import annotations
 
 import json
@@ -12,11 +10,11 @@ from typing import Annotated, Literal, cast
 from xml.sax.saxutils import escape as xml_escape
 
 from fastapi import APIRouter, Body, HTTPException, Query, Response
-from sqlalchemy import select
+from sqlalchemy import func, select
 from trip_telemetry import query_stage_export_points, query_stage_kpis
 
-from trip_api.db import AuditEvent, Project, ProjectPhoto, RenderJob, Stage
-from trip_api.deps import CsrfAuth, CurrentAuth, DbSession, StoreDep, ensure_utc
+from trip_api.db import AuditEvent, Project, ProjectPhoto, RenderJob, Stage, User
+from trip_api.deps import AppSettings, CsrfAuth, CurrentAuth, DbSession, StoreDep, ensure_utc
 from trip_api.schemas import (
     AuditEventOut,
     ProjectCreateRequest,
@@ -80,8 +78,22 @@ def create_project(
     body: ProjectCreateRequest,
     auth: CsrfAuth,
     db: DbSession,
+    settings: AppSettings,
 ) -> ProjectOut:
     validate_stage_maps_against_project(body.settings, set())
+    if db.get_bind().dialect.name == "postgresql":
+        db.scalar(select(User.id).where(User.id == auth.user.id).with_for_update())
+    existing_projects = int(
+        db.scalar(
+            select(func.count()).select_from(Project).where(Project.owner_user_id == auth.user.id)
+        )
+        or 0
+    )
+    if existing_projects >= settings.max_projects_per_user:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Maximum of {settings.max_projects_per_user} projects per user reached",
+        )
     now = datetime.now(UTC)
     project = Project(
         owner_user_id=auth.user.id,

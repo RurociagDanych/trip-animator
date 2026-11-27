@@ -1,5 +1,3 @@
-"""Multi-format track upload ingestion (GPX/FIT/TCX) and project stage authoring endpoints."""
-
 from __future__ import annotations
 
 import asyncio
@@ -13,7 +11,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import polars as pl
 from fastapi import APIRouter, Body, File, Form, HTTPException, Request, Response, UploadFile
-from sqlalchemy import select
+from sqlalchemy import func, select
 from trip_telemetry import (
     ActivityType,
     GpxParseError,
@@ -112,7 +110,6 @@ logger = logging.getLogger(__name__)
 
 
 def _detect_track_format(data: bytes, filename: str | None) -> StageFormat | None:
-    """Detect `.fit`, `.tcx`, or `.gpx` strictly from magic bytes / root tags."""
     try:
         return cast(StageFormat, detect_track_format(data, filename=filename))
     except TrackParseError:
@@ -164,6 +161,15 @@ async def _handle_track_upload(
     activity_type: ActivityType | None,
 ) -> StageOut:
     project = get_owned_project(db, project_id, auth.user.id)
+    existing_stages = int(
+        db.scalar(select(func.count()).select_from(Stage).where(Stage.project_id == project.id))
+        or 0
+    )
+    if existing_stages >= settings.max_stages_per_project:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Maximum of {settings.max_stages_per_project} stages per project reached",
+        )
     check_rate_limit(
         db,
         bucket_key=f"gpx:{auth.user.id}",
@@ -236,6 +242,7 @@ async def _handle_track_upload(
             stage_name=resolved_name,
             day_index=day_index,
             activity_type=resolved_activity,
+            max_stages_per_project=settings.max_stages_per_project,
         )
         mirror_stage_to_vault(
             db,
@@ -485,13 +492,23 @@ def split_stage(
     body: StageSplitRequest,
     auth: CsrfAuth,
     db: DbSession,
+    settings: AppSettings,
     store: StoreDep,
 ) -> StageSplitOut:
-    """Physically split a stage into two consecutive stages by distance or elapsed time."""
     project = get_owned_project(db, project_id, auth.user.id)
     stage = db.scalar(select(Stage).where(Stage.id == stage_id, Stage.project_id == project.id))
     if stage is None:
         raise HTTPException(status_code=404, detail="Stage not found")
+
+    existing_stages = int(
+        db.scalar(select(func.count()).select_from(Stage).where(Stage.project_id == project.id))
+        or 0
+    )
+    if existing_stages >= settings.max_stages_per_project:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Maximum of {settings.max_stages_per_project} stages per project reached",
+        )
 
     try:
         prepared = prepare_split_stage_artifacts(
@@ -524,6 +541,16 @@ def split_stage(
         )
         if stage is None:
             raise HTTPException(status_code=404, detail="Stage not found")
+
+        authoritative_stages = int(
+            db.scalar(select(func.count()).select_from(Stage).where(Stage.project_id == project.id))
+            or 0
+        )
+        if authoritative_stages >= settings.max_stages_per_project:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Maximum of {settings.max_stages_per_project} stages per project reached",
+            )
 
         if (
             stage.silver_object_key != prepared.source_silver_key
@@ -618,8 +645,6 @@ def split_stage(
         db.add(part2_stage)
         db.flush()
 
-        # Both segments reference the unchanged canonical activity. Segment-level
-        # geometry and metrics must never be mirrored into the Activity Library.
         project.revision += 1
         project.updated_at = datetime.now(UTC)
         write_audit_event(
@@ -825,7 +850,6 @@ def auto_organize_stages(
     store: StoreDep,
     body: Annotated[StageAutoOrganizeRequest | None, Body()] = None,
 ) -> ProjectDetailOut:
-    """Sort stages chronologically, group day_index by local calendar date, and apply palette."""
     opts = body or StageAutoOrganizeRequest()
     project = get_owned_project(db, project_id, auth.user.id)
     stages = get_project_stages(db, project.id)

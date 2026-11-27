@@ -104,6 +104,13 @@ class Settings(BaseSettings):
     render_remote_preroll_frames: int = Field(default=15, ge=0, le=300)
     render_remote_dispatch_interval_s: float = Field(default=2.0, ge=0.0, le=300.0)
     render_remote_max_attempts: int = Field(default=3, ge=1, le=20)
+    render_remote_max_inflight: int = Field(default=3, ge=1, le=100)
+    max_projects_per_user: int = Field(default=25, ge=1, le=10_000)
+    max_stages_per_project: int = Field(default=30, ge=1, le=1_000)
+    max_active_renders_per_user: int = Field(default=1, ge=1, le=100)
+    server_render_max_duration_s: float = Field(default=120.0, ge=1.0, le=600.0)
+    server_render_max_fps_local: int = Field(default=30, ge=1, le=120)
+    server_render_max_fps_remote: int = Field(default=60, ge=1, le=120)
     rate_limit_retention_hours: int = Field(default=24, ge=1, le=8760)
     metrics_token: str = ""
 

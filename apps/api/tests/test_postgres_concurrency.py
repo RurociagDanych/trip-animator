@@ -545,7 +545,7 @@ def test_postgres_concurrent_render_credit_debit_prevents_overdraft(
     pg_app_factory: Any,
     sample_gpx: bytes,
 ) -> None:
-    app, _settings, _engine, sf, _store = pg_app_factory()
+    app, _settings, _engine, sf, _store = pg_app_factory(max_active_renders_per_user=10)
     _create_pg_user(sf, "credit-race@example.com", initial_credits=100)
     client, csrf = _login_pg_client(app, "credit-race@example.com")
     cookies = dict(client.cookies)
@@ -1392,3 +1392,41 @@ def test_postgres_enrichment_revalidates_after_stream_io_and_preserves_project_e
             for path in Path(store.root_dir).rglob("*")
             if path.is_file()
         } == {"bronze/edited.json", "silver/edited.parquet"}
+
+
+def test_postgres_shared_render_event_hub_fans_out_pg_notify(pg_app_factory: Any) -> None:
+    import asyncio
+    import json
+
+    from trip_api.render_events import RenderEventHub
+
+    _app, settings, _engine, sf, _store = pg_app_factory()
+
+    async def _exercise() -> None:
+        hub = RenderEventHub(settings.database_url)
+        job_id = uuid.uuid4()
+        other_job_id = uuid.uuid4()
+        try:
+            async with (
+                hub.subscribe(job_id) as q1,
+                hub.subscribe(job_id) as q2,
+                hub.subscribe(other_job_id) as q3,
+            ):
+                await asyncio.sleep(0.25)
+                payload = json.dumps(
+                    {"job_id": str(job_id), "status": "running", "progress_pct": 55}
+                )
+                with sf() as db:
+                    db.execute(text("SELECT pg_notify('render_job_events', :p)"), {"p": payload})
+                    db.commit()
+
+                msg1 = await asyncio.wait_for(q1.get(), timeout=3.0)
+                msg2 = await asyncio.wait_for(q2.get(), timeout=3.0)
+                assert msg1["job_id"] == str(job_id)
+                assert msg1["progress_pct"] == 55
+                assert msg2 == msg1
+                assert q3.empty()
+        finally:
+            await hub.close()
+
+    asyncio.run(_exercise())

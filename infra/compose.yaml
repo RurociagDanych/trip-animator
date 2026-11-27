@@ -39,6 +39,13 @@ x-app-env: &app-env
   MAP_TILE_ALLOWLIST: ${MAP_TILE_ALLOWLIST:-https://tiles.openfreemap.org,https://s3.amazonaws.com,https://server.arcgisonline.com}
   RENDER_RETENTION_DAYS: ${RENDER_RETENTION_DAYS:-7}
   RATE_LIMIT_RETENTION_HOURS: ${RATE_LIMIT_RETENTION_HOURS:-24}
+  MAX_PROJECTS_PER_USER: ${MAX_PROJECTS_PER_USER:-25}
+  MAX_STAGES_PER_PROJECT: ${MAX_STAGES_PER_PROJECT:-30}
+  MAX_ACTIVE_RENDERS_PER_USER: ${MAX_ACTIVE_RENDERS_PER_USER:-1}
+  SERVER_RENDER_MAX_DURATION_S: ${SERVER_RENDER_MAX_DURATION_S:-120.0}
+  SERVER_RENDER_MAX_FPS_LOCAL: ${SERVER_RENDER_MAX_FPS_LOCAL:-30}
+  SERVER_RENDER_MAX_FPS_REMOTE: ${SERVER_RENDER_MAX_FPS_REMOTE:-60}
+  RENDER_REMOTE_MAX_INFLIGHT: ${RENDER_REMOTE_MAX_INFLIGHT:-3}
   METRICS_TOKEN: ${METRICS_TOKEN:-}
 
 services:
@@ -154,6 +161,7 @@ services:
         required: false
     environment:
       <<: *app-env
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
       FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1,::1,172.30.0.10}
       OPERATIONAL_EVENTS_HOST: alloy
       GOLD_OUTPUT_DIR: /data/gold
@@ -203,7 +211,7 @@ services:
     environment:
       <<: *app-env
       OPERATIONAL_EVENTS_HOST: alloy
-    command: ["python", "-m", "trip_api.cli", "process-ingest-jobs", "--loop", "--poll-interval-s", "5"]
+    command: ["python", "-m", "trip_api.cli", "process-ingest-jobs", "--loop", "--poll-interval-s", "5", "--reap-interval-s", "3600"]
     volumes:
       - object_data:/data/objects
     depends_on:
