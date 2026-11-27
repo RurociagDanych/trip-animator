@@ -4,10 +4,12 @@ import base64
 import os
 import secrets
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from trip_object_store import ObjectStoreConfig
 
 _PLACEHOLDER_TOKEN_KEY = "A" * 43 + "="
 
@@ -295,3 +297,16 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def object_store_config(cfg: Settings) -> ObjectStoreConfig:
+    """Map the API settings onto the shared `ObjectStoreConfig`."""
+    return ObjectStoreConfig(
+        backend=cfg.object_store_backend,
+        local_dir=Path(cfg.local_object_store_dir),
+        s3_bucket=cfg.s3_bucket,
+        s3_endpoint_url=cfg.s3_endpoint_url,
+        s3_access_key_id=cfg.s3_access_key_id,
+        s3_secret_access_key=cfg.s3_secret_access_key,
+        s3_region=cfg.s3_region,
+    )

@@ -5,16 +5,15 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any, cast
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
-from trip_object_store import ObjectStore, ObjectStoreConfig
+from trip_object_store import ObjectStore
 from trip_object_store import build_object_store as build_store_from_config
 
-from trip_api.config import Settings
+from trip_api.config import Settings, object_store_config
 from trip_api.db import (
     EmailVerificationToken,
     OAuthState,
@@ -45,19 +44,6 @@ class ReapReport:
     dry_run: bool = False
     verification_tokens_deleted: int = 0
     password_reset_tokens_deleted: int = 0
-
-
-def object_store_config(cfg: Settings) -> ObjectStoreConfig:
-    """Map the API settings onto the shared `ObjectStoreConfig`."""
-    return ObjectStoreConfig(
-        backend=cfg.object_store_backend,
-        local_dir=Path(cfg.local_object_store_dir),
-        s3_bucket=cfg.s3_bucket,
-        s3_endpoint_url=cfg.s3_endpoint_url,
-        s3_access_key_id=cfg.s3_access_key_id,
-        s3_secret_access_key=cfg.s3_secret_access_key,
-        s3_region=cfg.s3_region,
-    )
 
 
 def build_object_store(cfg: Settings) -> ObjectStore:
