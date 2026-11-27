@@ -237,6 +237,7 @@ function darkLikeBasemap(): StyleSpecification {
       line("bridge_path_pedestrian"),
       { id: "building", type: "fill", source: "openmaptiles", "source-layer": "building" },
       symbol("highway_name_other"),
+      { id: "boundary_state", type: "line", source: "openmaptiles", "source-layer": "boundary" },
       symbol("label_city"),
     ],
   } as unknown as StyleSpecification;
@@ -261,13 +262,29 @@ describe("Marked Trails layer order", () => {
     }
   });
 
+  it("keeps every trail line below every basemap symbol that follows the last road, rail or building layer", () => {
+    const style = sanitizeMapStyle(darkLikeBasemap(), "dark", { markedTrailTypes: ALL_TYPES, pmtilesUrl: PMTILES_URL });
+    const ids = style.layers.map((l) => l.id);
+    const lastBuilding = ids.indexOf("building");
+    const symbolsAfter = ids.filter((id, i) => i > lastBuilding && !id.startsWith("trip-marked-trails") && style.layers[i]?.type === "symbol");
+    expect(symbolsAfter).toEqual(["highway_name_other", "label_city"]);
+    for (const type of ALL_TYPES) {
+      for (const id of symbolsAfter) {
+        expect(ids.indexOf(LINE_LAYER_IDS[type]), `${type} below ${id}`).toBeLessThan(ids.indexOf(id));
+      }
+    }
+  });
+
   it.each(PRESETS)("orders lines above basemap lines and fills, below basemap symbols, labels last for %s", (preset) => {
     for (const basemap of [basemapStyle(), darkLikeBasemap()]) {
       const style = sanitizeMapStyle(basemap, preset, { markedTrailTypes: ALL_TYPES, pmtilesUrl: PMTILES_URL });
       const isTrail = (l: { id: string }) => l.id.startsWith("trip-marked-trails");
       const lineIdx = style.layers.flatMap((l, i) => (isTrail(l) && l.type === "line" ? [i] : []));
       const labelIdx = style.layers.flatMap((l, i) => (isTrail(l) && l.type === "symbol" ? [i] : []));
-      const baseNonSymbol = style.layers.flatMap((l, i) => (!isTrail(l) && l.type !== "symbol" ? [i] : []));
+      const isBoundary = (l: object) => (l as { "source-layer"?: string })["source-layer"] === "boundary";
+      const baseNonSymbol = style.layers.flatMap((l, i) =>
+        !isTrail(l) && l.type !== "symbol" && !isBoundary(l) ? [i] : [],
+      );
       const baseSymbols = style.layers.flatMap((l, i) => (!isTrail(l) && l.type === "symbol" ? [i] : []));
       expect(lineIdx.length).toBe(3);
       expect(Math.min(...lineIdx)).toBeGreaterThan(Math.max(...baseNonSymbol));
@@ -300,12 +317,35 @@ describe("Marked Trails line legibility", () => {
     }
   });
 
-  it("offsets each type by a distinct small amount so shared ways keep every colour visible", () => {
-    const offsets = ALL_TYPES.map((type) => layerFor(type).paint["line-offset"] as number);
-    expect(new Set(offsets).size).toBe(3);
-    for (const offset of offsets) {
-      expect(Math.abs(offset)).toBeLessThanOrEqual(2);
+  it("draws hiking at the bottom, cycling in the middle and mtb on top without line offsets", () => {
+    const ids = sanitizeMapStyle(basemapStyle(), "liberty", { markedTrailTypes: ALL_TYPES, pmtilesUrl: PMTILES_URL }).layers.map((l) => l.id);
+    expect(ids.indexOf(LINE_LAYER_IDS.hiking)).toBeLessThan(ids.indexOf(LINE_LAYER_IDS.cycling));
+    expect(ids.indexOf(LINE_LAYER_IDS.cycling)).toBeLessThan(ids.indexOf(LINE_LAYER_IDS.mtb));
+    for (const type of ALL_TYPES) {
+      expect(layerFor(type).paint["line-offset"], `${type} offset`).toBeUndefined();
     }
+  });
+
+  it("makes hiking wider than cycling and cycling wider than mtb for every network at every zoom stop", () => {
+    const widths = (type: MarkedTrailType) => {
+      const [, , , ...pairs] = layerFor(type).paint["line-width"] as unknown[];
+      return pairs.map((item) => (Array.isArray(item) ? (item as unknown[]).filter((v) => typeof v === "number") : item));
+    };
+    const hiking = widths("hiking");
+    const cycling = widths("cycling");
+    const mtb = widths("mtb");
+    expect(hiking.length).toBe(6);
+    hiking.forEach((stop, i) => {
+      if (!Array.isArray(stop)) {
+        return;
+      }
+      (stop as number[]).forEach((hikingWidth, j) => {
+        const cyclingWidth = (cycling[i] as number[])[j] ?? 0;
+        const mtbWidth = (mtb[i] as number[])[j] ?? 0;
+        expect(hikingWidth, `hiking > cycling at stop ${i} value ${j}`).toBeGreaterThan(cyclingWidth);
+        expect(cyclingWidth, `cycling > mtb at stop ${i} value ${j}`).toBeGreaterThan(mtbWidth);
+      });
+    });
   });
 
   it("uses a light label colour with a dark halo on dark and satellite presets only", () => {
