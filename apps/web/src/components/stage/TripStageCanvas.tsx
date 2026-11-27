@@ -14,6 +14,7 @@ import {
   X,
 } from "lucide-react";
 import maplibregl, { type Map as MapLibreMap } from "maplibre-gl";
+import { Protocol } from "pmtiles";
 import {
   useEffect,
   useImperativeHandle,
@@ -52,13 +53,20 @@ import {
 } from "../../lib/geo/layout";
 import {
   TERRAIN_SOURCE_ID,
+  type MarkedTrailsStyleOverlay,
   buildDeckOverlayProps,
   buildElevationCurtainData,
   buildMapLibreInitOptions,
+  mapStyleKey,
+  resolveMarkedTrailsOverlay,
   buildTerrariumDemSourceSpec,
   resolveMapStyleUrl,
   sanitizeMapStyle,
 } from "../../lib/geo/map-config";
+import {
+  MARKED_TRAILS_PMTILES_PROTOCOL,
+  type MarkedTrailsBuild,
+} from "../../lib/geo/marked-trails";
 import {
   computeJourneyDurationS,
   progressRatioToTimeRatio,
@@ -129,6 +137,18 @@ export interface TripStageCanvasProps {
     movingSeconds: number;
     stageCount: number;
   };
+  markedTrailsBuild?: MarkedTrailsBuild | null;
+}
+
+let markedTrailsProtocolRegistered = false;
+
+/** Registers the `pmtiles://` source scheme once; MapLibre keeps protocols on the global class. */
+function ensureMarkedTrailsProtocol(): void {
+  if (markedTrailsProtocolRegistered) {
+    return;
+  }
+  maplibregl.addProtocol(MARKED_TRAILS_PMTILES_PROTOCOL, new Protocol().tile);
+  markedTrailsProtocolRegistered = true;
 }
 
 function TransitionGlyph({ icon }: { icon: TransitionIcon }) {
@@ -731,6 +751,7 @@ export function TripStageCanvas({
   onCancelPinMode,
   projectTitle,
   totalStats,
+  markedTrailsBuild = null,
 }: TripStageCanvasProps) {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
@@ -1375,6 +1396,24 @@ export function TripStageCanvas({
     viewportSize.height,
   ]);
 
+  const markedTrailTypesKey = (spec.marked_trail_types ?? []).join(",");
+  const markedTrailsPmtilesUrl = markedTrailsBuild?.pmtilesUrl ?? null;
+  // Memoized on strings: a new spec object with the same trail types must not reload the style.
+  const markedTrailsOverlay = useMemo<MarkedTrailsStyleOverlay>(
+    () =>
+      resolveMarkedTrailsOverlay(
+        markedTrailTypesKey
+          ? (markedTrailTypesKey.split(",") as MarkedTrailsStyleOverlay["markedTrailTypes"])
+          : [],
+        markedTrailsPmtilesUrl,
+      ),
+    [markedTrailTypesKey, markedTrailsPmtilesUrl],
+  );
+  const markedTrailsOverlayRef = useRef(markedTrailsOverlay);
+  useEffect(() => {
+    markedTrailsOverlayRef.current = markedTrailsOverlay;
+  }, [markedTrailsOverlay]);
+
   const is3dActive = is3dCameraActive(spec);
 
   useLayoutEffect(() => {
@@ -1393,8 +1432,12 @@ export function TripStageCanvas({
         deferStyle: true,
       }),
     );
+    if (markedTrailsOverlayRef.current.pmtilesUrl) {
+      ensureMarkedTrailsProtocol();
+    }
     map.setStyle(resolveMapStyleUrl(spec.map_style), {
-      transformStyle: (_prev, next) => sanitizeMapStyle(next, spec.map_style),
+      transformStyle: (_prev, next) =>
+        sanitizeMapStyle(next, spec.map_style, markedTrailsOverlayRef.current),
     });
     const overlay = new MapboxOverlay({
       interleaved: true,
@@ -1403,7 +1446,7 @@ export function TripStageCanvas({
     map.addControl(overlay as unknown as maplibregl.IControl);
     mapRef.current = map;
     overlayRef.current = overlay;
-    loadedStyleRef.current = spec.map_style;
+    loadedStyleRef.current = mapStyleKey(spec.map_style, markedTrailsOverlayRef.current);
     fitAppliedBoundsRef.current = null;
 
     const handleManualMove = () => {
@@ -1473,15 +1516,20 @@ export function TripStageCanvas({
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || loadedStyleRef.current === spec.map_style) {
+    const styleKey = mapStyleKey(spec.map_style, markedTrailsOverlay);
+    if (!map || loadedStyleRef.current === styleKey) {
       return;
     }
-    loadedStyleRef.current = spec.map_style;
+    loadedStyleRef.current = styleKey;
+    if (markedTrailsOverlay.pmtilesUrl) {
+      ensureMarkedTrailsProtocol();
+    }
     map.setStyle(resolveMapStyleUrl(spec.map_style), {
       diff: false,
-      transformStyle: (_prev, next) => sanitizeMapStyle(next, spec.map_style),
+      transformStyle: (_prev, next) =>
+        sanitizeMapStyle(next, spec.map_style, markedTrailsOverlay),
     });
-  }, [spec.map_style]);
+  }, [spec.map_style, markedTrailsOverlay]);
 
   useEffect(() => {
     const map = mapRef.current;

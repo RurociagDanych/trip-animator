@@ -1,11 +1,17 @@
+import { fileURLToPath } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
+import { serveMarkedTrailsStore } from "./vite-plugins/marked-trails-store.ts";
 
 const apiProxyTarget = process.env.VITE_API_PROXY_TARGET || "http://127.0.0.1:8000";
 
+const DEFAULT_MARKED_TRAILS_STORE = fileURLToPath(
+  new URL("../../.tmp/marked-trails/store", import.meta.url),
+);
+
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), serveMarkedTrailsStore(DEFAULT_MARKED_TRAILS_STORE)],
   build: {
     rolldownOptions: {
       output: {

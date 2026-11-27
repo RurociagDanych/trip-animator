@@ -2,7 +2,7 @@
 
 > Purpose: Describe the system containers, the Bronze/Silver/Gold telemetry pipeline, the render pipeline and the configuration contract.
 > Audience: contributors, reviewers
-> Last reviewed: 2026-11-24
+> Last reviewed: 2026-11-27
 
 Sections:
 
@@ -180,6 +180,7 @@ All services derive runtime configuration from the repository root `.env` contra
 - **Security**: `SESSION_SECRET` (min 32 bytes), `TOKEN_ENCRYPTION_KEY` (base64 32-byte AES-256-GCM key), `ALLOWED_ORIGINS`
 - **Object Storage**: `OBJECT_STORE_BACKEND` (`local` or `s3`), `LOCAL_OBJECT_STORE_DIR`, `S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET`, `S3_REGION`
 - **Strava OAuth2**: `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`, `STRAVA_REDIRECT_URI`
+- **Marked Trails**: `MARKED_TRAILS_BASE_URL`, the root-relative path or https URL of the trail store that holds `current.json`; empty turns the overlay off
 - **Rendering & Egress Allowlist**: `MAP_TILE_ALLOWLIST`, `RENDER_BASE_URL`, `WORKER_CONCURRENCY`, `WORKER_GPU_ENABLED`, `WORKER_CPU_RENDERER`
 - **Airflow Orchestration**: `AIRFLOW_PORT`, `AIRFLOW_DB`, `AIRFLOW_FERNET_KEY`, `AIRFLOW_API_SECRET_KEY`, `AIRFLOW_JWT_SECRET`, `AIRFLOW_SIMPLE_AUTH_USERS` (`username:role` entries, default `admin:admin`), `GOLD_OUTPUT_DIR`
 

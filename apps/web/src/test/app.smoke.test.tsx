@@ -23,11 +23,14 @@ function mockJsonResponse(body: unknown, status = 200, headers?: Record<string, 
   });
 }
 
-function mockStandardApiFetch() {
+function mockStandardApiFetch(publicConfigExtra: Record<string, unknown> = {}) {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
     if (url.includes("/api/v1/public-config")) {
-      return mockJsonResponse({ dev_auth_enabled: true, strava_configured: true });
+      return mockJsonResponse({ dev_auth_enabled: true, strava_configured: true, ...publicConfigExtra });
+    }
+    if (url.endsWith("/tiles/marked-trails/current.json")) {
+      return mockJsonResponse({ detail: "not published" }, 404);
     }
     if (url.includes("/api/v1/auth/me")) {
       return mockJsonResponse({
@@ -181,6 +184,44 @@ describe("Trip Animator web routes and config builders", () => {
     expect(screen.getByLabelText("Map preview and timeline dock")).toBeInTheDocument();
     expect(screen.getByLabelText("Animation and render inspector")).toBeInTheDocument();
     expect(screen.getByTestId("editor-map-frame")).toBeInTheDocument();
+  });
+
+  it("hides the Marked Trails toggle when the server configures no Marked Trails store", async () => {
+    mockStandardApiFetch();
+    const router = createAppRouter(
+      createMemoryHistory({ initialEntries: ["/projects/fictional-route-2040"] }),
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<App router={router} queryClient={queryClient} />);
+
+    expect(await screen.findByRole("combobox", { name: "Map style" })).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "Hiking Marked Trails" })).not.toBeInTheDocument();
+  });
+
+  it("toggles hiking Marked Trails in the route inspector and saves them to the project", async () => {
+    const fetchSpy = mockStandardApiFetch({ marked_trails_base_url: "/tiles/marked-trails" });
+    const router = createAppRouter(
+      createMemoryHistory({ initialEntries: ["/projects/fictional-route-2040"] }),
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<App router={router} queryClient={queryClient} />);
+
+    const toggle = await screen.findByRole("checkbox", { name: "Hiking Marked Trails" });
+    expect(toggle).not.toBeChecked();
+    fireEvent.click(toggle);
+
+    await waitFor(
+      () => {
+        const saved = fetchSpy.mock.calls.some(
+          ([, init]) =>
+            init?.method === "PATCH" &&
+            typeof init.body === "string" &&
+            init.body.includes('"marked_trail_types":["hiking"]'),
+        );
+        expect(saved).toBe(true);
+      },
+      { timeout: 4000 },
+    );
   });
 
   it("renders the deterministic render harness route", async () => {

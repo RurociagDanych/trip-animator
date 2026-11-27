@@ -130,6 +130,7 @@ Copy [`.env.example`](.env.example) to `.env` (`make bootstrap` does this when `
 | Security and encryption | `SESSION_SECRET`, `TOKEN_ENCRYPTION_KEY`, `ALLOWED_ORIGINS` |
 | Object storage (`local` or `s3`) | `OBJECT_STORE_BACKEND`, `LOCAL_OBJECT_STORE_DIR`, `S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET`, `S3_REGION` |
 | Strava OAuth2 | `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`, `STRAVA_REDIRECT_URI` |
+| Marked Trails overlay | `MARKED_TRAILS_BASE_URL` (empty turns the overlay off) |
 | Google OIDC Sign-In | `GOOGLE_AUTH_CLIENT_ID`, `GOOGLE_AUTH_CLIENT_SECRET`, `GOOGLE_AUTH_REDIRECT_URI` |
 | Map tiles and render worker | `MAP_TILE_ALLOWLIST`, `RENDER_BASE_URL`, `WORKER_CONCURRENCY`, `WORKER_GPU_ENABLED`, `WORKER_CPU_RENDERER`, `RENDER_BACKEND`, `RENDER_AWS_*`, `RENDER_CALLBACK_*`, `RENDER_REMOTE_*` |
 | Apache Airflow 3 | `AIRFLOW_PORT`, `AIRFLOW_DB`, `AIRFLOW_FERNET_KEY`, `AIRFLOW_API_SECRET_KEY`, `AIRFLOW_JWT_SECRET`, `AIRFLOW_SIMPLE_AUTH_USERS`, `GOLD_OUTPUT_DIR` |
@@ -144,7 +145,8 @@ Production settings (`APP_ENV=production`, `METRICS_TOKEN`, secret overrides) ar
 make help           # list all Makefile targets
 make lint           # ruff check apps packages + eslint
 make typecheck      # mypy --strict + tsc --noEmit
-make test           # pytest (telemetry, object-store, api, worker) + vitest
+make test           # pytest (telemetry, object-store, api, worker, marked-trails; no docker marker) + vitest
+make test-marked-trails-image # Docker test: build and run the Marked Trails builder image
 make dbt-parse      # uv run dbt parse --project-dir dbt --profiles-dir dbt
 make compose-config # docker compose -f infra/compose.yaml --env-file .env.example config --quiet
 
@@ -153,6 +155,7 @@ uv run pytest apps/api/tests -v
 uv run pytest apps/worker/tests -v
 uv run pytest packages/telemetry/tests -v
 uv run pytest packages/object-store/tests -v
+uv run pytest -m "not docker" packages/marked-trails/tests -v
 uv run ruff check apps/api
 uv run mypy apps/api
 pnpm --filter @trip-animator/web build

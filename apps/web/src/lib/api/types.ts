@@ -65,6 +65,8 @@ export type MapStylePreset =
   | "topo-relief"
   | "satellite-hybrid"
   | "editorial-mono";
+// Only hiking is styled in this build; cycling and MTB join with their styling.
+export type MarkedTrailType = "hiking";
 export type TimelineMode = "distance" | "recorded-time";
 export type CameraMode = "fit-track" | "follow-marker";
 export type CameraPreset = "flat" | "dynamic-3d" | "drone-orbit";
@@ -136,6 +138,7 @@ export interface PublicConfigOut {
   google_auth_enabled?: boolean;
   strava_configured: boolean;
   google_photos_configured?: boolean;
+  marked_trails_base_url?: string;
 }
 
 export interface RegisterRequest {
@@ -258,6 +261,7 @@ export interface RenderSpecV2 {
   resolution: ResolutionPreset;
   fps: RenderFps;
   map_style: MapStylePreset;
+  marked_trail_types: MarkedTrailType[];
   duration_seconds: number;
   timeline_mode: TimelineMode;
   camera_mode: CameraMode;
@@ -1025,6 +1029,7 @@ export function createDefaultRenderSpecV2(): RenderSpecV2 {
     resolution: "1920x1080",
     fps: 30,
     map_style: "liberty",
+    marked_trail_types: [],
     duration_seconds: 20.0,
     timeline_mode: "distance",
     camera_mode: "follow-marker",
@@ -1073,6 +1078,8 @@ export function createDefaultRenderSpecV2(): RenderSpecV2 {
 
 const VALID_FPS_SET = new Set<RenderFps>(RENDER_FPS_VALUES);
 const VALID_RESOLUTION_SET = new Set<ResolutionPreset>(RESOLUTION_PRESETS);
+const VALID_MARKED_TRAIL_TYPE_SET = new Set<MarkedTrailType>(["hiking"]);
+
 const VALID_MAP_STYLE_SET = new Set<MapStylePreset>([
   "liberty",
   "positron",
@@ -1193,6 +1200,19 @@ export function findInvalidRenderSpecValues(
   return invalid;
 }
 
+function normalizeMarkedTrailTypes(raw: unknown): MarkedTrailType[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const unique = new Set<MarkedTrailType>();
+  for (const value of raw) {
+    if (typeof value === "string" && VALID_MARKED_TRAIL_TYPE_SET.has(value as MarkedTrailType)) {
+      unique.add(value as MarkedTrailType);
+    }
+  }
+  return [...unique];
+}
+
 export function normalizeRenderSpecV2(raw?: Partial<RenderSpecV2> | null): RenderSpecV2 {
   const defaults = createDefaultRenderSpecV2();
   if (!raw || typeof raw !== "object") {
@@ -1290,6 +1310,7 @@ export function normalizeRenderSpecV2(raw?: Partial<RenderSpecV2> | null): Rende
     resolution,
     fps,
     map_style: mapStyle,
+    marked_trail_types: normalizeMarkedTrailTypes(raw.marked_trail_types),
     duration_seconds: durationSeconds,
     camera_preset: cameraPreset,
     camera_bearing_deg: cameraBearing,

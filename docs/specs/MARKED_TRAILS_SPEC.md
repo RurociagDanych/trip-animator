@@ -12,7 +12,7 @@
 - Out of Scope
 - Further Notes
 
-Status: Draft. Decisions are recorded in [ADR 0001](../decisions/0001-own-marked-trail-tiles.md). Nothing is implemented. Build cost was measured once with a prototype on the production VPS (Poland and Germany only); see Further Notes.
+Status: Draft. Decisions are recorded in [ADR 0001](../decisions/0001-own-marked-trail-tiles.md). Delivered so far: the hiking tracer bullet (local build with `make marked-trails-local`, `marked_trail_types` in render settings, the hiking layer in the editor through the local store). The hiking toggle is shown only when `MARKED_TRAILS_BASE_URL` is set; it is empty by default, so production shows no toggle until the render ticket lands. Until then, export and shared playback ignore the setting. Everything else in this spec is not implemented. Build cost was measured once with a prototype on the production VPS (Poland and Germany only); see Further Notes.
 
 ## Problem Statement
 
@@ -64,7 +64,7 @@ Trip Animator builds its own vector tileset of Marked Trails in Europe from Open
 - Source: OpenStreetMap route relations tagged `route=hiking`, `route=foot`, `route=bicycle` or `route=mtb`, from Geofabrik extracts.
 - Kept attributes: the trail type (hiking, cycling, MTB, with foot folded into hiking), `network` level (international, national, regional, local), `colour`, `ref` and `name`.
 - Full `osmc:symbol` rendering is out of scope; `colour` with a per-type default is enough.
-- Tiles cover z5 to z13; MapLibre overzooms above z13. Local networks start at z9. Names and refs are present from z13.
+- Tiles cover z5 to z13; MapLibre overzooms above z13. Local networks start at z9, and so do relations without a recognised `network` tag. Names and refs are present from z13.
 - One PMTiles file per build, with separate trail types so the client can filter them.
 
 ### Build pipeline
@@ -78,8 +78,8 @@ Trip Animator builds its own vector tileset of Marked Trails in Europe from Open
 
 ### Publication
 
-- Store layout: one immutable prefix per build, named by build date, holding the PMTiles file, plus a `current.json` pointer at the root.
-- `current.json` holds at least the current and previous build ids, the OpenStreetMap data date, and the checksum, size and trail count of the current build.
+- Store layout: one immutable prefix per build, named by build date with an optional numeric suffix for a later build on the same day (`2026-11-27-2`), holding the PMTiles file, plus a `current.json` pointer at the root.
+- `current.json` holds at least the current and previous build ids, the OpenStreetMap data date, and the checksum, size and trail count (`marked_trail_count`, the number of route relations in the build) of the current build. Readers ignore unknown keys, and fields added later have defaults.
 - Order of a build: delete the previous build, build and validate the new one under its own prefix, then overwrite `current.json`. The store never holds more than two builds.
 - Validation before switching: the file is at most 1 GB, and its size and trail count are within 20% of the current build. The first build is checked only against the size limit. If the full Europe build exceeds 1 GB with z13 and the local-network zoom cut, the limit rises to 2 GB.
 - A failed build or failed validation leaves `current.json` unchanged and fails the DAG run.

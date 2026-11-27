@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 CURRENT_ETL_VERSION = 2
 
@@ -29,6 +29,8 @@ MapStylePreset = Literal[
     "satellite-hybrid",
     "editorial-mono",
 ]
+# Only hiking is styled in this build; cycling and MTB join this Literal with their styling.
+MarkedTrailType = Literal["hiking"]
 TimelineMode = Literal["distance", "recorded-time"]
 CameraMode = Literal["fit-track", "follow-marker"]
 CameraPreset = Literal["flat", "dynamic-3d", "drone-orbit"]
@@ -737,6 +739,7 @@ class RenderSpecV2(BaseModel):
     resolution: ResolutionPreset = "1920x1080"
     fps: Literal[15, 30, 60] = 30
     map_style: MapStylePreset = "liberty"
+    marked_trail_types: list[MarkedTrailType] = Field(default_factory=list)
     duration_seconds: float = Field(default=20.0, ge=3.0, le=180.0)
     timeline_mode: TimelineMode = "distance"
     camera_mode: CameraMode = "follow-marker"
@@ -783,6 +786,15 @@ class RenderSpecV2(BaseModel):
     climb_callout_duration_s: float = Field(default=4.0, ge=0.0, le=30.0)
     photo_card_style: PhotoCardStyle = "corner"
     telemetry_smoothing: int = Field(default=5, ge=1, le=31)
+
+    @field_validator("marked_trail_types")
+    @classmethod
+    def _reject_duplicate_marked_trail_types(
+        cls, value: list[MarkedTrailType]
+    ) -> list[MarkedTrailType]:
+        if len(set(value)) != len(value):
+            raise ValueError("marked_trail_types must not repeat a Marked Trail type")
+        return value
 
     @model_validator(mode="after")
     def validate_color_values(self) -> "RenderSpecV2":
