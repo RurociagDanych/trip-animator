@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from trip_object_store import ObjectStoreConfig
 
 
 class WorkerSettings(BaseSettings):
@@ -81,6 +82,18 @@ class WorkerSettings(BaseSettings):
         if self.database_url.startswith("postgresql+psycopg://"):
             return "postgresql://" + self.database_url.removeprefix("postgresql+psycopg://")
         return self.database_url
+
+    def object_store_config(self) -> ObjectStoreConfig:
+        """Map the worker object store settings onto the shared `ObjectStoreConfig`."""
+        return ObjectStoreConfig(
+            backend=self.object_store_backend,
+            local_dir=Path(self.local_object_store_dir),
+            s3_bucket=self.s3_bucket,
+            s3_endpoint_url=self.s3_endpoint_url,
+            s3_access_key_id=self.s3_access_key_id,
+            s3_secret_access_key=self.s3_secret_access_key,
+            s3_region=self.s3_region,
+        )
 
     @property
     def allowed_external_hosts(self) -> frozenset[str]:
