@@ -184,6 +184,7 @@ A VPS deployment exists.
 - [docs/OPERATIONS.md](docs/OPERATIONS.md): local setup, Strava OAuth setup, Compose deployment, observability and Airflow.
 - [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md): trust boundaries, threats and control matrix.
 - [docs/DEPLOY_VPS.md](docs/DEPLOY_VPS.md): manual VPS deployment through GitHub Actions.
+- [docs/decisions/0002-shared-object-store.md](docs/decisions/0002-shared-object-store.md): one shared object store package for the API and the worker.
 - [docs/specs/ACTIVITY_LIBRARY_SPEC.md](docs/specs/ACTIVITY_LIBRARY_SPEC.md): Activity Library specification.
 - [docs/specs/CINEMATIC_PHOTOS_SPEC.md](docs/specs/CINEMATIC_PHOTOS_SPEC.md): cinematic photo-stop specification.
 - [docs/specs/OBSERVABILITY_SPEC.md](docs/specs/OBSERVABILITY_SPEC.md): self-hosted observability specification.

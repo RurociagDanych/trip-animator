@@ -13,7 +13,7 @@ Repository guide for AI coding agents working on Trip Animator: a GPX/TCX and St
   - `apps/api`: FastAPI + SQLAlchemy 2.0 + Alembic + PostgreSQL + S3/Local `ObjectStore`. Handles auth/sessions (Argon2id + HMAC-SHA256 + CSRF), Strava OAuth2 PKCE + webhooks (`IngestJob`), project/stage/photo uploads, Gold DuckDB sync (`gold_sync.py`) and render job SSE (`LISTEN render_job_events`).
   - `apps/worker`: Playwright Chromium + FFmpeg MP4 render worker (`FOR UPDATE SKIP LOCKED` lease queue, chunked rendering, anti-SSRF IP-pinned HTTP proxy).
 - `dbt/`: DuckDB Gold marts (`mart_stage_summary`, `fct_climbs`, `fct_splits`, `fct_dwell_stops`, `mart_stage_geo_context`, `mart_spatial_coverage_h3`, `mart_trip_daily_summary`, `mart_user_career_summary`) and data tests.
-- `docs/`: architecture, operations, threat model, deployment docs, specifications (`docs/specs/`) and demo assets (`docs/demo/`).
+- `docs/`: architecture, operations, threat model, deployment docs, decision records (`docs/decisions/`), specifications (`docs/specs/`) and demo assets (`docs/demo/`).
 - `infra/`: Docker Compose (`compose.yaml`), Caddy, nginx, Dockerfiles and optional AWS Terraform (`infra/terraform/`).
 - `packages/`: `packages/telemetry`, the Polars + DuckDB + GeoParquet Bronze-to-Silver pipeline, DEM elevation backfill, climb/split/dwell analytics and photo alignment.
 - `scripts/`: local bootstrap and publication secret gates with their tests.
