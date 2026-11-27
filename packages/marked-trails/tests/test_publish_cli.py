@@ -43,7 +43,9 @@ def fake_build(region: str, work_dir: Path) -> BuildArtifact:
     work_dir.mkdir(parents=True, exist_ok=True)
     pmtiles = work_dir / "fake.pmtiles"
     pmtiles.write_bytes(BUILD_PAYLOAD)
-    return BuildArtifact(pmtiles_path=pmtiles, osm_data_date="2026-11-26T20:21:03Z")
+    return BuildArtifact(
+        pmtiles_path=pmtiles, osm_data_date="2026-11-26T20:21:03Z", marked_trail_count=3
+    )
 
 
 def publish(tmp_path: Path, build_date: str, build_step=fake_build) -> int:
@@ -81,6 +83,44 @@ def test_publish_writes_build_prefix_and_pointer_with_layout(tmp_path: Path) -> 
     assert pointer["size_bytes"] == len(BUILD_PAYLOAD)
     assert pointer["sha256"] == hashlib.sha256(BUILD_PAYLOAD).hexdigest()
     assert pointer["osm_data_date"] == "2026-11-26T20:21:03Z"
+    assert pointer["marked_trail_count"] == 3
+
+
+def test_work_copy_is_deleted_after_a_successful_publish(tmp_path: Path) -> None:
+    assert publish(tmp_path, "2026-11-27") == 0
+
+    assert not (tmp_path / "work" / "fake.pmtiles").exists()
+    assert (tmp_path / "store/builds/2026-11-27/marked-trails.pmtiles").is_file()
+
+
+def test_publish_reads_a_pointer_with_unknown_keys_and_without_newer_fields(
+    tmp_path: Path,
+) -> None:
+    store_dir = tmp_path / "store"
+    store_dir.mkdir()
+    (store_dir / "current.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "region": "europe/andorra",
+                "current_build_id": "2026-11-20",
+                "previous_build_id": None,
+                "pmtiles_key": "builds/2026-11-20/marked-trails.pmtiles",
+                "size_bytes": 10,
+                "sha256": "00",
+                "osm_data_date": None,
+                "built_at": "2026-11-20T10:00:00+00:00",
+                "field_from_a_later_version": {"nested": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert publish(tmp_path, "2026-11-27") == 0
+
+    pointer = read_pointer(store_dir)
+    assert pointer["current_build_id"] == "2026-11-27"
+    assert pointer["previous_build_id"] == "2026-11-20"
 
 
 def test_second_publish_on_same_day_keeps_previous_build_and_pointer(tmp_path: Path) -> None:

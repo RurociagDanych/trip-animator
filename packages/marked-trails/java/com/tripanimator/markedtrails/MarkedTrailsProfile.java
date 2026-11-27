@@ -8,6 +8,7 @@ import com.onthegomap.planetiler.reader.SourceFeature;
 import com.onthegomap.planetiler.reader.osm.OsmElement;
 import com.onthegomap.planetiler.reader.osm.OsmRelationInfo;
 import java.util.List;
+import java.util.concurrent.atomic.LongAdder;
 
 /**
  * Emits Marked Trail lines from OpenStreetMap route relations.
@@ -34,16 +35,20 @@ public class MarkedTrailsProfile implements Profile {
     int minZoom
   ) implements OsmRelationInfo {}
 
+  // Planetiler preprocesses relations on several threads.
+  private final LongAdder markedTrailRelationCount = new LongAdder();
+
   @Override
   public List<OsmRelationInfo> preprocessOsmRelation(OsmElement.Relation relation) {
     if (!relation.hasTag("type", "route")) {
       return null;
     }
-    String type = trailType(relation.getString("route", ""));
+    String type = markedTrailType(relation.getString("route", ""));
     if (type == null) {
       return null;
     }
     String network = networkLevel(relation.getString("network", ""));
+    markedTrailRelationCount.increment();
     return List.of(new MarkedTrailRelation(
       relation.id(),
       type,
@@ -51,7 +56,7 @@ public class MarkedTrailsProfile implements Profile {
       nullIfEmpty(relation.getString("colour", "")),
       nullIfEmpty(relation.getString("ref", "")),
       nullIfEmpty(relation.getString("name", "")),
-      "local".equals(network) ? LOCAL_MIN_ZOOM : MIN_ZOOM
+      network == null || "local".equals(network) ? LOCAL_MIN_ZOOM : MIN_ZOOM
     ));
   }
 
@@ -61,14 +66,14 @@ public class MarkedTrailsProfile implements Profile {
       return;
     }
     for (var member : sourceFeature.relationInfo(MarkedTrailRelation.class, true)) {
-      MarkedTrailRelation trail = member.relation();
+      MarkedTrailRelation markedTrail = member.relation();
       features.line(LAYER)
-        .setAttr("type", trail.type())
-        .setAttr("network", trail.network())
-        .setAttr("colour", trail.colour())
-        .setAttrWithMinzoom("ref", trail.ref(), LABEL_MIN_ZOOM)
-        .setAttrWithMinzoom("name", trail.name(), LABEL_MIN_ZOOM)
-        .setZoomRange(trail.minZoom(), MAX_ZOOM)
+        .setAttr("type", markedTrail.type())
+        .setAttr("network", markedTrail.network())
+        .setAttr("colour", markedTrail.colour())
+        .setAttrWithMinzoom("ref", markedTrail.ref(), LABEL_MIN_ZOOM)
+        .setAttrWithMinzoom("name", markedTrail.name(), LABEL_MIN_ZOOM)
+        .setZoomRange(markedTrail.minZoom(), MAX_ZOOM)
         .setMinPixelSize(0);
     }
   }
@@ -77,6 +82,11 @@ public class MarkedTrailsProfile implements Profile {
   public List<VectorTile.Feature> postProcessLayerFeatures(String layer, int zoom,
     List<VectorTile.Feature> items) {
     return FeatureMerge.mergeLineStrings(items, 0.5, 0.1, 4);
+  }
+
+  /** Number of route relations accepted as Marked Trails so far. */
+  public long markedTrailRelationCount() {
+    return markedTrailRelationCount.sum();
   }
 
   @Override
@@ -105,7 +115,7 @@ public class MarkedTrailsProfile implements Profile {
   }
 
   /** Folds `foot` into `hiking`, the only trail type the app reads in this build. */
-  static String trailType(String route) {
+  static String markedTrailType(String route) {
     return switch (route) {
       case "hiking", "foot" -> "hiking";
       case "bicycle" -> "cycling";
@@ -114,14 +124,18 @@ public class MarkedTrailsProfile implements Profile {
     };
   }
 
-  /** Maps the OSM network prefix to a level; hiking networks (iwn, nwn, rwn, lwn) share the level. */
+  /**
+   * Maps the OSM network prefix to a level; hiking networks (iwn, nwn, rwn, lwn) share the level.
+   * A missing or unknown network returns null and is drawn from the local zoom, so untagged
+   * routes do not crowd the wide views.
+   */
   static String networkLevel(String network) {
     return switch (network) {
       case "icn", "iwn" -> "international";
       case "ncn", "nwn" -> "national";
       case "rcn", "rwn" -> "regional";
       case "lcn", "lwn" -> "local";
-      default -> "";
+      default -> null;
     };
   }
 }

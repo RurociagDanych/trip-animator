@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -19,13 +19,12 @@ BUILD_CACHE_CONTROL = "public, max-age=31536000, immutable"
 POINTER_CACHE_CONTROL = "no-cache, no-store, must-revalidate"
 
 
-class BuildAlreadyPublishedError(RuntimeError):
-    """Raised when a build prefix would be overwritten; builds are immutable."""
-
-
 @dataclass(frozen=True, slots=True)
 class CurrentPointer:
-    """Contents of `current.json`: the active build and the previous one for rollback."""
+    """Contents of `current.json`: the active build and the previous one for rollback.
+
+    Fields added after schema version 1 have defaults, so older pointers still load.
+    """
 
     region: str
     current_build_id: str
@@ -35,14 +34,19 @@ class CurrentPointer:
     sha256: str
     osm_data_date: str | None
     built_at: str
+    marked_trail_count: int | None = None
 
 
 def build_pmtiles_key(build_id: str) -> str:
+    """Return the store key of the PMTiles file of `build_id`."""
     return f"builds/{build_id}/{PMTILES_NAME}"
 
 
 def read_pointer(store: ObjectStore) -> CurrentPointer | None:
-    """Return the published pointer, or None when nothing has been published yet."""
+    """Return the published pointer, or None when nothing has been published yet.
+
+    Unknown keys are ignored, so a pointer written by a newer version still loads.
+    """
     if not store.exists(POINTER_KEY):
         return None
     data = json.loads(store.get_bytes(POINTER_KEY))
@@ -50,8 +54,8 @@ def read_pointer(store: ObjectStore) -> CurrentPointer | None:
         raise ValueError(
             f"Unsupported {POINTER_KEY} schema_version: {data.get('schema_version')!r}"
         )
-    data.pop("schema_version")
-    return CurrentPointer(**data)
+    known = {field.name for field in fields(CurrentPointer)}
+    return CurrentPointer(**{key: value for key, value in data.items() if key in known})
 
 
 def allocate_build_id(store: ObjectStore, build_date: date) -> str:
@@ -75,14 +79,11 @@ def publish_build(
     """Publish a built PMTiles file under a new prefix, then switch `current.json` to it.
 
     The pointer is written last, so a failure before it leaves the previously published
-    build active. Raises `BuildAlreadyPublishedError` if the prefix exists.
+    build active.
     """
     previous = read_pointer(store)
     build_id = allocate_build_id(store, build_date)
     key = build_pmtiles_key(build_id)
-    if store.exists(key):
-        raise BuildAlreadyPublishedError(key)
-
     store.put_file(
         key,
         artifact.pmtiles_path,
@@ -98,6 +99,7 @@ def publish_build(
         sha256=_sha256_file(artifact.pmtiles_path),
         osm_data_date=artifact.osm_data_date,
         built_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        marked_trail_count=artifact.marked_trail_count,
     )
     payload = {"schema_version": POINTER_SCHEMA_VERSION, **asdict(pointer)}
     store.put_bytes(
