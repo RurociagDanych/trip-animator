@@ -80,6 +80,18 @@ The target builds the builder image (osmium, Planetiler and the `trip-marked-tra
 
 `make dev-web` serves the store at `/tiles/marked-trails/`, and `make dev-api` sets `MARKED_TRAILS_BASE_URL` to that path unless the environment sets it; `.env.example` leaves it empty. With `MARKED_TRAILS_BASE_URL` empty, the editor shows no Marked Trails toggle. `make test-marked-trails-image` runs the Docker test of the builder image on a committed fixture; `make test` skips it.
 
+### Marked Trails publication policy and rollback
+
+`build-publish` follows one order: check that `current.json` is valid (its `current_build_id` is a build id, `pmtiles_key` is the key of that build, and the object exists), delete every build except the current one, build the new PMTiles file, validate the local file, upload it under `builds/<build id>/`, then overwrite `current.json`. An invalid `current.json` stops the run before anything is deleted. Build ids are never reused: a later build on the same date gets the next numeric suffix above every id in the store and in the pointer. The store never holds more than two builds, the current one and the previous one kept for rollback. Validation requires a non-empty file with at least one Marked Trail relation, at most `--size-budget-bytes` (environment `MARKED_TRAILS_SIZE_BUDGET_BYTES`, default 1073741824, 1 GiB; empty means the default, zero or below is rejected) and, when a current build exists, its size and `marked_trail_count` to be within 20% of the current build. The first build is checked only against the budget. After the upload the stored size must equal the local size. A failed build, failed validation or failed upload leaves `current.json` unchanged and the command exits with status 1.
+
+The previous build is deleted when a new build starts, so after a failed run `previous_build_id` in `current.json` can name a build that no longer exists. Rollback is only possible while the previous build is in the store, which is right after a successful run.
+
+To roll back, check that `builds/<previous_build_id>/marked-trails.pmtiles` exists in the store, then edit `current.json`:
+
+1. Set `current_build_id` to the old `previous_build_id`, and set `pmtiles_key` to `builds/<that build id>/marked-trails.pmtiles` (it must match `current_build_id`, or the next run refuses to prune), `size_bytes`, `sha256`, `osm_data_date` and `marked_trail_count` to that build's values.
+2. Set `previous_build_id` to the build being rolled back from, or to `null`. Never change or remove `last_build_id`: it is the highest build id ever allocated, and the next build id is allocated above it. Do not set `previous_build_id` to `null` on a pointer that has no `last_build_id` (written by an older version); first set `last_build_id` to the highest build id that existed.
+3. Write the file back with `Cache-Control: no-cache`. The next `build-publish` run then deletes every build except the new current one.
+
 ## Strava OAuth2 setup
 
 1. In your [Strava API Application settings](https://www.strava.com/settings/api), set **Authorization Callback Domain** to:
