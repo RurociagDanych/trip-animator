@@ -144,7 +144,8 @@ Production settings (`APP_ENV=production`, `METRICS_TOKEN`, secret overrides) ar
 make help           # list all Makefile targets
 make lint           # ruff check apps packages + eslint
 make typecheck      # mypy --strict + tsc --noEmit
-make test           # pytest (telemetry, object-store, api, worker) + vitest
+make test           # pytest (telemetry, object-store, api, worker, marked-trails; no docker marker) + vitest
+make test-marked-trails-image # Docker test: build and run the Marked Trails builder image
 make dbt-parse      # uv run dbt parse --project-dir dbt --profiles-dir dbt
 make compose-config # docker compose -f infra/compose.yaml --env-file .env.example config --quiet
 
@@ -153,6 +154,7 @@ uv run pytest apps/api/tests -v
 uv run pytest apps/worker/tests -v
 uv run pytest packages/telemetry/tests -v
 uv run pytest packages/object-store/tests -v
+uv run pytest -m "not docker" packages/marked-trails/tests -v
 uv run ruff check apps/api
 uv run mypy apps/api
 pnpm --filter @trip-animator/web build

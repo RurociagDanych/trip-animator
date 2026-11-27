@@ -1,4 +1,4 @@
-.PHONY: help setup bootstrap lint format format-check typecheck test test-pg dbt-parse dbt-build reap-dry-run check dev-api dev-web compose-config airflow-up airflow-down test-airflow lint-airflow remote-render-push remote-render-deploy marked-trails-image marked-trails-local
+.PHONY: help setup bootstrap lint format format-check typecheck test test-pg dbt-parse dbt-build reap-dry-run check dev-api dev-web compose-config airflow-up airflow-down test-airflow lint-airflow remote-render-push remote-render-deploy marked-trails-image marked-trails-local test-marked-trails-image
 
 MARKED_TRAILS_REGION ?= europe/andorra
 MARKED_TRAILS_DIR ?= $(CURDIR)/.tmp/marked-trails
@@ -10,7 +10,7 @@ REMOTE_RENDER_IMAGE_TAG ?= $(shell git rev-parse --short HEAD 2>/dev/null || ech
 REMOTE_RENDER_TF_ARGS ?=
 
 help:
-	@printf '%-22s %s\n' \
+	@printf '%-26s %s\n' \
 		help 'List the available targets' \
 		setup 'Install Python and JavaScript dependencies' \
 		bootstrap 'Create .env, install dependencies, start PostgreSQL, run migrations' \
@@ -34,7 +34,8 @@ help:
 		remote-render-push 'Build and push the AWS Lambda render image to ECR' \
 		remote-render-deploy 'Bootstrap ECR, push Lambda image, and apply standalone AWS Terraform' \
 		marked-trails-image 'Build the Marked Trails builder image (osmium, Planetiler, CLI)' \
-		marked-trails-local 'Build and publish a small Marked Trails region to .tmp/marked-trails'
+		marked-trails-local 'Build and publish a small Marked Trails region to .tmp/marked-trails' \
+		test-marked-trails-image 'Run the Docker test that builds and runs the Marked Trails builder image'
 
 setup:
 	uv sync --all-packages
@@ -58,7 +59,7 @@ typecheck:
 	pnpm typecheck:web
 
 test:
-	uv run pytest --strict-markers -ra
+	uv run pytest --strict-markers -ra -m "not docker"
 	pnpm test:web
 
 test-pg:
@@ -138,6 +139,9 @@ marked-trails-local: marked-trails-image
 		-v "$(MARKED_TRAILS_DIR)/work:/work" \
 		$(MARKED_TRAILS_BUILDER_IMAGE) \
 		build-publish --region $(MARKED_TRAILS_REGION) --store-dir /store --work-dir /work
+
+test-marked-trails-image:
+	MARKED_TRAILS_BUILDER_IMAGE=$(MARKED_TRAILS_BUILDER_IMAGE) uv run pytest --strict-markers -ra -m docker packages/marked-trails/tests
 
 remote-render-push:
 	@set -eu; \

@@ -22,7 +22,7 @@ Repository guide for AI coding agents working on Trip Animator: a GPX/TCX and St
 
 - Install: `make setup` (`uv sync --all-packages` and `pnpm install`), or `make bootstrap` for `.env`, dependencies, local PostgreSQL and migrations.
 - Lint: `make lint`, `make format-check`, `make typecheck`, `make lint-airflow`.
-- Test: `make test` (pytest + vitest), `make test-pg` (PostgreSQL tests), `make test-airflow`, `make dbt-build`.
+- Test: `make test` (pytest without the `docker` marker + vitest), `make test-pg` (PostgreSQL tests), `make test-marked-trails-image` (Docker test of the Marked Trails builder image), `make test-airflow`, `make dbt-build`.
 - Run: `make dev-api` (FastAPI on :8000) and `make dev-web` (Vite on :5173); full stack with `docker compose -f infra/compose.yaml --env-file .env up -d --build`.
 - Marked Trails: `make marked-trails-local` builds and publishes a small Geofabrik region (default `europe/andorra`) into `.tmp/marked-trails/store`, which Vite serves at `/tiles/marked-trails/`; `make marked-trails-image` builds only the builder image.
 - Deploy dry run: `make compose-config`; `terraform fmt -check -recursive infra/terraform`, then `terraform init -backend=false && terraform validate` in `infra/terraform/environments/dev` and `prod`.

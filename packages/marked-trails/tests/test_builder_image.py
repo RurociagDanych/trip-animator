@@ -23,14 +23,13 @@ def _docker_available() -> bool:
     return True
 
 
-pytestmark = [
-    pytest.mark.docker,
-    pytest.mark.skipif(not _docker_available(), reason="Docker is not available"),
-]
+pytestmark = pytest.mark.docker
 
 
 @pytest.fixture(scope="module")
 def builder_image() -> str:
+    if not _docker_available():
+        pytest.skip("Docker is not available")
     subprocess.run(
         [
             "docker",
