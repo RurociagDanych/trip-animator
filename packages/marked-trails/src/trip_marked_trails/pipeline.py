@@ -27,6 +27,7 @@ DOWNLOAD_TIMEOUT_SECONDS = 3600.0
 TOOL_TIMEOUT_SECONDS = 6 * 3600.0
 PMTILES_NAME = "marked-trails.pmtiles"
 MARKED_TRAIL_COUNT_NAME = "marked-trail-count.txt"
+PLANETILER_TMP_NAME = "tmp"
 # Must match MarkedTrailsProfile, which narrows zooms per feature.
 TILE_MIN_ZOOM = 5
 TILE_MAX_ZOOM = 13
@@ -244,7 +245,7 @@ def build_tiles(
     """Run Planetiler on a filtered file and delete it; the PMTiles file lands in `work_dir`."""
     pmtiles = work_dir / PMTILES_NAME
     count_file = work_dir / MARKED_TRAIL_COUNT_NAME
-    tmp_dir = work_dir / "tmp"
+    tmp_dir = work_dir / PLANETILER_TMP_NAME
     tmp_dir.mkdir(parents=True, exist_ok=True)
     runner.run(
         [

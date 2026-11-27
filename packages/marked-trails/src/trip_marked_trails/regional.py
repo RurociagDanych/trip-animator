@@ -10,6 +10,7 @@ import httpx
 
 from trip_marked_trails.pipeline import (
     GEOFABRIK_BASE_URL,
+    PLANETILER_TMP_NAME,
     BuildArtifact,
     BuildToolError,
     BuildTools,
@@ -95,7 +96,8 @@ def run_regional_build(
     extract deleted before the next child starts, so the disk holds one extract plus the small
     filtered files. The filtered files are then merged and built with one Planetiler run. A
     failure in any child raises and leaves nothing to publish. A leaf region is built directly.
-    Scratch files live under `work_dir` and are removed on success and on failure; only the
+    Scratch files and Planetiler's temporary files live under `work_dir` and are removed on
+    success and on failure, and stale ones of a killed run are removed at the start; only the
     PMTiles file of the result stays. `osm_data_date` is the oldest child's date, so the pointer
     never claims data fresher than its stalest part.
     """
@@ -109,6 +111,7 @@ def run_regional_build(
     download = downloader or download_extract
     scratch = work_dir / SCRATCH_DIR_NAME
     shutil.rmtree(scratch, ignore_errors=True)
+    shutil.rmtree(work_dir / PLANETILER_TMP_NAME, ignore_errors=True)
     scratch.mkdir(parents=True)
     filtered_files: list[Path] = []
     data_dates: list[str] = []
@@ -141,3 +144,4 @@ def run_regional_build(
         return build_tiles(merged, work_dir, min(data_dates) if data_dates else None, tools, runner)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+        shutil.rmtree(work_dir / PLANETILER_TMP_NAME, ignore_errors=True)

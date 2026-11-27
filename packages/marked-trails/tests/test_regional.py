@@ -96,11 +96,13 @@ class Recorder:
         *,
         fail_filter_for: str | None = None,
         fail_download_for: str | None = None,
+        fail_planetiler: bool = False,
     ) -> None:
         self.work_dir = work_dir
         self.events: list[tuple[str, ...]] = []
         self.fail_filter_for = fail_filter_for
         self.fail_download_for = fail_download_for
+        self.fail_planetiler = fail_planetiler
         self.extracts: list[Path] = []
         self.dates = {
             "europe/andorra": "2026-11-26T21:21:01Z",
@@ -146,6 +148,8 @@ class Recorder:
             options = dict(a[2:].split("=", 1) for a in args if a.startswith("--") and "=" in a)
             merged = Path(options["osm_path"])
             assert merged.is_file()
+            if self.fail_planetiler:
+                raise BuildToolError("java exited with status 1")
             Path(options["output"]).write_bytes(b"PMTiles-fake")
             Path(options["marked_trail_count_path"]).write_text("9\n")
             self.events.append(("planetiler", merged.read_bytes().decode()))
@@ -244,6 +248,15 @@ def test_failing_download_stops_the_build(tmp_path: Path) -> None:
 
     assert ("merge",) not in recorder.events
     assert all(event[0] != "planetiler" for event in recorder.events)
+    assert list((tmp_path / "work").iterdir()) == []
+
+
+def test_failing_planetiler_leaves_no_scratch_files(tmp_path: Path) -> None:
+    recorder = Recorder(tmp_path / "work", fail_planetiler=True)
+
+    with pytest.raises(BuildToolError, match="java"):
+        regional_build(tmp_path, recorder)
+
     assert list((tmp_path / "work").iterdir()) == []
 
 
