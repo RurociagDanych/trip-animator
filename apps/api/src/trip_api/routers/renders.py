@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
+from trip_object_store import ObjectStore
 from trip_telemetry import calculate_render_credit_quote
 from trip_telemetry.schemas import RenderSpecV2
 
@@ -51,7 +52,6 @@ from trip_api.services import (
     stream_video_response,
     write_audit_event,
 )
-from trip_api.storage import ObjectStore
 
 router = APIRouter(tags=["renders"])
 logger = logging.getLogger(__name__)

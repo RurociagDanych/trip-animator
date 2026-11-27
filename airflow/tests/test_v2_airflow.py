@@ -359,7 +359,7 @@ def test_materialize_gold_marts_seeds_existing_duckdb_from_s3_in_ephemeral_conta
     tmp_path: Path,
 ) -> None:
     from botocore.exceptions import ClientError
-    from trip_api.storage import S3ObjectStore
+    from trip_object_store import S3ObjectStore
 
     user = airflow_harness.create_user("s3seed@example.com")
     proj = airflow_harness.create_project(user.id, "S3 Seed Tour")
@@ -417,15 +417,8 @@ def test_materialize_gold_marts_seeds_existing_duckdb_from_s3_in_ephemeral_conta
                 )
             return {"Body": _FakeBody(self.objects[Key])}
 
-    s3_store = S3ObjectStore(
-        endpoint_url="http://localhost:9000",
-        access_key_id="test",
-        secret_access_key="test",
-        bucket="trip-test",
-        region="us-east-1",
-    )
     fake_client = _FakeClient()
-    s3_store.client = fake_client
+    s3_store = S3ObjectStore(bucket="trip-test", client=fake_client)
 
     ephemeral_gold_1 = tmp_path / "ephemeral_run_1"
     res1 = materialize_gold_marts(s3_store, gold_dir=ephemeral_gold_1)

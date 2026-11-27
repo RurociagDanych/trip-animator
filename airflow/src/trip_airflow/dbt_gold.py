@@ -10,16 +10,15 @@ import shutil
 import tempfile
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import duckdb
-from trip_api.storage import ObjectStore, S3ObjectStore
+from trip_object_store import ObjectStore, S3ObjectStore
 from trip_telemetry import run_dbt_gold_build
 
 from trip_airflow.runtime import resolve_gold_output_dir
-from trip_airflow.storage_helpers import list_object_keys, list_objects_with_mtime
+from trip_airflow.storage_helpers import list_object_keys
 
 SILVER_PARQUET_KEY_RE = re.compile(r"^silver/(?P<project_id>[^/]+)/(?P<stage_id>[^/]+)\.parquet$")
 _PARITY_TOLERANCE = 1e-6
@@ -54,31 +53,18 @@ def _list_silver_parquet_refs(store: ObjectStore) -> list[SilverParquetRef]:
 
 def _list_silver_object_tokens(store: ObjectStore) -> dict[str, str]:
     """Return `{key: version_token}` using S3 ETags when available, else mtime ISO."""
-    if isinstance(store, S3ObjectStore):
-        tokens: dict[str, str] = {}
-        paginator = store.client.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=store.bucket, Prefix="silver/"):
-            for obj in page.get("Contents") or ():
-                key = str(obj["Key"])
-                if key.endswith("_events.parquet"):
-                    continue
-                if SILVER_PARQUET_KEY_RE.match(key) is None:
-                    continue
-                etag = str(obj.get("ETag") or "")
-                size = str(obj.get("Size") or "")
-                lm = obj.get("LastModified")
-                lm_str = lm.isoformat() if isinstance(lm, datetime) else ""
-                tokens[key] = f"{etag}:{size}:{lm_str}"
-        return dict(sorted(tokens.items()))
-
-    mtimes = list_objects_with_mtime(store, prefix="silver/")
-    tokens = {}
-    for key, mtime in mtimes.items():
+    tokens: dict[str, str] = {}
+    for info in store.iter_objects("silver/"):
+        key = info.key
         if key.endswith("_events.parquet"):
             continue
         if SILVER_PARQUET_KEY_RE.match(key) is None:
             continue
-        tokens[key] = mtime.isoformat() if isinstance(mtime, datetime) else "unknown"
+        lm_str = info.last_modified.isoformat() if info.last_modified is not None else ""
+        if info.etag is not None:
+            tokens[key] = f"{info.etag}:{info.size}:{lm_str}"
+        else:
+            tokens[key] = lm_str or "unknown"
     return dict(sorted(tokens.items()))
 
 

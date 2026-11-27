@@ -21,7 +21,7 @@ from trip_api.security import (
     validate_outbound_url,
 )
 from trip_api.services import ingest_parsed_track, write_audit_event
-from trip_api.storage import ObjectStore
+from trip_object_store import ObjectStore
 from trip_telemetry import infer_activity_type_from_strava, parse_strava_streams
 
 logger = logging.getLogger(__name__)

@@ -5,14 +5,15 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any, cast
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
+from trip_object_store import ObjectStore
+from trip_object_store import build_object_store as build_store_from_config
 
-from trip_api.config import Settings
+from trip_api.config import Settings, object_store_config
 from trip_api.db import (
     EmailVerificationToken,
     OAuthState,
@@ -25,7 +26,6 @@ from trip_api.db import (
     create_session_factory,
 )
 from trip_api.deps import ensure_utc
-from trip_api.storage import LocalObjectStore, ObjectStore, S3ObjectStore
 
 logger = logging.getLogger(__name__)
 
@@ -48,24 +48,13 @@ class ReapReport:
 
 def build_object_store(cfg: Settings) -> ObjectStore:
     """Construct the configured ObjectStore backend."""
-    if cfg.object_store_backend == "s3":
-        return S3ObjectStore(
-            endpoint_url=cfg.s3_endpoint_url,
-            access_key_id=cfg.s3_access_key_id,
-            secret_access_key=cfg.s3_secret_access_key,
-            bucket=cfg.s3_bucket,
-            region=cfg.s3_region,
-        )
-    return LocalObjectStore(Path(cfg.local_object_store_dir))
+    return build_store_from_config(object_store_config(cfg))
 
 
 def _delete_blob_safe(store: ObjectStore, key: str) -> tuple[bool, bool]:
-    if isinstance(store, LocalObjectStore):
-        try:
-            store.resolve_existing_path(key)
-        except FileNotFoundError:
-            return True, False
     try:
+        if not store.exists(key):
+            return True, False
         store.delete(key)
         return True, True
     except FileNotFoundError:

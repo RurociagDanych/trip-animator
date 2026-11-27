@@ -1953,6 +1953,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "python-multipart" },
     { name = "sqlalchemy" },
+    { name = "trip-object-store" },
     { name = "trip-telemetry" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -1971,6 +1972,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.7.0" },
     { name = "python-multipart", specifier = ">=0.0.20" },
     { name = "sqlalchemy", specifier = ">=2.0.37" },
+    { name = "trip-object-store", editable = "packages/object-store" },
     { name = "trip-telemetry", editable = "packages/telemetry" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
 ]
@@ -2022,6 +2024,7 @@ dependencies = [
     { name = "playwright" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic-settings" },
+    { name = "trip-object-store" },
     { name = "trip-telemetry" },
 ]
 
@@ -2033,6 +2036,7 @@ requires-dist = [
     { name = "playwright", specifier = ">=1.50.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2.0" },
     { name = "pydantic-settings", specifier = ">=2.7.0" },
+    { name = "trip-object-store", editable = "packages/object-store" },
     { name = "trip-telemetry", editable = "packages/telemetry" },
 ]
 

@@ -26,7 +26,7 @@ from trip_api.services import (
     stage_chart_cache_key,
     stage_events_cache_key,
 )
-from trip_api.storage import LocalObjectStore, ObjectStream, S3ObjectStore
+from trip_object_store import LocalObjectStore, ObjectStream, S3ObjectStore
 
 if TYPE_CHECKING:
     from conftest import HarnessFactory
@@ -327,7 +327,7 @@ def test_heatmap_and_career_year_activity_filters_and_mutated_activity_type(
 
 
 class _SpyObjectStore:
-    """ObjectStore wrapper tracking `get_bytes` reads without using LocalObjectStore fast-path."""
+    """ObjectStore wrapper tracking object reads without using LocalObjectStore fast-path."""
 
     def __init__(self, backing: LocalObjectStore) -> None:
         self._backing = backing
@@ -341,6 +341,10 @@ class _SpyObjectStore:
     def get_bytes(self, key: str) -> bytes:
         self.read_keys.append(key)
         return self._backing.get_bytes(key)
+
+    def get_file(self, key: str, dest: Path) -> None:
+        self.read_keys.append(key)
+        self._backing.get_file(key, dest)
 
     def open_stream(
         self,

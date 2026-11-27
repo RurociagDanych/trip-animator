@@ -67,20 +67,17 @@ from trip_worker.ssrf import (
     is_render_request_allowed_async,
     resolve_and_validate_external_target_async,
 )
-from trip_worker.storage import LocalObjectStore, ObjectStore, S3ObjectStore, build_object_store
 
 __all__ = [
     "ClaimedChunk",
     "ClaimedJob",
     "EncoderError",
     "FrameSpan",
-    "LocalObjectStore",
     "ManifestClimb",
     "ManifestColorSegment",
     "ManifestPhoto",
     "ManifestPoint",
     "ManifestStage",
-    "ObjectStore",
     "PhotoRecord",
     "PinnedSsrfAsyncTransport",
     "ProbeResult",
@@ -89,7 +86,6 @@ __all__ = [
     "RenderManifest",
     "RenderRequestDecision",
     "ResolvedExternalTarget",
-    "S3ObjectStore",
     "SsrfBlockedConnectError",
     "SsrfPinnedNetworkBackend",
     "StageRecord",
@@ -105,7 +101,6 @@ __all__ = [
     "build_ffmpeg_thumbnail_args",
     "build_ffprobe_args",
     "build_manifest_init_script",
-    "build_object_store",
     "build_pinned_external_http_client",
     "build_render_manifest",
     "chunk_manifest_key",

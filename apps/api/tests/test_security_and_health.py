@@ -6,9 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import boto3
 import pytest
-from botocore.exceptions import ClientError
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -38,23 +36,9 @@ from trip_api.security import (
     verify_csrf_token,
     verify_password,
 )
-from trip_api.storage import InvalidRangeError, LocalObjectStore, S3ObjectStore, parse_byte_range
 
 if TYPE_CHECKING:
     from conftest import HarnessFactory
-
-
-def _make_s3_client_error(
-    code: str,
-    *,
-    message: str = "Error",
-    http_status: int | None = None,
-    op: str = "GetObject",
-) -> ClientError:
-    payload: dict[str, Any] = {"Error": {"Code": code, "Message": message}}
-    if http_status is not None:
-        payload["ResponseMetadata"] = {"HTTPStatusCode": http_status}
-    return ClientError(payload, op)  # type: ignore[arg-type]
 
 
 def test_production_guard_blocks_dev_auth_and_default_secrets() -> None:
@@ -234,87 +218,6 @@ def test_ssrf_blocks_unlisted_and_private_ips() -> None:
         )
         == "https://tiles.openfreemap.org/styles/liberty"
     )
-
-
-def test_local_object_store_blocks_path_traversal(tmp_path: Path) -> None:
-    store = LocalObjectStore(tmp_path)
-    store.put_bytes("bronze/test.gpx", b"<gpx/>")
-    assert store.get_bytes("bronze/test.gpx") == b"<gpx/>"
-    with pytest.raises(ValueError):
-        store.put_bytes("../escape.txt", b"bad")
-    store.delete("bronze/never-existed.gpx")
-
-
-def test_parse_byte_range_and_local_store_streaming_edges(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    assert parse_byte_range("items=0-5", 100) is None
-    assert parse_byte_range("bytes=0-1,2-3", 100) is None
-    assert parse_byte_range("bytes=abc-def", 100) is None
-    assert parse_byte_range("bytes=-abc", 100) is None
-    assert parse_byte_range("bytes=0-xyz", 100) is None
-
-    assert parse_byte_range("bytes=0-9", 26) == (0, 9)
-    assert parse_byte_range("bytes=10-", 26) == (10, 25)
-    assert parse_byte_range("bytes=-5", 26) == (21, 25)
-    assert parse_byte_range("bytes=-999", 26) == (0, 25)
-    assert parse_byte_range("bytes=20-999", 26) == (20, 25)
-
-    for bad_range, size in (
-        ("bytes=-0", 26),
-        ("bytes=999-", 26),
-        ("bytes=10-5", 26),
-        ("bytes=0-0", 0),
-        ("bytes=-5", 0),
-    ):
-        with pytest.raises(InvalidRangeError):
-            parse_byte_range(bad_range, size)
-
-    store = LocalObjectStore(tmp_path)
-    store.put_bytes("empty.bin", b"")
-    empty_stream = store.open_stream("empty.bin")
-    assert empty_stream.total_size == 0
-    assert empty_stream.content_length == 0
-    assert list(empty_stream.chunks) == []
-
-    store.put_bytes("sample.bin", b"0123456789ABCDEF")
-    suffix_stream = store.open_stream("sample.bin", range_header="bytes=-5", chunk_size=2)
-    assert suffix_stream.is_partial is True
-    assert suffix_stream.start == 11
-    assert suffix_stream.end == 15
-    assert b"".join(suffix_stream.chunks) == b"BCDEF"
-
-    open_end_stream = store.open_stream("sample.bin", range_header="bytes=10-", chunk_size=4)
-    assert open_end_stream.start == 10
-    assert open_end_stream.end == 15
-    assert b"".join(open_end_stream.chunks) == b"ABCDEF"
-
-    orig_open = Path.open
-
-    class _ExplodingHandle:
-        def __init__(self, real_fh: Any) -> None:
-            self._real = real_fh
-            self.closed = False
-
-        def seek(self, _offset: int) -> int:
-            raise OSError("seek failed")
-
-        def close(self) -> None:
-            self.closed = True
-            self._real.close()
-
-    handles: list[_ExplodingHandle] = []
-
-    def _patched_open(self: Path, *args: Any, **kwargs: Any) -> Any:
-        fh = _ExplodingHandle(orig_open(self, *args, **kwargs))
-        handles.append(fh)
-        return fh
-
-    monkeypatch.setattr(Path, "open", _patched_open)
-    with pytest.raises(OSError, match="seek failed"):
-        store.open_stream("sample.bin", range_header="bytes=5-10")
-    assert handles and handles[0].closed is True
 
 
 def test_health_and_security_headers() -> None:
@@ -735,145 +638,6 @@ def test_production_s3_allows_iam_role_and_rejects_partial_keys() -> None:
             s3_access_key_id="",
             s3_secret_access_key="only-secret-no-key",
         )
-
-
-def test_s3_object_store_normalizes_empty_creds_and_maps_not_found(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client_calls: list[dict[str, Any]] = []
-    put_calls: list[dict[str, Any]] = []
-
-    class FakeBody:
-        def __init__(self, payload: bytes) -> None:
-            self._payload = payload
-            self.closed = False
-            self.read_called = False
-
-        def read(self) -> bytes:
-            self.read_called = True
-            return self._payload
-
-        def iter_chunks(self, chunk_size: int = 65536) -> Any:
-            for offset in range(0, len(self._payload), chunk_size):
-                yield self._payload[offset : offset + chunk_size]
-
-        def close(self) -> None:
-            self.closed = True
-
-    class FakeS3Client:
-        def __init__(self) -> None:
-            self.last_body: FakeBody | None = None
-
-        def put_object(self, **kwargs: Any) -> None:
-            put_calls.append(kwargs)
-
-        def get_object(self, **kwargs: Any) -> dict[str, Any]:
-            key = str(kwargs["Key"])
-            if key == "missing-nokey.mp4":
-                raise _make_s3_client_error("NoSuchKey", message="Not found.")
-            if key == "missing-404.mp4":
-                raise _make_s3_client_error("404", http_status=404)
-            if key == "boom-500.mp4":
-                raise _make_s3_client_error("InternalError", http_status=500)
-            if key == "invalid-range.mp4" and "Range" in kwargs:
-                raise _make_s3_client_error("InvalidRange", http_status=416)
-
-            data = b"0123456789ABCDEF"
-            if "Range" in kwargs:
-                rng = str(kwargs["Range"]).removeprefix("bytes=")
-                start_s, end_s = rng.split("-", 1)
-                sliced = data[int(start_s) : int(end_s) + 1]
-                self.last_body = FakeBody(sliced)
-                return {"Body": self.last_body, "ContentLength": len(sliced)}
-            self.last_body = FakeBody(data)
-            return {"Body": self.last_body, "ContentLength": len(data)}
-
-        def head_object(self, **kwargs: Any) -> dict[str, Any]:
-            key = str(kwargs["Key"])
-            if key == "missing-nokey.mp4":
-                raise _make_s3_client_error("404", message="Not Found", op="HeadObject")
-            if key == "boom-head.mp4":
-                raise _make_s3_client_error("InternalError", http_status=500, op="HeadObject")
-            return {"ContentLength": 16}
-
-        def delete_object(self, **kwargs: Any) -> None:
-            key = str(kwargs["Key"])
-            if key == "missing-nokey.mp4":
-                raise _make_s3_client_error("NoSuchKey", op="DeleteObject")
-            if key == "boom-delete.mp4":
-                raise _make_s3_client_error("InternalError", http_status=500, op="DeleteObject")
-
-    fake_client = FakeS3Client()
-
-    def fake_boto3_client(service_name: str, **kwargs: Any) -> FakeS3Client:
-        assert service_name == "s3"
-        client_calls.append(kwargs)
-        return fake_client
-
-    monkeypatch.setattr(boto3, "client", fake_boto3_client)
-
-    store = S3ObjectStore(
-        endpoint_url="",
-        access_key_id="",
-        secret_access_key="  ",
-        bucket="trip-prod",
-        region="",
-    )
-    assert client_calls == [
-        {
-            "endpoint_url": None,
-            "aws_access_key_id": None,
-            "aws_secret_access_key": None,
-            "region_name": None,
-        }
-    ]
-
-    store.put_bytes("video.mp4", b"0123456789ABCDEF", content_type="video/mp4")
-    assert put_calls[0]["Bucket"] == "trip-prod"
-    assert put_calls[0]["Key"] == "video.mp4"
-    assert store.get_bytes("video.mp4") == b"0123456789ABCDEF"
-    assert fake_client.last_body is not None and fake_client.last_body.closed is True
-
-    with pytest.raises(FileNotFoundError):
-        store.get_bytes("missing-nokey.mp4")
-    with pytest.raises(FileNotFoundError):
-        store.get_bytes("missing-404.mp4")
-    with pytest.raises(ClientError):
-        store.get_bytes("boom-500.mp4")
-
-    with pytest.raises(FileNotFoundError):
-        store.open_stream("missing-nokey.mp4")
-    with pytest.raises(FileNotFoundError):
-        store.open_stream("missing-nokey.mp4", range_header="bytes=0-3")
-    with pytest.raises(ClientError):
-        store.open_stream("boom-head.mp4", range_header="bytes=0-3")
-    with pytest.raises(InvalidRangeError):
-        store.open_stream("invalid-range.mp4", range_header="bytes=0-3")
-
-    full_stream = store.open_stream("video.mp4", chunk_size=5)
-    assert full_stream.total_size == 16
-    assert full_stream.content_length == 16
-    assert full_stream.is_partial is False
-    chunks = list(full_stream.chunks)
-    assert chunks == [b"01234", b"56789", b"ABCDE", b"F"]
-    assert fake_client.last_body is not None
-    assert fake_client.last_body.read_called is False
-    assert fake_client.last_body.closed is True
-
-    part_stream = store.open_stream("video.mp4", range_header="bytes=2-7", chunk_size=4)
-    assert part_stream.is_partial is True
-    assert part_stream.start == 2
-    assert part_stream.end == 7
-    assert part_stream.content_length == 6
-    assert part_stream.total_size == 16
-    assert b"".join(part_stream.chunks) == b"234567"
-
-    with pytest.raises(InvalidRangeError):
-        store.open_stream("video.mp4", range_header="bytes=100-200")
-
-    store.delete("missing-nokey.mp4")
-    with pytest.raises(ClientError):
-        store.delete("boom-delete.mp4")
 
 
 def test_dockerfile_api_does_not_trust_wildcard_forwarded_ips() -> None:

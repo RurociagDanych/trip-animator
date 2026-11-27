@@ -10,13 +10,13 @@ from typing import Any
 
 import httpx
 import pytest
+from trip_object_store import LocalObjectStore
 from trip_telemetry import ManifestPhoto, ManifestStage, RenderManifest, RenderSpecV2
 from trip_worker.encoder import ProbeResult
 from trip_worker.lambda_handler import _post_callback_pinned, handle_event
 from trip_worker.local_spa import LocalSpaServer
 from trip_worker.runner import CLAIM_JOB_SQL
 from trip_worker.ssrf import _classify_render_request
-from trip_worker.storage import LocalObjectStore
 
 
 def _make_manifest(job_id: uuid.UUID, *, duration_s: float = 10.0, fps: int = 30) -> RenderManifest:

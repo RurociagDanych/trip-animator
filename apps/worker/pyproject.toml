@@ -14,10 +14,12 @@ dependencies = [
   "playwright>=1.50.0",
   "psycopg[binary]>=3.2.0",
   "pydantic-settings>=2.7.0",
+  "trip-object-store",
   "trip-telemetry",
 ]
 
 [tool.uv.sources]
+trip-object-store = { workspace = true }
 trip-telemetry = { workspace = true }
 
 [tool.hatch.build.targets.wheel]

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from trip_object_store import ObjectStore, S3ObjectStore, build_object_store
 from trip_telemetry import RenderManifest, sign_render_callback
 
 from trip_worker.config import WorkerSettings
@@ -32,7 +33,6 @@ from trip_worker.ssrf import (
     pin_external_target,
     resolve_and_validate_external_target_async,
 )
-from trip_worker.storage import ObjectStore, S3ObjectStore, build_object_store
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +122,7 @@ def _resolve_store(event: Mapping[str, Any], settings: WorkerSettings) -> Object
             bucket=bucket,
             region=region,
         )
-    return build_object_store(settings)
+    return build_object_store(settings.object_store_config())
 
 
 def _load_manifest(store: ObjectStore, manifest_key: str) -> RenderManifest:

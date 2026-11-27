@@ -12,6 +12,7 @@ dependencies = [
   "apache-airflow-providers-postgres>=6.0.0",
   "dbt-duckdb>=1.9.0",
   "trip-api",
+  "trip-object-store",
   "trip-telemetry",
 ]
 
@@ -23,6 +24,7 @@ dev = [
 
 [tool.uv.sources]
 trip-telemetry = { path = "../packages/telemetry", editable = true }
+trip-object-store = { path = "../packages/object-store", editable = true }
 trip-api = { path = "../apps/api", editable = true }
 
 [tool.hatch.build.targets.wheel]

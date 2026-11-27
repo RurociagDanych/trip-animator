@@ -13,9 +13,9 @@ from typing import Any
 
 import duckdb
 from botocore.exceptions import ClientError
+from trip_object_store import ObjectStore, S3ObjectStore, is_not_found_error
 
 from trip_api.config import Settings
-from trip_api.storage import ObjectStore, S3ObjectStore, _is_not_found_client_error
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ def ensure_local_gold_duckdb(store: ObjectStore, settings: Settings) -> Path:
         try:
             head = s3_client.head_object(Bucket=str(s3_bucket), Key=settings.gold_s3_key)
         except ClientError as exc:
-            if _is_not_found_client_error(exc):
+            if is_not_found_error(exc):
                 _sync_states[cache_key] = _GoldSyncState(
                     last_check_mono=time.monotonic(),
                     cached_etag=None,
@@ -135,7 +135,7 @@ def ensure_local_gold_duckdb(store: ObjectStore, settings: Settings) -> Path:
                 cached_etag=resolved_etag,
             )
         except ClientError as exc:
-            if _is_not_found_client_error(exc):
+            if is_not_found_error(exc):
                 _sync_states[cache_key] = _GoldSyncState(
                     last_check_mono=time.monotonic(),
                     cached_etag=None,
