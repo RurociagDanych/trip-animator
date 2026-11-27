@@ -29,8 +29,7 @@ MapStylePreset = Literal[
     "satellite-hybrid",
     "editorial-mono",
 ]
-# Only hiking is styled in this build; cycling and MTB join this Literal with their styling.
-MarkedTrailType = Literal["hiking"]
+MarkedTrailType = Literal["hiking", "cycling", "mtb"]
 TimelineMode = Literal["distance", "recorded-time"]
 CameraMode = Literal["fit-track", "follow-marker"]
 CameraPreset = Literal["flat", "dynamic-3d", "drone-orbit"]
