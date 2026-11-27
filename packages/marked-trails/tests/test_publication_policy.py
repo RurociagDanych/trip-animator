@@ -323,7 +323,7 @@ def test_failed_pointer_write_keeps_the_new_build_and_the_old_pointer(
 ) -> None:
     pointer_before = seed_published(tmp_path)
     monkeypatch.setattr(
-        cli, "build_object_store", lambda config: FailingPointerStore(tmp_path / "store")
+        cli, "build_trail_store", lambda settings, **_: FailingPointerStore(tmp_path / "store")
     )
 
     assert publish(tmp_path, "2026-11-03", build_of(1000)) == 1
@@ -345,7 +345,7 @@ def test_failed_cleanup_delete_does_not_hide_the_upload_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setattr(
-        cli, "build_object_store", lambda config: FailingUploadStore(tmp_path / "store")
+        cli, "build_trail_store", lambda settings, **_: FailingUploadStore(tmp_path / "store")
     )
 
     assert publish(tmp_path, "2026-11-01", build_of(1000)) == 1
@@ -364,7 +364,7 @@ def test_upload_with_a_different_size_is_removed_and_the_pointer_kept(
 ) -> None:
     pointer_before = seed_published(tmp_path)
     monkeypatch.setattr(
-        cli, "build_object_store", lambda config: ShortUploadStore(tmp_path / "store")
+        cli, "build_trail_store", lambda settings, **_: ShortUploadStore(tmp_path / "store")
     )
 
     assert publish(tmp_path, "2026-11-03", build_of(1000)) == 1
@@ -407,7 +407,7 @@ def test_failed_pointer_write_is_logged_as_possibly_changed(
 ) -> None:
     seed_published(tmp_path)
     monkeypatch.setattr(
-        cli, "build_object_store", lambda config: FailingPointerStore(tmp_path / "store")
+        cli, "build_trail_store", lambda settings, **_: FailingPointerStore(tmp_path / "store")
     )
 
     assert publish(tmp_path, "2026-11-03", build_of(1000)) == 1
