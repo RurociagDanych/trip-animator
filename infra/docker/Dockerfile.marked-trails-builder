@@ -1,7 +1,9 @@
 # syntax=docker/dockerfile:1
-# Planetiler is pinned by digest: `latest` moved during the prototype and the build must be reproducible.
+# Images are pinned by digest: Planetiler `latest` moved during the prototype and the build must be reproducible.
 ARG PLANETILER_IMAGE=ghcr.io/onthegomap/planetiler@sha256:bde2424546edfa40460bdd1c40c19d54e3af332b25d16c6db9d980ca3355623d
-ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.31
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.31@sha256:ecd4de2f060c64bea0ff8ecb182ddf46ba3fcccdc8a60cfdbaf20d1a047d7437
+# Version from the Ubuntu archive of the pinned Planetiler base; update both together.
+ARG OSMIUM_TOOL_VERSION=1.19.0-1build1
 
 FROM ${PLANETILER_IMAGE} AS profile
 COPY packages/marked-trails/java /src/java
@@ -18,12 +20,16 @@ ENV UV_PYTHON_INSTALL_DIR=/opt/python \
     UV_COMPILE_BYTECODE=1 \
     UV_PROJECT_ENVIRONMENT=/opt/marked-trails/venv
 WORKDIR /src
-COPY . .
+COPY pyproject.toml uv.lock ./
+COPY packages/object-store packages/object-store
+COPY packages/marked-trails/pyproject.toml packages/marked-trails/pyproject.toml
+COPY packages/marked-trails/src packages/marked-trails/src
 RUN uv sync --frozen --no-dev --no-editable --python 3.12 --package trip-marked-trails
 
 FROM ${PLANETILER_IMAGE}
+ARG OSMIUM_TOOL_VERSION
 RUN apt-get update \
- && apt-get install -y --no-install-recommends osmium-tool \
+ && apt-get install -y --no-install-recommends "osmium-tool=${OSMIUM_TOOL_VERSION}" \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=python-env /opt/python /opt/python
 COPY --from=python-env /opt/marked-trails/venv /opt/marked-trails/venv
