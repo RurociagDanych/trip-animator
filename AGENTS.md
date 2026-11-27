@@ -7,7 +7,7 @@ Repository guide for AI coding agents working on Trip Animator: a GPX/TCX and St
 ## Layout
 
 - `.github/`: CI workflow (`ci.yml`) and manual VPS deployment workflow (`deploy-vps.yml`).
-- `airflow/`: standalone Airflow 3 project with DAGs for hourly dbt Gold builds, Strava incremental sync, Silver backfill and platform maintenance.
+- `airflow/`: standalone Airflow 3 project with DAGs for hourly dbt Gold builds, Strava incremental sync, Silver backfill, platform maintenance and the manual Marked Trails build.
 - `apps/`: application packages.
   - `apps/web`: React 19 + TypeScript + Vite + TanStack Router/Query + Zustand + MapLibre GL v5 + Deck.gl v9 + uPlot. The deterministic geo/timeline/layout engine lives in `apps/web/src/lib/geo/{timeline,camera,director,layout,photos,map-config}.ts` and is shared by `EditorPage`, `ShareViewPage` and `RenderHarnessPage` (`window.__TRIP_RENDERER__`).
   - `apps/api`: FastAPI + SQLAlchemy 2.0 + Alembic + PostgreSQL + S3/Local `ObjectStore`. Handles auth/sessions (Argon2id + HMAC-SHA256 + CSRF), Strava OAuth2 PKCE + webhooks (`IngestJob`), project/stage/photo uploads, Gold DuckDB sync (`gold_sync.py`) and render job SSE (`LISTEN render_job_events`).

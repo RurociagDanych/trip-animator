@@ -2,7 +2,7 @@
 
 > Purpose: Explain how to set up, run, integrate and maintain a self-hosted Trip Animator deployment.
 > Audience: operators
-> Last reviewed: 2026-11-27
+> Last reviewed: 2026-11-28
 
 Sections:
 
@@ -11,6 +11,7 @@ Sections:
 - Strava OAuth2 setup
 - Docker Compose deployment
 - Quotas, scaling, and VPS backups
+- Marked Trails build in Airflow (under Apache Airflow 3 Orchestration)
 
 Deployment, integration and maintenance notes for self-hosting Trip Animator.
 
@@ -232,6 +233,7 @@ Airflow is included in the default Compose stack and required for Strava Vault s
 - `trip_dbt_gold_pipeline` (`0 * * * *`): Discovers Silver GeoParquet objects, stages them locally, runs `dbt-duckdb`, atomically swaps `trip_analytics.duckdb` into `GOLD_OUTPUT_DIR`, and verifies mart parity.
 - `trip_strava_incremental_sync` (`* * * * *`): Drains the durable Vault queue in bounded batches, resumes historical backfill and rate-limited jobs, and schedules incremental reconciliation. Activities without GPS are retained; synchronization does not create projects or stages, and tokens are not placed in XCom.
 - `trip_platform_maintenance_and_audit` (`0 3 * * *`): Executes `reap_expired`, reconciles PostgreSQL `Stage`/`RenderJob` records against `ObjectStore`, and validates Silver GeoParquet schemas and metadata.
+- `trip_marked_trails_build` (no schedule): Builds and publishes the Marked Trails PMTiles; see [Marked Trails build in Airflow](#marked-trails-build-in-airflow).
 
 ```bash
 # Start the stack, including required Strava sync orchestration
@@ -241,5 +243,28 @@ make airflow-up
 make test-airflow
 make lint-airflow
 ```
+
+#### Marked Trails build in Airflow
+
+`trip_marked_trails_build` refreshes the Marked Trails data. It never starts on its own (no schedule, `catchup=False`), allows one active run (`max_active_runs=1`) and has one task, `build_and_publish`, in the Airflow pool `marked_trails_build` with one slot. `airflow-init` creates the pool on every start with `airflow pools set`, which updates an existing pool, so no manual step is needed. The task runs the `trip-marked-trails build-publish` command in process; Airflow has no Docker socket. The Airflow image takes osmium, the Java runtime and the Planetiler profile jar from the builder image (`infra/docker/Dockerfile.marked-trails-builder`), so Airflow and `make marked-trails-local` use the same binaries.
+
+Prerequisites on the host:
+
+- Build the builder image before the Airflow image: `make airflow-up` and the deploy workflow do it; for a manual build run `make marked-trails-image` first. Compose passes it to the Airflow build as the `marked-trails-builder` build context.
+- Set `MARKED_TRAILS_STORE=s3`, `MARKED_TRAILS_S3_BUCKET`, `MARKED_TRAILS_S3_PREFIX` and `MARKED_TRAILS_S3_REGION` in `.env`, and give the container AWS credentials of the publisher policy from [Marked Trails on AWS](#marked-trails-on-aws) through the default AWS chain (`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in `.env`; never commit them). The Airflow container mounts no local store, so production uses `s3`.
+- Keep at least 12 GB free for the Docker volume `marked_trails_work`, mounted at `/work/marked-trails`. Airflow's root filesystem is read-only and `/tmp` is a 512 MB tmpfs, so the build writes only to that volume. The largest Europe extract is Germany at about 4.7 GB; with the filtered files, the Planetiler working files and the PMTiles output (0.8 to 1.6 GB before the zoom cuts) the peak is about 10 GB. The 35.6 GB Europe extract is never downloaded: Geofabrik lists the countries of Europe and each is downloaded, filtered and deleted before the next.
+
+To run it, unpause the DAG once (new DAGs start paused), then trigger it from the Airflow UI with the parameter `region`, or from the host:
+
+```bash
+docker compose -f infra/compose.yaml --env-file .env exec airflow airflow dags unpause trip_marked_trails_build
+docker compose -f infra/compose.yaml --env-file .env exec airflow airflow dags trigger trip_marked_trails_build --conf '{"region": "europe"}'
+```
+
+`region` defaults to `europe`. Use `europe/andorra` (a region without children) for a quick check of the setup in a few minutes; it is built directly and published like any other build. The parameter accepts only lowercase Geofabrik paths such as `europe` or `europe/germany`.
+
+Expect 2 to 4 hours for Europe; this is an estimate from the Poland and Germany measurement, not a measured Europe run (see [the spec](specs/MARKED_TRAILS_SPEC.md#further-notes)). Geofabrik extracts that overlap countries (`alps`, `britain-and-ireland`, `dach`, `great-britain`) are skipped. The task has an eight hour timeout and no retries, so a failure never silently starts a second multi-hour run. A failed country, a failed download (md5 mismatch) or a failed validation fails the run and leaves `current.json` unchanged; see [publication policy](#marked-trails-publication-policy-and-rollback). For a parent region the scratch files of a failed run are deleted by the run itself, and by the next run if the container was killed.
+
+While it runs the host is busier. Each tool process (osmium, Planetiler) is started under `nice -n 10`, pinned to one CPU with `taskset` and capped at 3 GB of data memory with `prlimit --data`, and Planetiler's heap is limited to 2 GB. A container without privileges cannot use cgroups or `docker run` limits, and RLIMIT_AS would also count the JVM's reserved address space. Even so, the editor and the Strava sync share the other CPU and the 8 GB: expect slower API responses and later Strava syncs during a build, and a downloaded country at 4 to 33 MB/s keeps the network busy. Trigger it when the editor is quiet. If a tool exceeds the memory cap it fails with an allocation error and the run fails; that cap was set from the measured 2.4 GB (osmium) and 2.3 GB (Planetiler) and has not been exercised on a full country. Logs of each tool are in the task log; the last line reports the build id, size and Marked Trail count.
 
 See [SECURITY.md](../SECURITY.md) before exposing a deployment to a network.
