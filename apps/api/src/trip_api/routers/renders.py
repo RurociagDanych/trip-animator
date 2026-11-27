@@ -1,5 +1,3 @@
-"""Render job submission (idempotent + content-addressed cache), LISTEN/NOTIFY SSE, downloads."""
-
 from __future__ import annotations
 
 import asyncio
@@ -18,8 +16,15 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
+from trip_telemetry import calculate_render_credit_quote
 from trip_telemetry.schemas import RenderSpecV2
 
+from trip_api.credits import (
+    debit_render_credits,
+    get_user_credit_balance,
+    lock_user_for_credit_update,
+    refund_render_credits_idempotent,
+)
 from trip_api.db import ProjectPhoto, RenderJob, Stage
 from trip_api.deps import (
     AppSettings,
@@ -37,7 +42,7 @@ from trip_api.render_backends import (
     build_render_backend,
     verify_render_callback_signature,
 )
-from trip_api.schemas import RenderJobOut, validate_stage_maps_against_project
+from trip_api.schemas import RenderJobOut, RenderQuoteOut, validate_stage_maps_against_project
 from trip_api.services import (
     get_owned_project,
     get_project_photos,
@@ -155,12 +160,63 @@ def _try_copy_cached_render_artifacts(
 
 
 def _cinematic_extra_seconds(raw: dict[str, object], photo_count: int) -> float:
-    """Upper bound of film time added by cinematic photo stops, assuming one stop per photo."""
     if raw.get("photo_card_style") != "cinematic_stop" or raw.get("show_photos") is False:
         return 0.0
     raw_display = raw.get("photo_display_seconds", 3.0)
     display_s = float(raw_display) if isinstance(raw_display, (int, float)) else 3.0
     return max(0, photo_count) * (1.0 + max(0.0, display_s))
+
+
+def _count_matched_photos(photos: list[ProjectPhoto]) -> int:
+    return sum(1 for p in photos if p.match_method != "unmatched")
+
+
+@router.post("/api/v1/projects/{project_id}/renders/quote", response_model=RenderQuoteOut)
+def quote_render_job(
+    project_id: uuid.UUID,
+    spec: RenderSpecV2,
+    auth: CurrentAuth,
+    db: DbSession,
+) -> RenderQuoteOut:
+    project = get_owned_project(db, project_id, auth.user.id)
+    stages = get_project_stages(db, project.id)
+    if not stages:
+        raise HTTPException(status_code=422, detail="Cannot quote a project with zero stages")
+    validate_stage_maps_against_project(spec, {str(s.id) for s in stages})
+
+    photos = get_project_photos(db, project.id, only_enabled=True)
+    content_hash = _compute_content_hash(spec, stages, photos)
+    now = datetime.now(UTC)
+    cached_hit = db.scalar(
+        select(RenderJob.id)
+        .where(
+            RenderJob.project_id == project.id,
+            RenderJob.content_hash == content_hash,
+            RenderJob.status == "succeeded",
+            RenderJob.output_object_key.is_not(None),
+            (RenderJob.expires_at.is_(None)) | (RenderJob.expires_at > now),
+        )
+        .limit(1)
+    )
+    quote = calculate_render_credit_quote(
+        spec,
+        matched_photo_count=_count_matched_photos(photos),
+        cached=cached_hit is not None,
+    )
+    balance = get_user_credit_balance(db, auth.user.id)
+    return RenderQuoteOut(
+        credits=quote.credits,
+        width=quote.width,
+        height=quote.height,
+        fps=quote.fps,
+        film_seconds=quote.film_seconds,
+        cinematic_photo_stop_seconds=quote.cinematic_photo_stop_seconds,
+        terrain_3d=quote.terrain_3d,
+        terrain_multiplier=quote.terrain_multiplier,
+        cached=quote.cached,
+        balance=balance,
+        sufficient=balance >= quote.credits,
+    )
 
 
 def _sse_deadline_seconds(spec_json: dict[str, object] | None, photo_count: int = 0) -> float:
@@ -254,6 +310,7 @@ def create_render_job(
             status="succeeded",
             progress_pct=100,
             attempt_count=0,
+            credits_charged=0,
             render_backend=settings.render_backend,
             output_object_key=out_key,
             thumbnail_key=thumb_key,
@@ -261,7 +318,37 @@ def create_render_job(
             created_at=now,
             updated_at=now,
         )
+        debit_cost = 0
     else:
+        quote = calculate_render_credit_quote(
+            spec,
+            matched_photo_count=_count_matched_photos(photos),
+            cached=False,
+        )
+        lock_user_for_credit_update(db, auth.user.id)
+        existing_after_lock = db.scalar(
+            select(RenderJob).where(
+                RenderJob.owner_user_id == auth.user.id,
+                RenderJob.project_id == project.id,
+                RenderJob.idempotency_key == clean_key,
+            )
+        )
+        if existing_after_lock is not None:
+            if existing_after_lock.idempotency_hash != payload_hash:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Idempotency-Key was already used with a different render specification",
+                )
+            return render_job_to_out(existing_after_lock)
+        balance = get_user_credit_balance(db, auth.user.id)
+        if balance < quote.credits:
+            raise HTTPException(
+                status_code=402,
+                detail=(
+                    f"Insufficient Render Credits: this export requires {quote.credits} credits, "
+                    f"but your balance is {balance}. Redeem a voucher or use free Local Export."
+                ),
+            )
         job = RenderJob(
             id=new_job_id,
             project_id=project.id,
@@ -273,25 +360,39 @@ def create_render_job(
             status="queued",
             progress_pct=0,
             attempt_count=0,
+            credits_charged=quote.credits,
             render_backend=settings.render_backend,
             created_at=now,
             updated_at=now,
         )
+        debit_cost = quote.credits
 
-    db.add(job)
-    write_audit_event(
-        db,
-        user_id=auth.user.id,
-        project_id=project.id,
-        event_type="render.submitted",
-        metadata={
-            "job_id": str(job.id),
-            "resolution": spec.resolution,
-            "fps": spec.fps,
-            "cache_hit": copied_keys is not None,
-        },
-    )
     try:
+        db.add(job)
+        if debit_cost > 0:
+            db.flush()
+            debit_render_credits(
+                db,
+                user_id=auth.user.id,
+                job_id=job.id,
+                cost=debit_cost,
+                resolution=spec.resolution,
+                fps=spec.fps,
+                already_locked=True,
+            )
+        write_audit_event(
+            db,
+            user_id=auth.user.id,
+            project_id=project.id,
+            event_type="render.submitted",
+            metadata={
+                "job_id": str(job.id),
+                "resolution": spec.resolution,
+                "fps": spec.fps,
+                "cache_hit": copied_keys is not None,
+                "credits_charged": job.credits_charged,
+            },
+        )
         db.commit()
     except IntegrityError as exc:
         db.rollback()
@@ -370,8 +471,6 @@ async def stream_render_events(
     settings: AppSettings,
 ) -> StreamingResponse:
     session_factory = cast(sessionmaker[Session], request.app.state.session_factory)
-    # Authenticate and authorize in a short-lived session so no DB connection stays
-    # checked out for the lifetime of the SSE StreamingResponse.
     with session_factory() as db:
         auth = authenticate_request(request, db, settings)
         initial_job = _get_owned_job(db, job_id, auth.user.id)
@@ -496,14 +595,26 @@ def cancel_render_job(
         )
     external_exec_id = job.external_execution_id
     job_backend_name = job.render_backend
+    was_queued = job.status == "queued"
+    was_dispatched = job.remote_dispatched_at is not None
     job.status = "cancelled"
     job.updated_at = datetime.now(UTC)
+    eligible_for_refund = (
+        (not was_dispatched) if job_backend_name == "aws_sfn_lambda" else was_queued
+    )
+    refunded = False
+    if eligible_for_refund:
+        refunded = refund_render_credits_idempotent(
+            db,
+            job=job,
+            note="Refund for cancelled render",
+        )
     write_audit_event(
         db,
         user_id=auth.user.id,
         project_id=job.project_id,
         event_type="render.cancelled",
-        metadata={"job_id": str(job.id)},
+        metadata={"job_id": str(job.id), "credits_refunded": refunded},
     )
     if settings.database_url.startswith("postgresql"):
         try:

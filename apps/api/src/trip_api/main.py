@@ -40,6 +40,7 @@ from trip_api.reuse_preview import ReusePreviewCache
 from trip_api.routers import (
     analytics,
     auth,
+    credits,
     library_lifecycle,
     library_projects,
     library_views,
@@ -396,6 +397,7 @@ def create_app(
         }
 
     application.include_router(auth.router)
+    application.include_router(credits.router)
     application.include_router(projects.router)
     application.include_router(stages.router)
     application.include_router(photos.router)

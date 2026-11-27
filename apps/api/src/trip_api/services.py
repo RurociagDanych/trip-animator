@@ -353,6 +353,7 @@ def render_job_to_out(job: RenderJob) -> RenderJobOut:
         status=job.status,
         progress_pct=job.progress_pct,
         attempt_count=job.attempt_count,
+        credits_charged=int(getattr(job, "credits_charged", 0) or 0),
         spec=dict(job.spec_json),
         idempotency_key=job.idempotency_key,
         output_object_key=job.output_object_key,

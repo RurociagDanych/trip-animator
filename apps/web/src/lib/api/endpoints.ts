@@ -7,6 +7,7 @@ import type {
   CareerAnalyticsOut,
   ChangePasswordRequest,
   ChangePasswordResponse,
+  CreditsSummaryOut,
   DeleteAccountRequest,
   ForgotPasswordResponse,
   GoogleAuthCallbackRequest,
@@ -28,9 +29,11 @@ import type {
   ProjectUpdateRequest,
   PublicConfigOut,
   PublicProjectOut,
+  RedeemVoucherOut,
   RegisterRequest,
   RegisterResponse,
   RenderJobOut,
+  RenderQuoteOut,
   RenderSpecV2,
   ResendVerificationResponse,
   ResetPasswordRequest,
@@ -181,6 +184,15 @@ export const authApi = {
     const res = await apiClient.post<LogoutAllResponse>("/api/v1/auth/logout-all");
     clearCsrfToken();
     return res;
+  },
+};
+
+export const creditsApi = {
+  getSummary(limit = 50, signal?: AbortSignal): Promise<CreditsSummaryOut> {
+    return apiClient.get<CreditsSummaryOut>(`/api/v1/credits?limit=${limit}`, signal);
+  },
+  redeem(code: string): Promise<RedeemVoucherOut> {
+    return apiClient.post<RedeemVoucherOut>("/api/v1/credits/redeem", { code });
   },
 };
 
@@ -598,6 +610,14 @@ export const rendersApi = {
     return apiClient.post<RenderJobOut>(`/api/v1/projects/${projectId}/renders`, spec, {
       "Idempotency-Key": idempotencyKey,
     });
+  },
+  quote(projectId: string, spec: RenderSpecV2, signal?: AbortSignal): Promise<RenderQuoteOut> {
+    return apiClient.post<RenderQuoteOut>(
+      `/api/v1/projects/${projectId}/renders/quote`,
+      spec,
+      undefined,
+      signal,
+    );
   },
   listForProject(projectId: string, signal?: AbortSignal): Promise<RenderJobOut[]> {
     return apiClient.get<RenderJobOut[]>(`/api/v1/projects/${projectId}/renders`, signal);

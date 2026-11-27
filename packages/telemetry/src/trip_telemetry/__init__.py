@@ -1,5 +1,3 @@
-"""Trip Animator telemetry ingestion, Polars Silver ETL, and DuckDB analytics."""
-
 from trip_telemetry.analytics import (
     EVENTS_SIDECAR_VERSION,
     ClockSkewResult,
@@ -19,6 +17,19 @@ from trip_telemetry.analytics import (
     serialize_stage_events_parquet_bytes,
     snap_photo_pin,
     solve_camera_clock_skew,
+)
+from trip_telemetry.credits import (
+    CINEMATIC_STOP_TRANSITION_SECONDS,
+    CREDIT_BASELINE_COST,
+    CREDIT_BASELINE_FPS,
+    CREDIT_BASELINE_HEIGHT,
+    CREDIT_BASELINE_PIXEL_FRAMES,
+    CREDIT_BASELINE_SECONDS,
+    CREDIT_BASELINE_WIDTH,
+    CREDIT_MIN_COST,
+    CREDIT_TERRAIN_3D_MULTIPLIER,
+    RenderCreditQuote,
+    calculate_render_credit_quote,
 )
 from trip_telemetry.dem import (
     DEFAULT_TERRARIUM_URL_TEMPLATE,
@@ -186,6 +197,17 @@ __all__ = [
     "StageTimelinePoint",
     "ByteStore",
     "CHART_CACHE_SCHEMA_VERSION",
+    "CINEMATIC_STOP_TRANSITION_SECONDS",
+    "CREDIT_BASELINE_COST",
+    "CREDIT_BASELINE_FPS",
+    "CREDIT_BASELINE_HEIGHT",
+    "CREDIT_BASELINE_PIXEL_FRAMES",
+    "CREDIT_BASELINE_SECONDS",
+    "CREDIT_BASELINE_WIDTH",
+    "CREDIT_MIN_COST",
+    "CREDIT_TERRAIN_3D_MULTIPLIER",
+    "RenderCreditQuote",
+    "calculate_render_credit_quote",
     "FrameSpan",
     "ManifestClimb",
     "ManifestColorSegment",

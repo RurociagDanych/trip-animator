@@ -526,6 +526,7 @@ class RenderJobOut(BaseModel):
     status: str
     progress_pct: int
     attempt_count: int
+    credits_charged: int = 0
     spec: dict[str, object]
     idempotency_key: str
     output_object_key: str | None = None
@@ -533,6 +534,53 @@ class RenderJobOut(BaseModel):
     error_message: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+CreditLedgerEntryType = Literal[
+    "voucher_grant",
+    "render_debit",
+    "render_refund",
+    "admin_adjustment",
+]
+
+
+class CreditLedgerEntryOut(BaseModel):
+    id: uuid.UUID
+    delta: int
+    entry_type: CreditLedgerEntryType
+    render_job_id: uuid.UUID | None = None
+    voucher_id: uuid.UUID | None = None
+    note: str = ""
+    created_at: datetime
+
+
+class CreditsSummaryOut(BaseModel):
+    balance: int
+    ledger: list[CreditLedgerEntryOut] = Field(default_factory=list)
+
+
+class RedeemVoucherRequest(BaseModel):
+    code: str = Field(min_length=4, max_length=128)
+
+
+class RedeemVoucherOut(BaseModel):
+    credits_granted: int
+    balance: int
+    entry: CreditLedgerEntryOut
+
+
+class RenderQuoteOut(BaseModel):
+    credits: int
+    width: int
+    height: int
+    fps: int
+    film_seconds: float
+    cinematic_photo_stop_seconds: float
+    terrain_3d: bool
+    terrain_multiplier: float
+    cached: bool = False
+    balance: int
+    sufficient: bool
 
 
 class ClimbHighlightOut(BaseModel):

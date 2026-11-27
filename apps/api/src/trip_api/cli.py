@@ -1,5 +1,3 @@
-"""CLI utilities for Trip Animator API administration, Bronze->Silver replay, and ingest queue."""
-
 from __future__ import annotations
 
 import argparse
@@ -35,12 +33,19 @@ from trip_telemetry.operational_events import (
 )
 
 from trip_api.config import Settings, get_settings
+from trip_api.credits import (
+    create_voucher_record,
+    grant_user_credits,
+    revoke_voucher_record,
+)
 from trip_api.db import (
+    CreditVoucher,
     Stage,
     User,
     create_db_engine,
     create_session_factory,
 )
+from trip_api.deps import ensure_utc
 from trip_api.ingest import (
     count_pending_ingest_jobs,
     process_pending_ingest_jobs,
@@ -66,8 +71,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class ReplayReport:
-    """Summary counts produced by a Bronze -> Silver replay pass."""
-
     matched_stages: int
     replayed_stages: int
     failed_stages: int
@@ -77,8 +80,6 @@ class ReplayReport:
 
 @dataclass(frozen=True, slots=True)
 class IngestProcessReport:
-    """Summary counts produced by processing queued Strava webhook ingest jobs and Vault syncs."""
-
     matched_jobs: int
     succeeded_jobs: int
     ignored_jobs: int
@@ -98,7 +99,6 @@ def create_user(
     display_name: str = "",
     database_url: str | None = None,
 ) -> User:
-    """Provision an active user account with an Argon2id password hash."""
     normalized_email = email.strip().lower()
     if "@" not in normalized_email or len(normalized_email) > 320:
         raise ValueError("Invalid email address")
@@ -158,7 +158,6 @@ def run_replay_silver(
     dry_run: bool = False,
     database_url: str | None = None,
 ) -> ReplayReport:
-    """Deterministically replay Bronze to Silver Parquet + caches when etl_version advances."""
     cfg = settings or Settings()
     resolved_url = database_url or cfg.database_url
     target_ver = target_etl_version if target_etl_version is not None else current_etl_version()
@@ -278,7 +277,6 @@ def run_process_ingest_jobs(
     max_attempts: int = 5,
     http_client_factory: Callable[[], httpx.Client] | None = None,
 ) -> IngestProcessReport:
-    """Process queued Strava webhook IngestJobs via canonical `trip_api.ingest`."""
     if limit < 1:
         raise ValueError("limit must be >= 1")
     if max_attempts < 1:
@@ -339,7 +337,6 @@ def run_ingest_worker_loop(
     max_iterations: int | None = None,
     http_client_factory: Callable[[], httpx.Client] | None = None,
 ) -> IngestProcessReport:
-    """Continuously drain IngestJobs with SIGTERM/SIGINT graceful shutdown."""
     if poll_interval_s <= 0.0:
         raise ValueError("poll_interval_s must be > 0")
     if limit < 1:
@@ -541,6 +538,46 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Continuously poll until SIGTERM/SIGINT",
     )
     rem_p.add_argument("--json", action="store_true", dest="as_json", help="Emit JSON output")
+
+    cv_p = sub.add_parser("create-voucher", help="Create a redeemable Render Credit voucher")
+    cv_p.add_argument("--credits", type=int, required=True, help="Credits granted per redemption")
+    cv_p.add_argument(
+        "--max-redemptions",
+        type=int,
+        default=1,
+        help="Maximum distinct users who can redeem this voucher",
+    )
+    cv_p.add_argument("--code", default=None, help="Optional custom voucher code")
+    cv_p.add_argument(
+        "--expires-in-days",
+        type=int,
+        default=None,
+        help="Optional voucher expiration in days from now",
+    )
+    cv_p.add_argument("--note", default="", help="Optional operator note")
+    cv_p.add_argument("--database-url", default=None, help="Optional database URL override")
+    cv_p.add_argument("--json", action="store_true", dest="as_json", help="Emit JSON output")
+
+    lv_p = sub.add_parser("list-vouchers", help="List Render Credit vouchers")
+    lv_p.add_argument(
+        "--include-inactive",
+        action="store_true",
+        help="Include revoked, expired, or exhausted vouchers",
+    )
+    lv_p.add_argument("--database-url", default=None, help="Optional database URL override")
+    lv_p.add_argument("--json", action="store_true", dest="as_json", help="Emit JSON output")
+
+    rv_p = sub.add_parser("revoke-voucher", help="Revoke a Render Credit voucher by UUID")
+    rv_p.add_argument("--id", required=True, dest="voucher_id", help="Voucher UUID")
+    rv_p.add_argument("--database-url", default=None, help="Optional database URL override")
+    rv_p.add_argument("--json", action="store_true", dest="as_json", help="Emit JSON output")
+
+    gc_p = sub.add_parser("grant-credits", help="Apply a manual credit adjustment to a user")
+    gc_p.add_argument("--email", required=True, help="Target user email address")
+    gc_p.add_argument("--delta", type=int, required=True, help="Non-zero credit adjustment delta")
+    gc_p.add_argument("--note", default="", help="Optional operator note")
+    gc_p.add_argument("--database-url", default=None, help="Optional database URL override")
+    gc_p.add_argument("--json", action="store_true", dest="as_json", help="Emit JSON output")
     return parser
 
 
@@ -736,6 +773,166 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"succeeded={rep_rem.reconciled_succeeded} "
                 f"failed={rep_rem.reconciled_failed} "
                 f"cancelled={rep_rem.reconciled_cancelled}"
+            )
+        return 0
+
+    if args.command == "create-voucher":
+        opt_cfg: Settings | None = get_settings() if args.database_url is None else None
+        resolved_url = args.database_url or (opt_cfg.database_url if opt_cfg is not None else "")
+        engine = create_db_engine(resolved_url, settings=opt_cfg)
+        sf = create_session_factory(engine)
+        try:
+            with sf() as db:
+                info = create_voucher_record(
+                    db,
+                    credits_amount=args.credits,
+                    max_redemptions=args.max_redemptions,
+                    code=args.code,
+                    expires_in_days=args.expires_in_days,
+                    note=args.note,
+                )
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        finally:
+            engine.dispose()
+
+        if args.as_json:
+            print(
+                json.dumps(
+                    {
+                        "id": str(info.id),
+                        "code": info.code,
+                        "code_prefix": info.code_prefix,
+                        "credits_amount": info.credits_amount,
+                        "max_redemptions": info.max_redemptions,
+                        "expires_at": info.expires_at.isoformat() if info.expires_at else None,
+                        "note": info.note,
+                    }
+                )
+            )
+        else:
+            print(
+                f"Created voucher id={info.id} code={info.code} "
+                f"credits={info.credits_amount} max_redemptions={info.max_redemptions}"
+            )
+        return 0
+
+    if args.command == "list-vouchers":
+        opt_cfg = get_settings() if args.database_url is None else None
+        resolved_url = args.database_url or (opt_cfg.database_url if opt_cfg is not None else "")
+        engine = create_db_engine(resolved_url, settings=opt_cfg)
+        sf = create_session_factory(engine)
+        now = datetime.now(UTC)
+        try:
+            with sf() as db:
+                rows = list(
+                    db.scalars(
+                        select(CreditVoucher).order_by(CreditVoucher.created_at.desc())
+                    ).all()
+                )
+        finally:
+            engine.dispose()
+
+        items: list[dict[str, object]] = []
+        for v in rows:
+            is_expired = v.expires_at is not None and ensure_utc(v.expires_at) <= now
+            is_exhausted = v.redemption_count >= v.max_redemptions
+            is_active = v.revoked_at is None and not is_expired and not is_exhausted
+            if not args.include_inactive and not is_active:
+                continue
+            items.append(
+                {
+                    "id": str(v.id),
+                    "code_prefix": v.code_prefix,
+                    "credits_amount": v.credits_amount,
+                    "redemption_count": v.redemption_count,
+                    "max_redemptions": v.max_redemptions,
+                    "expires_at": ensure_utc(v.expires_at).isoformat() if v.expires_at else None,
+                    "revoked_at": ensure_utc(v.revoked_at).isoformat() if v.revoked_at else None,
+                    "active": is_active,
+                    "note": v.note,
+                    "created_at": ensure_utc(v.created_at).isoformat(),
+                }
+            )
+        if args.as_json:
+            print(json.dumps(items))
+        else:
+            for item in items:
+                print(
+                    f"{item['id']} prefix={item['code_prefix']}... "
+                    f"credits={item['credits_amount']} "
+                    f"used={item['redemption_count']}/{item['max_redemptions']} "
+                    f"active={item['active']} note={item['note']}"
+                )
+        return 0
+
+    if args.command == "revoke-voucher":
+        opt_cfg = get_settings() if args.database_url is None else None
+        resolved_url = args.database_url or (opt_cfg.database_url if opt_cfg is not None else "")
+        engine = create_db_engine(resolved_url, settings=opt_cfg)
+        sf = create_session_factory(engine)
+        try:
+            vid = uuid.UUID(args.voucher_id)
+            with sf() as db:
+                v = revoke_voucher_record(db, voucher_id=vid)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        finally:
+            engine.dispose()
+
+        if args.as_json:
+            print(
+                json.dumps(
+                    {
+                        "id": str(v.id),
+                        "code_prefix": v.code_prefix,
+                        "revoked_at": (
+                            ensure_utc(v.revoked_at).isoformat() if v.revoked_at else None
+                        ),
+                    }
+                )
+            )
+        else:
+            print(f"Revoked voucher id={v.id} prefix={v.code_prefix}...")
+        return 0
+
+    if args.command == "grant-credits":
+        opt_cfg = get_settings() if args.database_url is None else None
+        resolved_url = args.database_url or (opt_cfg.database_url if opt_cfg is not None else "")
+        engine = create_db_engine(resolved_url, settings=opt_cfg)
+        sf = create_session_factory(engine)
+        try:
+            with sf() as db:
+                user, entry, new_balance = grant_user_credits(
+                    db,
+                    email=args.email,
+                    delta=args.delta,
+                    note=args.note,
+                )
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        finally:
+            engine.dispose()
+
+        if args.as_json:
+            print(
+                json.dumps(
+                    {
+                        "user_id": str(user.id),
+                        "email": user.email,
+                        "entry_id": str(entry.id),
+                        "delta": entry.delta,
+                        "balance": new_balance,
+                        "note": entry.note,
+                    }
+                )
+            )
+        else:
+            print(
+                f"Adjusted credits for {user.email}: delta={entry.delta:+d} balance={new_balance}"
             )
         return 0
 

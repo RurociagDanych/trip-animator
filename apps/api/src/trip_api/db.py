@@ -352,6 +352,9 @@ class RenderJob(Base):
         DateTime(timezone=True), nullable=True
     )
     total_frames: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    credits_charged: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -756,6 +759,102 @@ class VaultGear(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class CreditVoucher(Base):
+    __tablename__ = "credit_vouchers"
+    __table_args__ = (
+        CheckConstraint("credits_amount > 0", name="ck_credit_vouchers_credits_positive"),
+        CheckConstraint("max_redemptions >= 1", name="ck_credit_vouchers_max_redemptions"),
+        CheckConstraint(
+            "redemption_count >= 0 AND redemption_count <= max_redemptions",
+            name="ck_credit_vouchers_redemption_bounds",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    code_prefix: Mapped[str] = mapped_column(String(16), nullable=False)
+    credits_amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_redemptions: Mapped[int] = mapped_column(
+        Integer, default=1, server_default=text("1"), nullable=False
+    )
+    redemption_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    note: Mapped[str] = mapped_column(String(280), default="", server_default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class CreditVoucherRedemption(Base):
+    __tablename__ = "credit_voucher_redemptions"
+    __table_args__ = (
+        UniqueConstraint(
+            "voucher_id",
+            "user_id",
+            name="uq_credit_voucher_redemptions_voucher_user",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    voucher_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("credit_vouchers.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    redeemed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class CreditLedgerEntry(Base):
+    __tablename__ = "credit_ledger_entries"
+    __table_args__ = (
+        CheckConstraint("delta != 0", name="ck_credit_ledger_entries_delta_nonzero"),
+        CheckConstraint(
+            "entry_type IN ('voucher_grant', 'render_debit', 'render_refund', 'admin_adjustment')",
+            name="ck_credit_ledger_entries_entry_type",
+        ),
+        Index("ix_credit_ledger_entries_user_created", "user_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    delta: Mapped[int] = mapped_column(Integer, nullable=False)
+    entry_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    render_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("render_jobs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    voucher_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("credit_vouchers.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), unique=True, nullable=True)
+    note: Mapped[str] = mapped_column(String(280), default="", server_default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
 

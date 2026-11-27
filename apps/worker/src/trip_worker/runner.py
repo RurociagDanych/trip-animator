@@ -1,5 +1,3 @@
-"""PostgreSQL SKIP LOCKED lease queue, chunked parallel execution, and Playwright runner."""
-
 from __future__ import annotations
 
 import asyncio
@@ -482,8 +480,6 @@ class RenderCallable(Protocol):
 
 @dataclass(frozen=True)
 class ClaimedJob:
-    """Row claimed from `render_jobs` via `FOR UPDATE SKIP LOCKED`."""
-
     id: uuid.UUID
     project_id: uuid.UUID
     owner_user_id: uuid.UUID
@@ -493,8 +489,6 @@ class ClaimedJob:
 
 @dataclass(frozen=True)
 class ClaimedChunk:
-    """Row claimed from `render_job_chunks` via `FOR UPDATE SKIP LOCKED`."""
-
     id: uuid.UUID
     render_job_id: uuid.UUID
     chunk_index: int
@@ -519,7 +513,6 @@ def _parse_spec_json(value: Any) -> dict[str, object]:
 
 
 def _sanitize_error_message(exc: BaseException) -> str:
-    """Map internal exceptions to safe, non-leaking user-facing error messages."""
     if isinstance(exc, ValidationError):
         return "Invalid render specification"
     if isinstance(exc, ValueError):
@@ -547,7 +540,6 @@ def notify_render_job_event(
     status: str,
     progress_pct: int,
 ) -> None:
-    """Emit PostgreSQL `pg_notify('render_job_events', ...)` in the active transaction."""
     payload = json.dumps(
         {
             "job_id": str(job_id),
@@ -588,7 +580,6 @@ def _invoke_render_fn(
     gop_aligned: bool = False,
     browser: Any = None,
 ) -> Any:
-    """Call `render_fn` passing extended chunk/photo/browser kwargs only if supported."""
     sig = inspect.signature(render_fn)
     params = sig.parameters
     accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
@@ -628,7 +619,6 @@ def _execute_render(
     photo_assets: Mapping[str, bytes] | None = None,
     gop_aligned: bool = False,
 ) -> Any:
-    """Run `render_fn` on `browser_host`'s warm Chromium/event loop when available."""
     if browser_host is None:
         return asyncio.run(
             _invoke_render_fn(
@@ -688,14 +678,56 @@ def _execute_render(
     return browser_host.run_coro(_run_with_warm_host())
 
 
+REFUND_JOB_CREDITS_SQL = """
+INSERT INTO credit_ledger_entries (
+    id, user_id, delta, entry_type, render_job_id, idempotency_key, note
+)
+SELECT
+    %(entry_id)s,
+    rj.owner_user_id,
+    rj.credits_charged,
+    'render_refund',
+    rj.id,
+    %(idempotency_key)s,
+    %(note)s
+FROM render_jobs rj
+WHERE rj.id = %(job_id)s AND rj.credits_charged > 0
+ON CONFLICT (idempotency_key) DO NOTHING;
+"""
+
+
+def refund_render_job_credits(
+    conn: DbConnection,
+    *,
+    job_id: uuid.UUID,
+    note: str = "Refund for failed local render",
+) -> None:
+    params = {
+        "entry_id": uuid.uuid4(),
+        "job_id": job_id,
+        "idempotency_key": f"render_refund:{job_id}",
+        "note": note[:280],
+    }
+    tx_fn = getattr(conn, "transaction", None)
+    try:
+        if callable(tx_fn):
+            with tx_fn():
+                conn.execute(REFUND_JOB_CREDITS_SQL, params)
+        else:
+            conn.execute(REFUND_JOB_CREDITS_SQL, params)
+    except Exception as exc:
+        logger.debug("Credit refund skipped for job %s: %s", job_id, exc)
+
+
 def reap_exhausted_jobs(conn: DbConnection, *, max_attempts: int) -> int:
-    """Fail expired running jobs that have already reached `max_attempts`."""
     cur = conn.execute(REAP_EXHAUSTED_SQL, {"max_attempts": max_attempts})
     rows = cur.fetchall()
     for r in rows:
+        jid = _parse_uuid(r[0])
+        refund_render_job_credits(conn, job_id=jid, note="Refund for exhausted local render")
         notify_render_job_event(
             conn,
-            job_id=_parse_uuid(r[0]),
+            job_id=jid,
             status="failed",
             progress_pct=int(r[1]) if len(r) > 1 and r[1] is not None else 0,
         )
@@ -704,7 +736,6 @@ def reap_exhausted_jobs(conn: DbConnection, *, max_attempts: int) -> int:
 
 
 def reap_exhausted_chunks(conn: DbConnection, *, max_attempts: int) -> int:
-    """Fail expired running chunks at `max_attempts` and fail their parent jobs."""
     cur = conn.execute(REAP_EXHAUSTED_CHUNKS_SQL, {"max_attempts": max_attempts})
     rows = cur.fetchall()
     if rows:
@@ -723,6 +754,9 @@ def reap_exhausted_chunks(conn: DbConnection, *, max_attempts: int) -> int:
             ).fetchone()
             conn.execute(CANCEL_REMAINING_CHUNKS_SQL, {"job_id": jid})
             if parent_row is not None:
+                refund_render_job_credits(
+                    conn, job_id=jid, note="Refund for exhausted chunked render"
+                )
                 notify_render_job_event(
                     conn,
                     job_id=jid,
@@ -739,7 +773,6 @@ def claim_next_job(
     max_attempts: int,
     lease_seconds: int,
 ) -> ClaimedJob | None:
-    """Claim the oldest queued or expired-lease render job using `FOR UPDATE SKIP LOCKED`."""
     row = conn.execute(
         CLAIM_JOB_SQL,
         {"max_attempts": max_attempts, "lease_seconds": lease_seconds},
@@ -766,7 +799,6 @@ def claim_next_chunk(
     lease_seconds: int,
     job_id: uuid.UUID | None = None,
 ) -> ClaimedChunk | None:
-    """Claim the next queued or expired-lease chunk from `render_job_chunks`."""
     if job_id is not None:
         row = conn.execute(
             CLAIM_CHUNK_FOR_JOB_SQL,
@@ -799,7 +831,6 @@ def update_job_progress(
     progress_pct: int,
     lease_seconds: int,
 ) -> bool:
-    """Update `progress_pct` and renew lease; return False if fenced or no longer running."""
     clamped = max(0, min(99, progress_pct))
     cur = conn.execute(
         HEARTBEAT_SQL,
@@ -827,7 +858,6 @@ def update_chunk_progress(
     attempt_count: int,
     lease_seconds: int,
 ) -> bool:
-    """Renew chunk lease; return False if fenced or no longer running."""
     row = conn.execute(
         CHUNK_HEARTBEAT_SQL,
         {"chunk_id": chunk_id, "attempt_count": attempt_count, "lease_seconds": lease_seconds},
@@ -837,7 +867,6 @@ def update_chunk_progress(
 
 
 def is_job_cancelled(conn: DbConnection, *, job_id: uuid.UUID) -> bool:
-    """Return True if the job was cancelled or removed."""
     row = conn.execute(CHECK_STATUS_SQL, {"job_id": job_id}).fetchone()
     conn.commit()
     if row is None:
@@ -854,7 +883,6 @@ def mark_job_succeeded(
     thumbnail_key: str,
     expires_at: datetime,
 ) -> bool:
-    """Transition a running job to `succeeded`; return False if cancelled or fenced out."""
     cur = conn.execute(
         MARK_SUCCEEDED_SQL,
         {
@@ -883,7 +911,6 @@ def mark_job_failed(
     max_attempts: int,
     fatal: bool = False,
 ) -> str | None:
-    """Mark a running job as `failed` (terminal) or re-queue if attempts remain."""
     cur = conn.execute(
         MARK_FAILED_SQL,
         {
@@ -898,6 +925,8 @@ def mark_job_failed(
     if row is not None:
         final_status = str(row[0])
         pct = int(row[1]) if len(row) > 1 and row[1] is not None else 0
+        if final_status == "failed":
+            refund_render_job_credits(conn, job_id=job_id)
         notify_render_job_event(conn, job_id=job_id, status=final_status, progress_pct=pct)
         conn.commit()
         return final_status
@@ -973,7 +1002,6 @@ def record_audit_event(
     metadata: dict[str, object],
     project_id: uuid.UUID | None = None,
 ) -> None:
-    """Persist an audit event, falling back to `project_id=None` if the project was deleted."""
     params: dict[str, Any] = {
         "user_id": user_id,
         "project_id": project_id,
@@ -1006,7 +1034,6 @@ def record_audit_event(
 def default_conn_factory(
     settings: WorkerSettings,
 ) -> Callable[[], AbstractContextManager[DbConnection]]:
-    """Build a context-managed psycopg connection factory from WorkerSettings."""
 
     @contextmanager
     def _connect() -> Iterator[DbConnection]:
@@ -1017,8 +1044,6 @@ def default_conn_factory(
 
 
 class _JobLeaseSession:
-    """Thread-safe, connection-reusing lease heartbeat and DB session for a claimed job."""
-
     def __init__(
         self,
         conn_factory: Callable[[], AbstractContextManager[DbConnection]],
@@ -1061,7 +1086,6 @@ class _JobLeaseSession:
         self._stack = ExitStack()
 
     def run[T](self, fn: Callable[[DbConnection], T]) -> T:
-        """Execute a DB operation on the shared connection, reconnecting once if dropped."""
         with self._lock:
             try:
                 return fn(self._get_conn_locked())
@@ -1070,7 +1094,6 @@ class _JobLeaseSession:
                 return fn(self._get_conn_locked())
 
     def update_progress(self, progress_pct: int, *, force: bool = False) -> bool:
-        """Update progress and renew lease, throttling redundant frame heartbeats."""
         clamped = max(0, min(99, progress_pct))
         with self._lock:
             self._progress_pct = max(self._progress_pct, clamped)
@@ -1111,7 +1134,6 @@ class _JobLeaseSession:
         return self.update_progress(pct, force=completed_frames >= total_frames)
 
     def is_cancelled(self) -> bool:
-        """Check cancellation with time-based throttling to avoid per-frame DB polling."""
         with self._lock:
             if self._lease_lost:
                 return True
@@ -1168,8 +1190,6 @@ class _JobLeaseSession:
 
 
 class _ChunkLeaseSession:
-    """Thread-safe lease heartbeat and cancellation monitor for a claimed chunk."""
-
     def __init__(
         self,
         conn_factory: Callable[[], AbstractContextManager[DbConnection]],
@@ -1329,7 +1349,6 @@ def probe_film_frame_count(
     settings: WorkerSettings,
     browser_host: WarmPlaywrightHost | None = None,
 ) -> int:
-    """Ask the render page for the cinematic film frame count on a warm or fresh browser."""
     if browser_host is None:
         return asyncio.run(probe_manifest_frame_count(manifest, settings))
 
@@ -1536,7 +1555,6 @@ def _finalize_chunked_job(
     *,
     started_at: datetime | None = None,
 ) -> str:
-    """Assemble succeeded chunks into final MP4, verify, extract thumbnail, and mark succeeded."""
     t_start = started_at or datetime.now(UTC)
     heartbeat_interval_s = min(
         settings.lease_heartbeat_interval_seconds,
@@ -1697,6 +1715,9 @@ def _finalize_chunked_job(
                 ).fetchone()
                 conn.execute(CANCEL_REMAINING_CHUNKS_SQL, {"job_id": job.id})
                 if row is not None:
+                    refund_render_job_credits(
+                        conn, job_id=job.id, note="Refund for failed chunked render"
+                    )
                     notify_render_job_event(
                         conn,
                         job_id=job.id,
@@ -1726,7 +1747,6 @@ def process_claimed_chunk(
     render_fn: RenderCallable = render_manifest_to_mp4,
     browser_host: WarmPlaywrightHost | None = None,
 ) -> str:
-    """Render a single GOP-aligned chunk `[start_frame, end_frame)` and finalize if last."""
     started = time.monotonic()
     chunk_extra = {"job_id": chunk.render_job_id, "chunk_id": chunk.id, "stage": "chunk"}
     logger.info(
@@ -1965,6 +1985,11 @@ def _process_claimed_chunk(
                     ).fetchone()
                     conn.execute(CANCEL_REMAINING_CHUNKS_SQL, {"job_id": chunk.render_job_id})
                     if parent_row is not None:
+                        refund_render_job_credits(
+                            conn,
+                            job_id=chunk.render_job_id,
+                            note="Refund for failed chunked render",
+                        )
                         notify_render_job_event(
                             conn,
                             job_id=chunk.render_job_id,
@@ -2003,7 +2028,6 @@ def process_claimed_job(
     browser_host: WarmPlaywrightHost | None = None,
     frame_count_fn: FrameCountCallable = probe_film_frame_count,
 ) -> str:
-    """Execute unchunked or chunked Playwright frame capture, FFmpeg encode, probe, and upload."""
     started = time.monotonic()
     job_extra = {"job_id": job.id, "stage": "job"}
     logger.info("Render job started", extra={**job_extra, "event": "job_start"})
@@ -2103,7 +2127,6 @@ def _process_claimed_job(
                 ) -> tuple[bool, bool]:
                     if is_job_cancelled(conn, job_id=job.id):
                         return (True, False)
-                    # Build and pre-serialize manifest once before fanning out chunks
                     _cancelled, _manifest, _assets = _load_manifest_and_photo_assets(
                         conn,
                         job_id=job.id,
@@ -2140,7 +2163,6 @@ def _process_claimed_job(
                 if not split_ok:
                     return "lost_lease"
 
-                # Close parent job session before processing chunks so workers act uniformly
                 last_result = "chunked_in_progress"
                 while True:
                     with conn_factory() as chunk_conn:
@@ -2502,7 +2524,6 @@ def _worker_thread_loop(
 
 
 def run_worker_loop(settings: WorkerSettings | None = None, *, once: bool = False) -> None:
-    """Poll PostgreSQL `render_jobs` / `render_job_chunks` lease queue and execute renders."""
     configure_logging()
     cfg = settings or WorkerSettings()
     logger.info(

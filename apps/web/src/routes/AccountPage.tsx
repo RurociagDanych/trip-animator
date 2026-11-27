@@ -5,19 +5,34 @@ import {
   ArrowLeft,
   Check,
   CheckCircle2,
+  Coins,
   Eye,
   EyeOff,
   Loader2,
   Lock,
   LogOut,
   ShieldCheck,
+  Ticket,
   Trash2,
 } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import { AppHeader } from "../components/layout/AppHeader";
 import { ApiError } from "../lib/api/client";
-import { authApi } from "../lib/api/endpoints";
-import type { AuthSessionOut, DeleteAccountRequest, SessionInfoOut } from "../lib/api/types";
+import { authApi, creditsApi } from "../lib/api/endpoints";
+import type {
+  AuthSessionOut,
+  CreditLedgerEntryType,
+  CreditsSummaryOut,
+  DeleteAccountRequest,
+  SessionInfoOut,
+} from "../lib/api/types";
+
+const LEDGER_LABELS: Record<CreditLedgerEntryType, string> = {
+  voucher_grant: "Voucher redeemed",
+  render_debit: "Server render",
+  render_refund: "Render refund",
+  admin_adjustment: "Adjustment",
+};
 
 function formatSessionTimestamp(iso: string): string {
   const date = new Date(iso);
@@ -44,8 +59,13 @@ export function AccountPage() {
   const confirmPasswordErrorId = useId();
   const deleteDialogTitleId = useId();
   const deleteConfirmInputId = useId();
+  const voucherCodeInputId = useId();
   const deleteDialogRef = useRef<HTMLDialogElement | null>(null);
   const cancelDeleteButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  const [voucherCode, setVoucherCode] = useState("");
+  const [voucherError, setVoucherError] = useState<string | null>(null);
+  const [voucherStatus, setVoucherStatus] = useState<string | null>(null);
 
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -77,6 +97,29 @@ export function AccountPage() {
     queryFn: ({ signal }) => authApi.listSessions(signal),
     enabled: sessionQuery.isSuccess,
     retry: false,
+  });
+
+  const creditsQuery = useQuery<CreditsSummaryOut>({
+    queryKey: ["credits"],
+    queryFn: ({ signal }) => creditsApi.getSummary(50, signal),
+    enabled: sessionQuery.isSuccess,
+    retry: false,
+  });
+
+  const redeemVoucherMutation = useMutation({
+    mutationFn: (code: string) => creditsApi.redeem(code),
+    onSuccess: (res) => {
+      setVoucherCode("");
+      setVoucherError(null);
+      setVoucherStatus(
+        `Added ${res.credits_granted} Render Credits. Current balance: ${res.balance} credits.`,
+      );
+      void queryClient.invalidateQueries({ queryKey: ["credits"] });
+    },
+    onError: (err) => {
+      setVoucherStatus(null);
+      setVoucherError(err instanceof ApiError ? err.message : "Failed to redeem voucher code.");
+    },
   });
 
   useEffect(() => {
@@ -577,6 +620,141 @@ export function AccountPage() {
             </div>
           </section>
         </div>
+
+        <section className="space-y-5 rounded-xl border border-border bg-surface p-6">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-start gap-2.5">
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-elevated text-amber-accent">
+                <Coins className="h-4 w-4" aria-hidden="true" />
+              </span>
+              <div>
+                <h2 className="text-base font-semibold text-ink">Render Credits</h2>
+                <p className="text-xs text-ink-muted">
+                  Redeem a beta voucher for Server Renders. Browser-based Local Export is always
+                  free.
+                </p>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-border bg-canvas px-4 py-2 text-right">
+              <p className="text-[11px] uppercase tracking-wider text-ink-muted">Balance</p>
+              <p className="tabular-telemetry text-lg font-semibold text-ink">
+                {creditsQuery.isLoading
+                  ? "..."
+                  : creditsQuery.isError
+                    ? "Unavailable"
+                    : `${creditsQuery.data?.balance ?? 0} credits`}
+              </p>
+            </div>
+          </div>
+
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              const trimmed = voucherCode.trim();
+              if (trimmed.length < 4) {
+                setVoucherError("Enter a valid voucher code (at least 4 characters).");
+                return;
+              }
+              setVoucherError(null);
+              setVoucherStatus(null);
+              redeemVoucherMutation.mutate(trimmed);
+            }}
+            className="flex flex-col gap-2.5 sm:flex-row sm:items-end"
+          >
+            <div className="flex-1 space-y-1.5">
+              <label
+                htmlFor={voucherCodeInputId}
+                className="block text-xs font-medium text-ink-muted"
+              >
+                Redeem voucher code
+              </label>
+              <input
+                id={voucherCodeInputId}
+                type="text"
+                name="voucher_code"
+                autoComplete="off"
+                spellCheck={false}
+                value={voucherCode}
+                onChange={(event) => setVoucherCode(event.currentTarget.value)}
+                placeholder="TRIP-XXXX-XXXX-XXXX"
+                className="w-full rounded-md border border-border bg-canvas px-3 py-2 font-mono text-sm uppercase text-ink placeholder:text-ink-muted/60 focus:border-sky-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-accent/40"
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={redeemVoucherMutation.isPending}
+              className="inline-flex items-center justify-center gap-1.5 rounded-md bg-sky-accent px-4 py-2 text-sm font-medium text-canvas hover:bg-sky-accent/90 disabled:opacity-60 transition-colors"
+            >
+              <Ticket className="h-4 w-4" aria-hidden="true" />
+              <span>{redeemVoucherMutation.isPending ? "Redeeming..." : "Redeem voucher"}</span>
+            </button>
+          </form>
+
+          {voucherError ? (
+            <div
+              role="alert"
+              className="flex items-start gap-2 rounded-md border border-amber-accent/40 bg-amber-accent/10 px-3 py-2.5 text-xs text-ink"
+            >
+              <AlertCircle
+                className="mt-0.5 h-4 w-4 shrink-0 text-amber-accent"
+                aria-hidden="true"
+              />
+              <span>{voucherError}</span>
+            </div>
+          ) : null}
+
+          {voucherStatus ? (
+            <div
+              role="status"
+              className="flex items-start gap-2 rounded-md border border-teal-accent/40 bg-teal-accent/10 px-3 py-2.5 text-xs text-ink"
+            >
+              <CheckCircle2
+                className="mt-0.5 h-4 w-4 shrink-0 text-teal-accent"
+                aria-hidden="true"
+              />
+              <span>{voucherStatus}</span>
+            </div>
+          ) : null}
+
+          <div className="space-y-2">
+            <h3 className="text-xs font-medium text-ink-muted">Credit history</h3>
+            {creditsQuery.isLoading ? (
+              <div className="flex items-center gap-2 py-3 text-xs text-ink-muted">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-accent" aria-hidden="true" />
+                <span>Loading credit ledger...</span>
+              </div>
+            ) : (creditsQuery.data?.ledger ?? []).length === 0 ? (
+              <p className="py-2 text-xs text-ink-muted">No credit activity yet.</p>
+            ) : (
+              <ul className="space-y-2" aria-label="Credit ledger">
+                {(creditsQuery.data?.ledger ?? []).map((entry) => (
+                  <li
+                    key={entry.id}
+                    className="flex items-center justify-between gap-3 rounded-lg border border-border bg-canvas px-3.5 py-2.5"
+                  >
+                    <div className="min-w-0 space-y-0.5">
+                      <p className="truncate text-xs font-medium text-ink">
+                        {LEDGER_LABELS[entry.entry_type]}
+                        {entry.note ? ` · ${entry.note}` : ""}
+                      </p>
+                      <p className="text-[11px] text-ink-muted">
+                        {formatSessionTimestamp(entry.created_at)}
+                      </p>
+                    </div>
+                    <span
+                      className={`tabular-telemetry shrink-0 text-xs font-semibold ${
+                        entry.delta >= 0 ? "text-teal-accent" : "text-coral-accent"
+                      }`}
+                    >
+                      {entry.delta >= 0 ? `+${entry.delta}` : entry.delta}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </section>
 
         <section className="rounded-xl border border-coral-accent/30 bg-surface p-6">
           <div className="flex flex-wrap items-center justify-between gap-4">

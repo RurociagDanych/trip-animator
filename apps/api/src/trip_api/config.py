@@ -137,6 +137,8 @@ class Settings(BaseSettings):
     rate_limit_share_window_s: int = 60
     rate_limit_render_max: int = 10
     rate_limit_render_window_s: int = 60
+    rate_limit_voucher_redeem_max: int = 10
+    rate_limit_voucher_redeem_window_s: int = 900
 
     @field_validator("strava_webhook_subscription_id", mode="before")
     @classmethod
