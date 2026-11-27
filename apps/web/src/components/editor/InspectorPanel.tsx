@@ -31,6 +31,7 @@ import type {
 } from "../../lib/api/types";
 import { ALL_STATISTIC_METRICS } from "../../lib/api/types";
 import { generateDirectorKeyframes } from "../../lib/geo/director";
+import { toggleMarkedTrailType } from "../../lib/geo/marked-trails";
 import type { InspectorSection } from "../../lib/state/editor-store";
 import { ExportPanel } from "./ExportPanel";
 import type { LocalExportSource } from "./LocalExportControls";
@@ -108,6 +109,7 @@ export interface InspectorPanelProps {
   onFlushSave: () => Promise<boolean>;
   localExportSource?: LocalExportSource;
   invalidSpecValues?: InvalidRenderSpecValue[];
+  markedTrailsConfigured?: boolean;
 }
 
 const INVALID_SPEC_FIELD_LABEL: Record<InvalidRenderSpecValue["field"], string> = {
@@ -133,6 +135,7 @@ export function InspectorPanel({
   onFlushSave,
   localExportSource,
   invalidSpecValues = [],
+  markedTrailsConfigured = false,
 }: InspectorPanelProps) {
   const hud = spec.statistics_panel;
   const effectiveDays = Math.max(1, dayCount ?? stageCount);
@@ -255,17 +258,25 @@ export function InspectorPanel({
               </select>
             </label>
 
-            <label className="flex items-center gap-2 text-ink">
-              <input
-                type="checkbox"
-                checked={spec.marked_trail_types.includes("hiking")}
-                onChange={(e) =>
-                  onUpdateSpec({ marked_trail_types: e.currentTarget.checked ? ["hiking"] : [] })
-                }
-                className="h-4 w-4 accent-sky-accent"
-              />
-              <span className="font-medium">Hiking Marked Trails</span>
-            </label>
+            {markedTrailsConfigured ? (
+              <label className="flex items-center gap-2 text-ink">
+                <input
+                  type="checkbox"
+                  checked={spec.marked_trail_types.includes("hiking")}
+                  onChange={(e) =>
+                    onUpdateSpec({
+                      marked_trail_types: toggleMarkedTrailType(
+                        spec.marked_trail_types,
+                        "hiking",
+                        e.currentTarget.checked,
+                      ),
+                    })
+                  }
+                  className="h-4 w-4 accent-sky-accent"
+                />
+                <span className="font-medium">Hiking Marked Trails</span>
+              </label>
+            ) : null}
 
             <label className="block space-y-1.5">
               <span className="block font-medium text-ink-muted">Trip place labels</span>

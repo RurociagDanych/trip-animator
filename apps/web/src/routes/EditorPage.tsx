@@ -927,6 +927,7 @@ export function EditorPage() {
             unavailableReason: localExportUnavailableReason,
           }}
           invalidSpecValues={invalidSpecValues}
+          markedTrailsConfigured={Boolean(publicConfigQuery.data?.marked_trails_base_url)}
         />
       </div>
 

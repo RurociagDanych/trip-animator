@@ -9,9 +9,15 @@ import {
 import {
   MARKED_TRAILS_HIKING_LAYER_ID,
   MARKED_TRAILS_SOURCE_ID,
+  mapStyleKey,
+  resolveMarkedTrailsOverlay,
   sanitizeMapStyle,
 } from "../lib/geo/map-config";
-import { buildMarkedTrailsBuild, parseMarkedTrailsPointer } from "../lib/geo/marked-trails";
+import {
+  buildMarkedTrailsBuild,
+  parseMarkedTrailsPointer,
+  toggleMarkedTrailType,
+} from "../lib/geo/marked-trails";
 
 const PRESETS: MapStylePreset[] = [
   "liberty",
@@ -61,7 +67,7 @@ function basemapStyle(): StyleSpecification {
 describe("Marked Trails map style", () => {
   it.each(PRESETS)("draws the hiking Marked Trail line under labels for %s", (preset) => {
     const style = sanitizeMapStyle(basemapStyle(), preset, {
-      trailTypes: ["hiking"],
+      markedTrailTypes: ["hiking"],
       pmtilesUrl: PMTILES_URL,
     });
 
@@ -76,6 +82,7 @@ describe("Marked Trails map style", () => {
       source: MARKED_TRAILS_SOURCE_ID,
       "source-layer": "marked_trails",
       filter: ["==", ["get", "type"], "hiking"],
+      paint: { "line-color": ["to-color", ["get", "colour"], "#b91c1c"] },
     });
     const firstSymbol = style.layers.findIndex((layer) => layer.type === "symbol");
     expect(index).toBeLessThan(firstSymbol);
@@ -84,14 +91,40 @@ describe("Marked Trails map style", () => {
   it.each(PRESETS)("adds no Marked Trail source or layer when off for %s", (preset) => {
     const offStates = [
       undefined,
-      { trailTypes: [] as MarkedTrailType[], pmtilesUrl: PMTILES_URL },
-      { trailTypes: ["hiking"] as MarkedTrailType[], pmtilesUrl: null },
+      { markedTrailTypes: [] as MarkedTrailType[], pmtilesUrl: PMTILES_URL },
+      { markedTrailTypes: ["hiking"] as MarkedTrailType[], pmtilesUrl: null },
     ];
     for (const markedTrails of offStates) {
       const style = sanitizeMapStyle(basemapStyle(), preset, markedTrails);
       expect(style.sources[MARKED_TRAILS_SOURCE_ID]).toBeUndefined();
       expect(style.layers.some((layer) => layer.id === MARKED_TRAILS_HIKING_LAYER_ID)).toBe(false);
     }
+  });
+});
+
+describe("Marked Trails style key", () => {
+  it("does not change when a build is published while the overlay is off", () => {
+    const withoutBuild = mapStyleKey("liberty", resolveMarkedTrailsOverlay([], null));
+    const withBuild = mapStyleKey("liberty", resolveMarkedTrailsOverlay([], PMTILES_URL));
+
+    expect(withBuild).toBe(withoutBuild);
+    expect(resolveMarkedTrailsOverlay([], PMTILES_URL).pmtilesUrl).toBeNull();
+  });
+
+  it("changes when hiking Marked Trails are switched on with a published build", () => {
+    const off = mapStyleKey("liberty", resolveMarkedTrailsOverlay([], PMTILES_URL));
+    const on = mapStyleKey("liberty", resolveMarkedTrailsOverlay(["hiking"], PMTILES_URL));
+
+    expect(on).not.toBe(off);
+  });
+});
+
+describe("Marked Trails toggles", () => {
+  it("adds or removes only the toggled Marked Trail type", () => {
+    expect(toggleMarkedTrailType(["cycling"], "hiking", true)).toEqual(["cycling", "hiking"]);
+    expect(toggleMarkedTrailType(["cycling", "hiking"], "hiking", false)).toEqual(["cycling"]);
+    expect(toggleMarkedTrailType(["hiking"], "hiking", true)).toEqual(["hiking"]);
+    expect(toggleMarkedTrailType<MarkedTrailType>([], "hiking", false)).toEqual([]);
   });
 });
 
@@ -119,13 +152,27 @@ describe("Marked Trails build pointer", () => {
 
   it("rejects a pointer whose key escapes the build prefix or is missing", () => {
     expect(parseMarkedTrailsPointer({ current_build_id: "x" })).toBeNull();
-    expect(
-      parseMarkedTrailsPointer({
-        current_build_id: "x",
-        pmtiles_key: "../secrets/marked-trails.pmtiles",
-      }),
-    ).toBeNull();
     expect(parseMarkedTrailsPointer(null)).toBeNull();
+    for (const key of [
+      "../secrets/marked-trails.pmtiles",
+      "builds/%2e%2e/%2e%2e/api/v1/me",
+      "builds/..\\..\\api",
+      "builds/2026-11-27/../../api/marked-trails.pmtiles",
+      "builds/2026-11-27/marked-trails.pmtiles?x=1",
+      "builds/latest/marked-trails.pmtiles",
+      "builds/2026-11-27/other.pmtiles",
+    ]) {
+      expect(parseMarkedTrailsPointer({ current_build_id: "x", pmtiles_key: key }), key).toBeNull();
+    }
+  });
+
+  it("accepts the build key of a second build on the same day", () => {
+    const pointer = parseMarkedTrailsPointer({
+      current_build_id: "2026-11-27-2",
+      pmtiles_key: "builds/2026-11-27-2/marked-trails.pmtiles",
+    });
+
+    expect(pointer?.pmtiles_key).toBe("builds/2026-11-27-2/marked-trails.pmtiles");
   });
 });
 

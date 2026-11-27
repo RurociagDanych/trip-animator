@@ -2,6 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 
 export const MARKED_TRAILS_PMTILES_PROTOCOL = "pmtiles";
 export const MARKED_TRAILS_POINTER_FILE = "current.json";
+// Matches the publisher's layout: build date, optional same-day suffix, fixed file name.
+const MARKED_TRAILS_PMTILES_KEY_PATTERN = /^builds\/\d{4}-\d{2}-\d{2}(-\d+)?\/marked-trails\.pmtiles$/;
 
 export interface MarkedTrailsPointer {
   current_build_id: string;
@@ -16,8 +18,8 @@ export interface MarkedTrailsBuild {
 }
 
 /**
- * Validates `current.json`. The key must stay under `builds/` so a corrupted pointer cannot
- * point the editor at another object in the store.
+ * Validates `current.json`. The key must be a build PMTiles key of the store layout, so a
+ * corrupted pointer cannot point the editor at another object. Unknown fields are ignored.
  */
 export function parseMarkedTrailsPointer(raw: unknown): MarkedTrailsPointer | null {
   if (!raw || typeof raw !== "object") {
@@ -29,7 +31,7 @@ export function parseMarkedTrailsPointer(raw: unknown): MarkedTrailsPointer | nu
   if (typeof buildId !== "string" || buildId.length === 0) {
     return null;
   }
-  if (typeof key !== "string" || !key.startsWith("builds/") || key.split("/").includes("..")) {
+  if (typeof key !== "string" || !MARKED_TRAILS_PMTILES_KEY_PATTERN.test(key)) {
     return null;
   }
   return {
@@ -39,6 +41,7 @@ export function parseMarkedTrailsPointer(raw: unknown): MarkedTrailsPointer | nu
   };
 }
 
+/** Resolves the PMTiles URL of the pointer's build against the store base URL. */
 export function buildMarkedTrailsBuild(
   baseUrl: string,
   pointer: MarkedTrailsPointer,
@@ -73,6 +76,10 @@ export async function fetchMarkedTrailsBuild(
   return pointer ? buildMarkedTrailsBuild(root, pointer) : null;
 }
 
+/**
+ * Loads the published build of the store at `baseUrl`. Returns null while loading, when no
+ * build is published, when the request fails, or when `baseUrl` is empty (overlay off).
+ */
 export function useMarkedTrailsBuild(baseUrl: string | undefined): MarkedTrailsBuild | null {
   const query = useQuery({
     queryKey: ["marked-trails", "build", baseUrl ?? ""],
@@ -82,6 +89,20 @@ export function useMarkedTrailsBuild(baseUrl: string | undefined): MarkedTrailsB
     retry: false,
   });
   return query.data ?? null;
+}
+
+/** Adds or removes one Marked Trail type and keeps the others in their order. */
+export function toggleMarkedTrailType<T extends string>(
+  markedTrailTypes: readonly T[],
+  markedTrailType: T,
+  enabled: boolean,
+): T[] {
+  if (!enabled) {
+    return markedTrailTypes.filter((value) => value !== markedTrailType);
+  }
+  return markedTrailTypes.includes(markedTrailType)
+    ? [...markedTrailTypes]
+    : [...markedTrailTypes, markedTrailType];
 }
 
 function stripTrailingSlashes(value: string): string {

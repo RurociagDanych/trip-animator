@@ -57,6 +57,8 @@ import {
   buildDeckOverlayProps,
   buildElevationCurtainData,
   buildMapLibreInitOptions,
+  mapStyleKey,
+  resolveMarkedTrailsOverlay,
   buildTerrariumDemSourceSpec,
   resolveMapStyleUrl,
   sanitizeMapStyle,
@@ -146,10 +148,6 @@ function ensureMarkedTrailsProtocol(): void {
   }
   maplibregl.addProtocol(MARKED_TRAILS_PMTILES_PROTOCOL, new Protocol().tile);
   markedTrailsProtocolRegistered = true;
-}
-
-function styleKeyOf(mapStyle: RenderSpecV2["map_style"], overlay: MarkedTrailsStyleOverlay): string {
-  return `${mapStyle}|${overlay.pmtilesUrl ?? ""}|${overlay.trailTypes.join(",")}`;
 }
 
 function TransitionGlyph({ icon }: { icon: TransitionIcon }) {
@@ -1401,10 +1399,13 @@ export function TripStageCanvas({
   const markedTrailsPmtilesUrl = markedTrailsBuild?.pmtilesUrl ?? null;
   // Memoized on strings: a new spec object with the same trail types must not reload the style.
   const markedTrailsOverlay = useMemo<MarkedTrailsStyleOverlay>(
-    () => ({
-      trailTypes: markedTrailTypesKey ? (markedTrailTypesKey.split(",") as MarkedTrailsStyleOverlay["trailTypes"]) : [],
-      pmtilesUrl: markedTrailsPmtilesUrl,
-    }),
+    () =>
+      resolveMarkedTrailsOverlay(
+        markedTrailTypesKey
+          ? (markedTrailTypesKey.split(",") as MarkedTrailsStyleOverlay["markedTrailTypes"])
+          : [],
+        markedTrailsPmtilesUrl,
+      ),
     [markedTrailTypesKey, markedTrailsPmtilesUrl],
   );
   const markedTrailsOverlayRef = useRef(markedTrailsOverlay);
@@ -1444,7 +1445,7 @@ export function TripStageCanvas({
     map.addControl(overlay as unknown as maplibregl.IControl);
     mapRef.current = map;
     overlayRef.current = overlay;
-    loadedStyleRef.current = styleKeyOf(spec.map_style, markedTrailsOverlayRef.current);
+    loadedStyleRef.current = mapStyleKey(spec.map_style, markedTrailsOverlayRef.current);
     fitAppliedBoundsRef.current = null;
 
     const handleManualMove = () => {
@@ -1514,7 +1515,7 @@ export function TripStageCanvas({
 
   useEffect(() => {
     const map = mapRef.current;
-    const styleKey = styleKeyOf(spec.map_style, markedTrailsOverlay);
+    const styleKey = mapStyleKey(spec.map_style, markedTrailsOverlay);
     if (!map || loadedStyleRef.current === styleKey) {
       return;
     }

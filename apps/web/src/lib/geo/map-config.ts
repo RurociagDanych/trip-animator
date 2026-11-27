@@ -18,8 +18,27 @@ export const MARKED_TRAILS_HIKING_LAYER_ID = "trip-marked-trails-hiking";
 const HIKING_DEFAULT_COLOUR = "#b91c1c";
 
 export interface MarkedTrailsStyleOverlay {
-  trailTypes: readonly MarkedTrailType[];
+  markedTrailTypes: readonly MarkedTrailType[];
   pmtilesUrl: string | null;
+}
+
+/**
+ * Returns the overlay for the map style. The PMTiles URL is kept only while a Marked Trail
+ * type is on, so a build published while the overlay is off does not reload the style.
+ */
+export function resolveMarkedTrailsOverlay(
+  markedTrailTypes: readonly MarkedTrailType[],
+  pmtilesUrl: string | null,
+): MarkedTrailsStyleOverlay {
+  return {
+    markedTrailTypes,
+    pmtilesUrl: markedTrailTypes.length > 0 ? pmtilesUrl : null,
+  };
+}
+
+/** Returns a key that changes exactly when the map style has to be rebuilt. */
+export function mapStyleKey(mapStyle: MapStylePreset, overlay: MarkedTrailsStyleOverlay): string {
+  return `${mapStyle}|${overlay.pmtilesUrl ?? ""}|${overlay.markedTrailTypes.join(",")}`;
 }
 
 export interface TrackFeatureDatum {
@@ -111,7 +130,7 @@ function injectMarkedTrailLayers(
   style: StyleSpecification,
   overlay: MarkedTrailsStyleOverlay,
 ): StyleSpecification {
-  if (!overlay.pmtilesUrl || !overlay.trailTypes.includes("hiking")) {
+  if (!overlay.pmtilesUrl || !overlay.markedTrailTypes.includes("hiking")) {
     return style;
   }
   const hikingLayer = {
@@ -123,7 +142,8 @@ function injectMarkedTrailLayers(
     filter: ["==", ["get", "type"], "hiking"],
     layout: { "line-cap": "round", "line-join": "round" },
     paint: {
-      "line-color": ["coalesce", ["get", "colour"], HIKING_DEFAULT_COLOUR],
+      // OSM colour values such as "red;white" do not parse; to-color falls back to the default.
+      "line-color": ["to-color", ["get", "colour"], HIKING_DEFAULT_COLOUR],
       "line-width": ["interpolate", ["linear"], ["zoom"], 9, 1, 13, 2.5],
       "line-opacity": 0.75,
     },
