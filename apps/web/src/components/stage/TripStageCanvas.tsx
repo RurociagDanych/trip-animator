@@ -66,6 +66,7 @@ import {
 import {
   MARKED_TRAILS_PMTILES_PROTOCOL,
   type MarkedTrailsBuild,
+  markedTrailsDataDate,
 } from "../../lib/geo/marked-trails";
 import {
   computeJourneyDurationS,
@@ -138,6 +139,7 @@ export interface TripStageCanvasProps {
     stageCount: number;
   };
   markedTrailsBuild?: MarkedTrailsBuild | null;
+  markedTrailsAttributionDate?: string | null;
 }
 
 let markedTrailsProtocolRegistered = false;
@@ -752,6 +754,7 @@ export function TripStageCanvas({
   projectTitle,
   totalStats,
   markedTrailsBuild = null,
+  markedTrailsAttributionDate = null,
 }: TripStageCanvasProps) {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
@@ -2502,7 +2505,14 @@ export function TripStageCanvas({
           <span>{spec.map_style}</span>
         </div>
       ) : null}
-      <MapAttribution styleId={spec.map_style} />
+      <MapAttribution
+        styleId={spec.map_style}
+        markedTrailsDataDate={
+          markedTrailsOverlay.pmtilesUrl
+            ? (markedTrailsAttributionDate ?? markedTrailsDataDate(markedTrailsBuild))
+            : null
+        }
+      />
     </div>
   );
 }

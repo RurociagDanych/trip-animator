@@ -7,11 +7,19 @@ const BASEMAP_CREDITS = ["© OpenFreeMap", "© OpenMapTiles", OSM_CONTRIBUTORS_C
 /**
  * Returns the credit lines the map must show for a style preset, in display order.
  *
- * Extension point: the Marked Trails overlay appends its data date here as an extra
- * argument, so the credit stays in one place for the editor, shared playback and films.
+ * `markedTrailsDataDate` is the date of the Marked Trails data and is passed only while the
+ * overlay is on with a published build; it follows the OpenStreetMap credit. Keeping it here
+ * serves the editor, shared playback and films from one place, and a render can pass the
+ * date of the build it pinned.
  */
-export function buildMapAttributionCredits(styleId: MapStylePreset): readonly string[] {
+export function buildMapAttributionCredits(
+  styleId: MapStylePreset,
+  markedTrailsDataDate?: string | null,
+): readonly string[] {
   const credits: string[] = [...BASEMAP_CREDITS];
+  if (markedTrailsDataDate) {
+    credits.push(`Marked Trails data: ${markedTrailsDataDate}`);
+  }
   if (styleId === "topo-relief") {
     credits.push("Elevation: Mapzen Terrain Tiles");
   }

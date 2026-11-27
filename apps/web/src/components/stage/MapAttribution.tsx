@@ -7,8 +7,14 @@ import { buildMapAttributionCredits } from "../../lib/geo/map-attribution";
  * Lives in the stage React tree rather than MapLibre's attribution control because
  * the render route captures this DOM into MP4 frames; the MapLibre control is not in them.
  */
-export function MapAttribution({ styleId }: { styleId: MapStylePreset }) {
-  const credits = buildMapAttributionCredits(styleId);
+export function MapAttribution({
+  styleId,
+  markedTrailsDataDate = null,
+}: {
+  styleId: MapStylePreset;
+  markedTrailsDataDate?: string | null;
+}) {
+  const credits = buildMapAttributionCredits(styleId, markedTrailsDataDate);
   return (
     <div
       data-testid="map-attribution"
