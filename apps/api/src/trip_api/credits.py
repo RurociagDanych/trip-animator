@@ -103,6 +103,7 @@ def debit_render_credits(
     resolution: str,
     fps: int,
     already_locked: bool = False,
+    render_job: RenderJob | None = None,
 ) -> CreditLedgerEntry:
     if cost <= 0:
         raise ValueError("Render credit debit cost must be positive")
@@ -122,6 +123,7 @@ def debit_render_credits(
         delta=-cost,
         entry_type="render_debit",
         render_job_id=job_id,
+        render_job=render_job,
         idempotency_key=f"render_debit:{job_id}",
         note=f"Server Render ({resolution} @ {fps} fps)",
     )

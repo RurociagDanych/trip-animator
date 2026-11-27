@@ -370,7 +370,6 @@ def create_render_job(
     try:
         db.add(job)
         if debit_cost > 0:
-            db.flush()
             debit_render_credits(
                 db,
                 user_id=auth.user.id,
@@ -379,6 +378,7 @@ def create_render_job(
                 resolution=spec.resolution,
                 fps=spec.fps,
                 already_locked=True,
+                render_job=job,
             )
         write_audit_event(
             db,

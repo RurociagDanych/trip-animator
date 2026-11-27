@@ -26,7 +26,15 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker, validates
+from sqlalchemy.orm import (
+    DeclarativeBase,
+    Mapped,
+    Session,
+    mapped_column,
+    relationship,
+    sessionmaker,
+    validates,
+)
 from trip_telemetry import VALID_ACTIVITY_TYPES
 
 from trip_api.activity_search import normalize_activity_search
@@ -845,6 +853,7 @@ class CreditLedgerEntry(Base):
         nullable=True,
         index=True,
     )
+    render_job: Mapped[RenderJob | None] = relationship("RenderJob", foreign_keys=[render_job_id])
     voucher_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey("credit_vouchers.id", ondelete="SET NULL"),
