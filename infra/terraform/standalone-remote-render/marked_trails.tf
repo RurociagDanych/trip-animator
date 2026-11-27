@@ -1,9 +1,13 @@
 locals {
-  marked_trails_bucket_name = "${var.name_prefix}-marked-trails-${data.aws_caller_identity.current.account_id}-${data.aws_region.current.name}"
+  marked_trails_enabled     = length(var.marked_trails_app_origins) > 0
+  marked_trails_count       = local.marked_trails_enabled ? 1 : 0
+  marked_trails_bucket_name = "${var.name_prefix}-marked-trails-${data.aws_caller_identity.current.account_id}"
   marked_trails_prefix      = trim(var.marked_trails_prefix, "/")
 }
 
 resource "aws_s3_bucket" "marked_trails" {
+  count = local.marked_trails_count
+
   bucket        = local.marked_trails_bucket_name
   force_destroy = false
 
@@ -16,7 +20,9 @@ resource "aws_s3_bucket" "marked_trails" {
 }
 
 resource "aws_s3_bucket_ownership_controls" "marked_trails" {
-  bucket = aws_s3_bucket.marked_trails.id
+  count = local.marked_trails_count
+
+  bucket = aws_s3_bucket.marked_trails[0].id
 
   rule {
     object_ownership = "BucketOwnerEnforced"
@@ -24,7 +30,9 @@ resource "aws_s3_bucket_ownership_controls" "marked_trails" {
 }
 
 resource "aws_s3_bucket_public_access_block" "marked_trails" {
-  bucket                  = aws_s3_bucket.marked_trails.id
+  count = local.marked_trails_count
+
+  bucket                  = aws_s3_bucket.marked_trails[0].id
   block_public_acls       = true
   block_public_policy     = true
   ignore_public_acls      = true
@@ -33,7 +41,9 @@ resource "aws_s3_bucket_public_access_block" "marked_trails" {
 
 # SSE-S3 rather than KMS: origin access control would otherwise need the key policy to trust CloudFront.
 resource "aws_s3_bucket_server_side_encryption_configuration" "marked_trails" {
-  bucket = aws_s3_bucket.marked_trails.id
+  count = local.marked_trails_count
+
+  bucket = aws_s3_bucket.marked_trails[0].id
 
   rule {
     apply_server_side_encryption_by_default {
@@ -45,7 +55,9 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "marked_trails" {
 # Only incomplete multipart uploads expire. An expiration rule on builds/ or current.json could delete the
 # build that readers use, because builds are replaced by the publisher and never age out on their own.
 resource "aws_s3_bucket_lifecycle_configuration" "marked_trails" {
-  bucket = aws_s3_bucket.marked_trails.id
+  count = local.marked_trails_count
+
+  bucket = aws_s3_bucket.marked_trails[0].id
 
   rule {
     id     = "abort-incomplete-multipart-uploads"
@@ -60,6 +72,8 @@ resource "aws_s3_bucket_lifecycle_configuration" "marked_trails" {
 }
 
 resource "aws_cloudfront_origin_access_control" "marked_trails" {
+  count = local.marked_trails_count
+
   name                              = "${var.name_prefix}-marked-trails"
   description                       = "Origin access control for the Marked Trails bucket."
   origin_access_control_origin_type = "s3"
@@ -68,10 +82,20 @@ resource "aws_cloudfront_origin_access_control" "marked_trails" {
 }
 
 data "aws_cloudfront_cache_policy" "marked_trails_caching_optimized" {
+  count = local.marked_trails_count
+
   name = "Managed-CachingOptimized"
 }
 
+data "aws_cloudfront_cache_policy" "marked_trails_caching_disabled" {
+  count = local.marked_trails_count
+
+  name = "Managed-CachingDisabled"
+}
+
 resource "aws_cloudfront_response_headers_policy" "marked_trails" {
+  count = local.marked_trails_count
+
   name    = "${var.name_prefix}-marked-trails-cors"
   comment = "CORS for PMTiles range reads from the Trip Animator app origins."
 
@@ -99,6 +123,8 @@ resource "aws_cloudfront_response_headers_policy" "marked_trails" {
 }
 
 resource "aws_cloudfront_distribution" "marked_trails" {
+  count = local.marked_trails_count
+
   enabled         = true
   comment         = "Marked Trails PMTiles for ${var.name_prefix}"
   http_version    = "http2and3"
@@ -106,9 +132,9 @@ resource "aws_cloudfront_distribution" "marked_trails" {
   price_class     = var.marked_trails_price_class
 
   origin {
-    domain_name              = aws_s3_bucket.marked_trails.bucket_regional_domain_name
+    domain_name              = aws_s3_bucket.marked_trails[0].bucket_regional_domain_name
     origin_id                = "marked-trails-s3"
-    origin_access_control_id = aws_cloudfront_origin_access_control.marked_trails.id
+    origin_access_control_id = aws_cloudfront_origin_access_control.marked_trails[0].id
   }
 
   default_cache_behavior {
@@ -116,10 +142,21 @@ resource "aws_cloudfront_distribution" "marked_trails" {
     viewer_protocol_policy     = "https-only"
     allowed_methods            = ["GET", "HEAD", "OPTIONS"]
     cached_methods             = ["GET", "HEAD"]
-    cache_policy_id            = data.aws_cloudfront_cache_policy.marked_trails_caching_optimized.id
-    response_headers_policy_id = aws_cloudfront_response_headers_policy.marked_trails.id
+    cache_policy_id            = data.aws_cloudfront_cache_policy.marked_trails_caching_optimized[0].id
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.marked_trails[0].id
     # Compression would change byte offsets that PMTiles range requests rely on.
     compress = false
+  }
+
+  ordered_cache_behavior {
+    path_pattern               = "${local.marked_trails_prefix}/current.json"
+    target_origin_id           = "marked-trails-s3"
+    viewer_protocol_policy     = "https-only"
+    allowed_methods            = ["GET", "HEAD", "OPTIONS"]
+    cached_methods             = ["GET", "HEAD"]
+    cache_policy_id            = data.aws_cloudfront_cache_policy.marked_trails_caching_disabled[0].id
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.marked_trails[0].id
+    compress                   = false
   }
 
   restrictions {
@@ -134,6 +171,8 @@ resource "aws_cloudfront_distribution" "marked_trails" {
 }
 
 data "aws_iam_policy_document" "marked_trails_bucket" {
+  count = local.marked_trails_count
+
   statement {
     sid     = "DenyInsecureTransport"
     effect  = "Deny"
@@ -145,8 +184,8 @@ data "aws_iam_policy_document" "marked_trails_bucket" {
     }
 
     resources = [
-      aws_s3_bucket.marked_trails.arn,
-      "${aws_s3_bucket.marked_trails.arn}/*",
+      aws_s3_bucket.marked_trails[0].arn,
+      "${aws_s3_bucket.marked_trails[0].arn}/*",
     ]
 
     condition {
@@ -160,7 +199,7 @@ data "aws_iam_policy_document" "marked_trails_bucket" {
     sid       = "AllowCloudFrontRead"
     effect    = "Allow"
     actions   = ["s3:GetObject"]
-    resources = ["${aws_s3_bucket.marked_trails.arn}/${local.marked_trails_prefix}/*"]
+    resources = ["${aws_s3_bucket.marked_trails[0].arn}/${local.marked_trails_prefix}/*"]
 
     principals {
       type        = "Service"
@@ -170,19 +209,23 @@ data "aws_iam_policy_document" "marked_trails_bucket" {
     condition {
       test     = "StringEquals"
       variable = "AWS:SourceArn"
-      values   = [aws_cloudfront_distribution.marked_trails.arn]
+      values   = [aws_cloudfront_distribution.marked_trails[0].arn]
     }
   }
 }
 
 resource "aws_s3_bucket_policy" "marked_trails" {
-  bucket = aws_s3_bucket.marked_trails.id
-  policy = data.aws_iam_policy_document.marked_trails_bucket.json
+  count = local.marked_trails_count
+
+  bucket = aws_s3_bucket.marked_trails[0].id
+  policy = data.aws_iam_policy_document.marked_trails_bucket[0].json
 
   depends_on = [aws_s3_bucket_public_access_block.marked_trails]
 }
 
 data "aws_iam_policy_document" "marked_trails_publisher" {
+  count = local.marked_trails_count
+
   statement {
     sid    = "TrailPrefixObjects"
     effect = "Allow"
@@ -192,14 +235,14 @@ data "aws_iam_policy_document" "marked_trails_publisher" {
       "s3:DeleteObject",
       "s3:AbortMultipartUpload",
     ]
-    resources = ["${aws_s3_bucket.marked_trails.arn}/${local.marked_trails_prefix}/*"]
+    resources = ["${aws_s3_bucket.marked_trails[0].arn}/${local.marked_trails_prefix}/*"]
   }
 
   statement {
     sid       = "TrailPrefixList"
     effect    = "Allow"
     actions   = ["s3:ListBucket"]
-    resources = [aws_s3_bucket.marked_trails.arn]
+    resources = [aws_s3_bucket.marked_trails[0].arn]
 
     condition {
       test     = "StringLike"
@@ -207,26 +250,12 @@ data "aws_iam_policy_document" "marked_trails_publisher" {
       values   = ["${local.marked_trails_prefix}/*"]
     }
   }
-
-  # S3 answers a HEAD for a missing key with 404 only when the caller may list the bucket, and a HEAD
-  # carries no s3:prefix. The publisher's existence checks need that 404, so unprefixed ListBucket is
-  # allowed; this bucket holds nothing but Marked Trails.
-  statement {
-    sid       = "TrailExistenceChecks"
-    effect    = "Allow"
-    actions   = ["s3:ListBucket"]
-    resources = [aws_s3_bucket.marked_trails.arn]
-
-    condition {
-      test     = "Null"
-      variable = "s3:prefix"
-      values   = ["true"]
-    }
-  }
 }
 
 resource "aws_iam_policy" "marked_trails_publisher" {
+  count = local.marked_trails_count
+
   name        = "${var.name_prefix}-marked-trails-publisher-policy"
   description = "Least-privilege policy for the Airflow Marked Trails publisher."
-  policy      = data.aws_iam_policy_document.marked_trails_publisher.json
+  policy      = data.aws_iam_policy_document.marked_trails_publisher[0].json
 }

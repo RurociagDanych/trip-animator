@@ -82,11 +82,11 @@ The target builds the builder image (osmium, Planetiler and the `trip-marked-tra
 
 ### Marked Trails on AWS
 
-Production serves the trail store from a private S3 bucket behind CloudFront. Both come from `infra/terraform/standalone-remote-render`, the root that deploys the render Lambdas, in `us-east-1` (the root rejects another region for the bucket). A cloud build needs these steps, in order:
+Production serves the trail store from a private S3 bucket behind CloudFront. Both come from `infra/terraform/standalone-remote-render`, the root that deploys the render Lambdas. The bucket must be in `us-east-1` and the root rejects another region, but the Makefile default is `eu-central-1`, so deploy with `make remote-render-deploy REMOTE_RENDER_AWS_REGION=us-east-1` (`terraform.tfvars.example` also sets `us-east-1`). The Marked Trails resources are created only when `marked_trails_app_origins` is not empty; without it the deploy is the render stack alone. A cloud build needs these steps, in order:
 
-1. Set `marked_trails_app_origins` in that root's `terraform.tfvars` to the app origins that read the tiles in the browser, for example `["https://trips.example.com"]`. The CloudFront response headers policy answers only those origins, allows `GET` and `HEAD` with `Range`, and exposes `Content-Range`, `ETag` and `Accept-Ranges`. `marked_trails_prefix` (default `marked-trails`) is the key prefix of the store.
+1. Set `marked_trails_app_origins` (default empty, which creates nothing) in that root's `terraform.tfvars` to the app origins that read the tiles in the browser, for example `["https://trips.example.com"]`. The CloudFront response headers policy answers only those origins, allows `GET` and `HEAD` with `Range`, and exposes `Content-Range`, `ETag` and `Accept-Ranges`. `marked_trails_prefix` (default `marked-trails`) is the key prefix of the store.
 2. Review `terraform plan`, then `terraform apply`. Read the outputs: `marked_trails_bucket_name`, `marked_trails_base_url`, `marked_trails_cloudfront_origin` and `marked_trails_publisher_policy_arn`.
-3. Attach the policy of `marked_trails_publisher_policy_arn` to the IAM user or role that Airflow uses. It allows get, put, delete and list under the prefix only.
+3. Attach the policy of `marked_trails_publisher_policy_arn` to the IAM user or role that Airflow uses. It allows get, put, delete and abort-multipart on keys under the prefix and `ListBucket` only with the prefix condition. Existence checks of the CLI list the full key with `MaxKeys` 1 instead of sending a HEAD, so no unprefixed list permission is needed.
 4. Add the CloudFront origin (`https://<id>.cloudfront.net`, from `marked_trails_cloudfront_origin`) to the render tile allowlist and to the edge CSP tile origins, keeping the origins that are already there:
    - Lambda renders: append it to `map_tile_allowlist` in the Terraform tfvars (comma-separated, for example `https://tiles.openfreemap.org,https://<id>.cloudfront.net`), then apply.
    - VPS renders: append it to `MAP_TILE_ALLOWLIST` in `.env`.
@@ -102,7 +102,19 @@ export MARKED_TRAILS_S3_REGION=us-east-1
 trip-marked-trails build-publish --region europe/andorra --work-dir /work
 ```
 
-`MARKED_TRAILS_S3_PREFIX` must equal `marked_trails_prefix`. Build files are uploaded as `application/vnd.pmtiles` with `public, max-age=31536000, immutable`; `current.json` is uploaded as `application/json` with `no-cache, no-store, must-revalidate`. The bucket has no expiration rule: only the publisher deletes builds.
+`MARKED_TRAILS_S3_PREFIX` must equal `marked_trails_prefix`. Build files are uploaded as `application/vnd.pmtiles` with `public, max-age=31536000, immutable`; `current.json` is uploaded as `application/json` with `no-cache, no-store, must-revalidate`. The bucket has no expiration rule: only the publisher deletes builds. Bucket versioning is off, so a deleted or overwritten object cannot be restored from the bucket. CloudFront serves `current.json` with the managed CachingDisabled policy and the builds with CachingOptimized. A key that does not exist answers 403 through CloudFront, not 404, because the origin access control grants only `GetObject`.
+
+### Marked Trails publication policy and rollback
+
+`build-publish` follows one order: check that `current.json` is valid (its `current_build_id` is a build id, `pmtiles_key` is the key of that build, and the object exists), delete every build except the current one, build the new PMTiles file, validate the local file, upload it under `builds/<build id>/`, then overwrite `current.json`. An invalid `current.json` stops the run before anything is deleted. Build ids are never reused: a later build on the same date gets the next numeric suffix above every id in the store and in the pointer. The store never holds more than two builds, the current one and the previous one kept for rollback. Validation requires a non-empty file with at least one Marked Trail relation, at most `--size-budget-bytes` (environment `MARKED_TRAILS_SIZE_BUDGET_BYTES`, default 1073741824, 1 GiB; empty means the default, zero or below is rejected) and, when a current build exists, its size and `marked_trail_count` to be within 20% of the current build. The first build is checked only against the budget. After the upload the stored size must equal the local size. A failed build, failed validation or failed upload leaves `current.json` unchanged and the command exits with status 1.
+
+The previous build is deleted when a new build starts, so after a failed run `previous_build_id` in `current.json` can name a build that no longer exists. Rollback is only possible while the previous build is in the store, which is right after a successful run.
+
+To roll back, check that `builds/<previous_build_id>/marked-trails.pmtiles` exists in the store, then edit `current.json`:
+
+1. Set `current_build_id` to the old `previous_build_id`, and set `pmtiles_key` to `builds/<that build id>/marked-trails.pmtiles` (it must match `current_build_id`, or the next run refuses to prune), `size_bytes`, `sha256`, `osm_data_date` and `marked_trail_count` to that build's values.
+2. Set `previous_build_id` to the build being rolled back from, or to `null`. Never change or remove `last_build_id`: it is the highest build id ever allocated, and the next build id is allocated above it. Do not set `previous_build_id` to `null` on a pointer that has no `last_build_id` (written by an older version); first set `last_build_id` to the highest build id that existed.
+3. Write the file back with `Cache-Control: no-cache`. For an S3 store use `aws s3 cp current.json s3://<marked_trails_bucket_name>/<marked_trails_prefix>/current.json --content-type application/json --cache-control "no-cache, no-store, must-revalidate"`; the content type and cache control are replaced by the upload, so pass both. The next `build-publish` run then deletes every build except the new current one.
 
 ## Strava OAuth2 setup
 

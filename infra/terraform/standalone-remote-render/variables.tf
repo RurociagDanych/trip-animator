@@ -79,11 +79,12 @@ variable "tags" {
 
 variable "marked_trails_app_origins" {
   type        = list(string)
-  description = "App origins allowed to read Marked Trails through CloudFront with CORS, for example [\"https://trips.example.com\"]. No default: set it in the tfvars."
+  default     = []
+  description = "App origins allowed to read Marked Trails through CloudFront with CORS, for example [\"https://trips.example.com\"]. An empty list creates no Marked Trails resources."
 
   validation {
-    condition     = length(var.marked_trails_app_origins) > 0 && alltrue([for origin in var.marked_trails_app_origins : can(regex("^https?://[^/*]+$", origin))])
-    error_message = "marked_trails_app_origins must list at least one origin like https://host[:port], without a path or a wildcard."
+    condition     = alltrue([for origin in var.marked_trails_app_origins : can(regex("^https?://[^/*]+$", origin))])
+    error_message = "marked_trails_app_origins must be empty or list origins like https://host[:port], without a path or a wildcard."
   }
 }
 

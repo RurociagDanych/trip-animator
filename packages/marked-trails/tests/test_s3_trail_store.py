@@ -6,8 +6,12 @@ import pytest
 from botocore.exceptions import ClientError
 from trip_marked_trails.cli import main
 from trip_marked_trails.pipeline import BuildArtifact
-from trip_marked_trails.trail_store import TrailStoreSettings, build_trail_store
-from trip_object_store import LocalObjectStore, S3ObjectStore
+from trip_marked_trails.trail_store import (
+    ListingS3ObjectStore,
+    TrailStoreSettings,
+    build_trail_store,
+)
+from trip_object_store import LocalObjectStore
 
 BUCKET = "trail-bucket"
 PAYLOAD = b"PMTiles-fake-build-payload"
@@ -17,6 +21,26 @@ class FakeS3Client:
     def __init__(self) -> None:
         self.objects: dict[str, bytes] = {}
         self.extra_args: dict[str, dict[str, Any]] = {}
+        self.listing_error: ClientError | None = None
+        self.truncate_uploads = False
+        self.fail_uploads = False
+        self.head_calls = 0
+
+    def get_paginator(self, operation: str) -> "FakePaginator":
+        assert operation == "list_objects_v2"
+        return FakePaginator(self)
+
+    def list_objects_v2(self, **kwargs: Any) -> dict[str, Any]:
+        if self.listing_error is not None:
+            raise self.listing_error
+        prefix = kwargs.get("Prefix", "")
+        keys = sorted(key for key in self.objects if key.startswith(prefix))
+        keys = keys[: kwargs.get("MaxKeys", len(keys))]
+        return {"Contents": [{"Key": key, "Size": len(self.objects[key])} for key in keys]}
+
+    def delete_object(self, **kwargs: Any) -> None:
+        assert kwargs["Bucket"] == BUCKET
+        self.objects.pop(kwargs["Key"], None)
 
     def put_object(self, **kwargs: Any) -> None:
         key = kwargs["Key"]
@@ -28,10 +52,14 @@ class FakeS3Client:
 
     def upload_file(self, filename: str, bucket: str, key: str, **kwargs: Any) -> None:
         assert bucket == BUCKET
-        self.objects[key] = Path(filename).read_bytes()
+        data = Path(filename).read_bytes()
+        self.objects[key] = data[: len(data) // 2] if self.truncate_uploads else data
         self.extra_args[key] = dict(kwargs["ExtraArgs"])
+        if self.fail_uploads:
+            raise RuntimeError("connection reset during upload")
 
     def head_object(self, **kwargs: Any) -> dict[str, Any]:
+        self.head_calls += 1
         key = kwargs["Key"]
         if key not in self.objects:
             raise ClientError(
@@ -57,6 +85,24 @@ class FakeS3Client:
                 return None
 
         return {"Body": Body()}
+
+
+class FakePaginator:
+    def __init__(self, client: FakeS3Client) -> None:
+        self.client = client
+
+    def paginate(self, **kwargs: Any) -> list[dict[str, Any]]:
+        return [self.client.list_objects_v2(**kwargs)]
+
+
+def access_denied(operation: str) -> ClientError:
+    return ClientError(
+        {
+            "Error": {"Code": "AccessDenied", "Message": "Access Denied"},
+            "ResponseMetadata": {"HTTPStatusCode": 403},
+        },
+        operation,
+    )
 
 
 def fake_build(region: str, work_dir: Path) -> BuildArtifact:
@@ -187,10 +233,110 @@ def test_build_trail_store_returns_local_and_s3_stores(tmp_path: Path) -> None:
     )
 
     assert isinstance(local, LocalObjectStore)
-    assert isinstance(remote, S3ObjectStore)
+    assert isinstance(remote, ListingS3ObjectStore)
     assert remote.key_prefix == "a/b/"
 
 
 def test_build_trail_store_rejects_an_unknown_backend() -> None:
     with pytest.raises(ValueError, match="backend"):
         build_trail_store(TrailStoreSettings(backend="gcs"))
+
+
+S3_ARGS = ("--store", "s3", "--s3-bucket", BUCKET)
+OLD_PMTILES = "marked-trails/builds/{}/marked-trails.pmtiles"
+
+
+def test_s3_publish_prunes_builds_older_than_the_current_one(tmp_path: Path) -> None:
+    client = FakeS3Client()
+    for date in ("2026-11-01", "2026-11-02", "2026-11-03"):
+        code = main(
+            [
+                "build-publish",
+                "--region",
+                "europe/andorra",
+                "--work-dir",
+                str(tmp_path / "work"),
+                "--build-date",
+                date,
+                *S3_ARGS,
+            ],
+            build_step=fake_build,
+            s3_client=client,
+        )
+        assert code == 0
+
+    assert sorted(client.objects) == [
+        OLD_PMTILES.format("2026-11-02"),
+        OLD_PMTILES.format("2026-11-03"),
+        "marked-trails/current.json",
+    ]
+
+
+def test_s3_publish_removes_a_short_upload_and_keeps_the_pointer(tmp_path: Path) -> None:
+    client = FakeS3Client()
+    assert publish_to_s3(tmp_path, client, *S3_ARGS) == 0
+    pointer_before = client.objects["marked-trails/current.json"]
+    client.truncate_uploads = True
+
+    code = publish_to_s3(tmp_path, client, *S3_ARGS)
+
+    assert code == 1
+    assert client.objects["marked-trails/current.json"] == pointer_before
+    assert sorted(client.objects) == [
+        OLD_PMTILES.format("2026-11-27"),
+        "marked-trails/current.json",
+    ]
+
+
+def test_s3_publish_removes_a_partial_object_after_a_failed_upload(tmp_path: Path) -> None:
+    client = FakeS3Client()
+    client.fail_uploads = True
+
+    code = publish_to_s3(tmp_path, client, *S3_ARGS)
+
+    assert code == 1
+    assert client.objects == {}
+
+
+def test_access_denied_on_the_existence_check_fails_the_publish(tmp_path: Path) -> None:
+    client = FakeS3Client()
+    assert publish_to_s3(tmp_path, client, *S3_ARGS) == 0
+    pointer_before = client.objects["marked-trails/current.json"]
+    client.listing_error = access_denied("ListObjectsV2")
+
+    code = publish_to_s3(tmp_path, client, *S3_ARGS)
+
+    assert code == 1
+    assert client.objects["marked-trails/current.json"] == pointer_before
+
+
+def test_s3_existence_check_lists_the_full_key_and_never_sends_head(tmp_path: Path) -> None:
+    client = FakeS3Client()
+    client.objects["marked-trails/builds/2026-11-01/marked-trails.pmtiles.bak"] = b"x"
+    store = build_trail_store(TrailStoreSettings(backend="s3", s3_bucket=BUCKET), s3_client=client)
+
+    assert not store.exists("builds/2026-11-01/marked-trails.pmtiles")
+    client.objects["marked-trails/builds/2026-11-01/marked-trails.pmtiles"] = b"y"
+    assert store.exists("builds/2026-11-01/marked-trails.pmtiles")
+    assert client.head_calls == 0
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ("--store", "gcs"),
+        ("--store", "s3", "--s3-bucket", BUCKET, "--s3-prefix", " / "),
+        ("--store", "s3", "--s3-bucket", BUCKET, "--store-dir", "/tmp/unused"),
+    ],
+    ids=["unknown-store", "empty-prefix", "store-dir-with-s3"],
+)
+def test_invalid_store_settings_exit_with_a_usage_error(
+    tmp_path: Path, extra: tuple[str, ...]
+) -> None:
+    client = FakeS3Client()
+
+    with pytest.raises(SystemExit) as exc:
+        publish_to_s3(tmp_path, client, *extra)
+
+    assert exc.value.code == 2
+    assert client.objects == {}

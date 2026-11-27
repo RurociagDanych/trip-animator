@@ -25,7 +25,7 @@ infra/terraform/
 
 ## Standalone Remote Render Root
 
-`standalone-remote-render/` is a separate root, deployed in `us-east-1`, that holds the render Lambdas, the Step Functions state machine and the Marked Trails storage: a private S3 bucket, a CloudFront distribution with origin access control and a CORS response headers policy, and the IAM policy of the Airflow publisher. `marked_trails_app_origins` has no default and must be set in its tfvars. See [Marked Trails on AWS](../../docs/OPERATIONS.md#marked-trails-on-aws) for the apply steps and for adding the CloudFront host to `map_tile_allowlist` and `CADDY_TILE_CSP_ORIGINS`.
+`standalone-remote-render/` is a separate root, deployed in `us-east-1`, that holds the render Lambdas, the Step Functions state machine and the Marked Trails storage: a private S3 bucket, a CloudFront distribution with origin access control and a CORS response headers policy, and the IAM policy of the Airflow publisher. `marked_trails_app_origins` defaults to an empty list, which creates none of the Marked Trails resources; set it in the tfvars to enable them. See [Marked Trails on AWS](../../docs/OPERATIONS.md#marked-trails-on-aws) for the apply steps and for adding the CloudFront host to `map_tile_allowlist` and `CADDY_TILE_CSP_ORIGINS`.
 
 ## Quick Validation
 

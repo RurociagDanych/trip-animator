@@ -97,7 +97,8 @@ def test_publish_reads_a_pointer_with_unknown_keys_and_without_newer_fields(
     tmp_path: Path,
 ) -> None:
     store_dir = tmp_path / "store"
-    store_dir.mkdir()
+    (store_dir / "builds/2026-11-20").mkdir(parents=True)
+    (store_dir / "builds/2026-11-20/marked-trails.pmtiles").write_bytes(BUILD_PAYLOAD)
     (store_dir / "current.json").write_text(
         json.dumps(
             {
@@ -106,7 +107,7 @@ def test_publish_reads_a_pointer_with_unknown_keys_and_without_newer_fields(
                 "current_build_id": "2026-11-20",
                 "previous_build_id": None,
                 "pmtiles_key": "builds/2026-11-20/marked-trails.pmtiles",
-                "size_bytes": 10,
+                "size_bytes": len(BUILD_PAYLOAD),
                 "sha256": "00",
                 "osm_data_date": None,
                 "built_at": "2026-11-20T10:00:00+00:00",

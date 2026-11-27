@@ -17,7 +17,13 @@ from trip_marked_trails.pipeline import (
     run_build,
     validate_region,
 )
-from trip_marked_trails.publish import publish_build
+from trip_marked_trails.publish import (
+    DEFAULT_SIZE_BUDGET_BYTES,
+    PointerWriteError,
+    delete_superseded_builds,
+    publish_build,
+    read_pointer,
+)
 from trip_marked_trails.trail_store import (
     DEFAULT_S3_PREFIX,
     TrailStoreSettings,
@@ -26,7 +32,20 @@ from trip_marked_trails.trail_store import (
 
 logger = logging.getLogger("trip_marked_trails")
 
+STORE_CHOICES = ("local", "s3")
+
 BuildStep = Callable[[str, Path], BuildArtifact]
+
+
+def positive_int(value: str) -> int:
+    """Parse an integer argument that must be at least 1."""
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not an integer") from None
+    if number <= 0:
+        raise argparse.ArgumentTypeError(f"{value!r} must be greater than zero")
+    return number
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -48,8 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     publish.add_argument(
         "--store",
-        choices=("local", "s3"),
-        default=os.environ.get("MARKED_TRAILS_STORE", "local"),
+        default=os.environ.get("MARKED_TRAILS_STORE") or "local",
         help="Trail store backend; defaults to MARKED_TRAILS_STORE, then local",
     )
     publish.add_argument("--store-dir", type=Path, default=None, help="Local trail store root")
@@ -60,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     publish.add_argument(
         "--s3-prefix",
-        default=os.environ.get("MARKED_TRAILS_S3_PREFIX", DEFAULT_S3_PREFIX),
+        default=os.environ.get("MARKED_TRAILS_S3_PREFIX") or DEFAULT_S3_PREFIX,
         help="Key prefix inside the bucket; defaults to MARKED_TRAILS_S3_PREFIX, then "
         f"{DEFAULT_S3_PREFIX}",
     )
@@ -83,6 +101,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("MARKED_TRAILS_PLANETILER_CLASSPATH", DEFAULT_PLANETILER_CLASSPATH),
         help="Classpath with the compiled Marked Trails profile and Planetiler jars",
     )
+    publish.add_argument(
+        "--size-budget-bytes",
+        type=positive_int,
+        default=os.environ.get("MARKED_TRAILS_SIZE_BUDGET_BYTES") or DEFAULT_SIZE_BUDGET_BYTES,
+        help="Largest PMTiles file a build may have, in bytes; defaults to 1 GiB",
+    )
     return parser
 
 
@@ -94,6 +118,12 @@ def main(
 ) -> int:
     """Run a command and return the process exit code.
 
+    Order: check the pointer and delete the builds older than the current one, run the build,
+    validate the local file, upload it under its own prefix, then overwrite `current.json`.
+    Any failure returns 1. Before the pointer write `current.json` is left as it was; if the
+    pointer write itself fails it may or may not have changed, and the log says so. An invalid
+    pointer deletes nothing.
+
     `build_step` replaces the osmium and Planetiler build in tests and `s3_client` replaces
     the boto3 client; publication policy is the same either way. The built file in the work
     directory is deleted once published.
@@ -101,10 +131,19 @@ def main(
     parser = build_parser()
     args = parser.parse_args(argv)
     build_date = args.build_date or datetime.now(UTC).date()
+    if args.store not in STORE_CHOICES:
+        parser.error(
+            f"MARKED_TRAILS_STORE must be one of {', '.join(STORE_CHOICES)}, got {args.store!r}"
+        )
     if args.store == "local" and args.store_dir is None:
         parser.error("--store-dir is required for the local store")
-    if args.store == "s3" and not args.s3_bucket.strip():
-        parser.error("--s3-bucket or MARKED_TRAILS_S3_BUCKET is required for the s3 store")
+    if args.store == "s3":
+        if args.store_dir is not None:
+            parser.error("--store-dir cannot be used with --store s3")
+        if not args.s3_bucket.strip():
+            parser.error("--s3-bucket or MARKED_TRAILS_S3_BUCKET is required for the s3 store")
+        if not args.s3_prefix.strip().strip("/"):
+            parser.error("--s3-prefix or MARKED_TRAILS_S3_PREFIX must not be empty")
     store = build_trail_store(
         TrailStoreSettings(
             backend=args.store,
@@ -117,13 +156,25 @@ def main(
     )
     step = build_step or _default_build_step(args.planetiler_classpath, args.extract)
     try:
+        pointer = read_pointer(store)
+        for key in delete_superseded_builds(store, pointer):
+            logger.info("Deleted superseded build object %s", key)
         artifact = step(args.region, args.work_dir)
-        pointer = publish_build(
+        published = publish_build(
             store,
             region=args.region,
             build_date=build_date,
             artifact=artifact,
+            previous=pointer,
+            size_budget_bytes=args.size_budget_bytes,
         )
+    except PointerWriteError:
+        logger.exception(
+            "Marked Trails build for %s failed while writing the pointer; "
+            "the published pointer may have changed",
+            args.region,
+        )
+        return 1
     except Exception:
         logger.exception(
             "Marked Trails build for %s failed; the published pointer is unchanged", args.region
@@ -132,11 +183,11 @@ def main(
     artifact.pmtiles_path.unlink(missing_ok=True)
     logger.info(
         "Published build %s for %s (%d bytes, %s Marked Trail relations, sha256 %s)",
-        pointer.current_build_id,
-        pointer.region,
-        pointer.size_bytes,
-        pointer.marked_trail_count,
-        pointer.sha256,
+        published.current_build_id,
+        published.region,
+        published.size_bytes,
+        published.marked_trail_count,
+        published.sha256,
     )
     return 0
 

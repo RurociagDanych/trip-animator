@@ -11,6 +11,20 @@ from trip_object_store import LocalObjectStore, ObjectStore, S3ObjectStore
 DEFAULT_S3_PREFIX = "marked-trails"
 
 
+class ListingS3ObjectStore(S3ObjectStore):
+    """S3 store whose `exists` lists the key instead of sending a HEAD request.
+
+    A HEAD for a missing key answers 403 unless the caller may list the whole bucket. The
+    publisher policy grants `s3:ListBucket` only under the trail prefix, and a listing whose
+    `Prefix` is the full key stays inside that grant. Permission errors propagate.
+    """
+
+    def exists(self, key: str) -> bool:
+        full_key = self._full_key(key)
+        response = self.client.list_objects_v2(Bucket=self.bucket, Prefix=full_key, MaxKeys=1)
+        return any(obj.get("Key") == full_key for obj in response.get("Contents") or ())
+
+
 @dataclass(frozen=True, slots=True)
 class TrailStoreSettings:
     """Where the trail store lives.
@@ -40,10 +54,10 @@ def build_trail_store(settings: TrailStoreSettings, *, s3_client: Any | None = N
         if not settings.s3_bucket.strip():
             raise ValueError("s3_bucket is required for the s3 backend")
         if s3_client is not None:
-            return S3ObjectStore(
+            return ListingS3ObjectStore(
                 bucket=settings.s3_bucket, key_prefix=settings.s3_prefix, client=s3_client
             )
-        return S3ObjectStore(
+        return ListingS3ObjectStore(
             bucket=settings.s3_bucket, key_prefix=settings.s3_prefix, region=settings.s3_region
         )
     raise ValueError(f"Unknown trail store backend: {settings.backend!r}")
