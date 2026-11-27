@@ -26,6 +26,13 @@ paths = ['''(^|/)apps/api/tests/test_security_and_health\.py$''']
 regexes = ['''^\s*if key == "missing-nokey\.mp4":$''']
 
 [[rules.allowlists]]
+description = "Object store package fake S3 client in PR history: nonexistent object filename for 404 handling"
+condition = "AND"
+regexTarget = "line"
+paths = ['''(^|/)packages/object-store/tests/test_object_store_s3\.py$''']
+regexes = ['''^\s*if key == "missing-nokey\.mp4":$''']
+
+[[rules.allowlists]]
 description = "Reaper test: explicit placeholder instead of a usable Argon2 password hash"
 condition = "AND"
 regexTarget = "line"
