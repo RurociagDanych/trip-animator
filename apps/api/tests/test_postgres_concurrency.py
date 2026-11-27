@@ -291,7 +291,7 @@ def test_postgres_alembic_upgrade_downgrade_upgrade_roundtrip(pg_temp_db_url: st
         assert "user_identities" in set(insp_reup.get_table_names())
         with engine_reup.connect() as conn:
             ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-            assert ver == "0014_user_identities_nullable_password"
+            assert ver == "0014_user_identities"
     finally:
         engine_reup.dispose()
 

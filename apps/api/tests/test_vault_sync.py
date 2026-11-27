@@ -161,7 +161,7 @@ def test_alembic_vault_sqlite_upgrade_downgrade_roundtrip(
         assert "user_identities" in set(insp.get_table_names())
         with engine.connect() as conn:
             ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-            assert ver == "0014_user_identities_nullable_password"
+            assert ver == "0014_user_identities"
     finally:
         engine.dispose()
 
