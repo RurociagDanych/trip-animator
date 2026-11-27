@@ -186,9 +186,11 @@ A VPS deployment exists.
 - [docs/OPERATIONS.md](docs/OPERATIONS.md): local setup, Strava OAuth setup, Compose deployment, observability and Airflow.
 - [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md): trust boundaries, threats and control matrix.
 - [docs/DEPLOY_VPS.md](docs/DEPLOY_VPS.md): manual VPS deployment through GitHub Actions.
+- [docs/decisions/0001-own-marked-trail-tiles.md](docs/decisions/0001-own-marked-trail-tiles.md): decision to build Marked Trail tiles and publish them to S3.
 - [docs/decisions/0002-shared-object-store.md](docs/decisions/0002-shared-object-store.md): one shared object store package for the API and the worker.
 - [docs/specs/ACTIVITY_LIBRARY_SPEC.md](docs/specs/ACTIVITY_LIBRARY_SPEC.md): Activity Library specification.
 - [docs/specs/CINEMATIC_PHOTOS_SPEC.md](docs/specs/CINEMATIC_PHOTOS_SPEC.md): cinematic photo-stop specification.
+- [docs/specs/MARKED_TRAILS_SPEC.md](docs/specs/MARKED_TRAILS_SPEC.md): Marked Trail overlay, tile build and publication specification.
 - [docs/specs/OBSERVABILITY_SPEC.md](docs/specs/OBSERVABILITY_SPEC.md): self-hosted observability specification.
 - [docs/specs/PUBLIC_LAUNCH_AND_CREDITS_SPEC.md](docs/specs/PUBLIC_LAUNCH_AND_CREDITS_SPEC.md): public launch, Google OIDC, Render Credits and Credit Voucher specification.
 - [docs/specs/REMOTE_RENDER_BACKEND_SPEC.md](docs/specs/REMOTE_RENDER_BACKEND_SPEC.md): pluggable Render Backend and AWS Step Functions + Lambda specification.
