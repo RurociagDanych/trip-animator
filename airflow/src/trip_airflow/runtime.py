@@ -10,10 +10,9 @@ from pathlib import Path
 
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
-from trip_api.config import Settings
+from trip_api.config import Settings, object_store_config
 from trip_api.db import create_db_engine, create_session_factory
-from trip_api.reaper import build_object_store
-from trip_api.storage import ObjectStore
+from trip_object_store import ObjectStore, build_object_store
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,7 +31,7 @@ def open_runtime(settings: Settings | None = None) -> Iterator[AirflowRuntime]:
     cfg = settings or Settings()
     engine = create_db_engine(cfg.database_url)
     session_factory = create_session_factory(engine)
-    store = build_object_store(cfg)
+    store = build_object_store(object_store_config(cfg))
     try:
         yield AirflowRuntime(
             settings=cfg,

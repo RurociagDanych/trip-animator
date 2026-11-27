@@ -8,12 +8,12 @@ from datetime import UTC, datetime, timedelta
 import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
-from trip_api.config import Settings
+from trip_api.config import Settings, object_store_config
 from trip_api.db import OAuthConnection, User, VaultSyncState
 from trip_api.ingest import process_pending_ingest_jobs
 from trip_api.library_enrichment import enqueue_library_enrichment
-from trip_api.reaper import build_object_store
 from trip_api.vault_sync import process_pending_vault_syncs, start_or_resume_strava_vault_sync
+from trip_object_store import build_object_store
 
 INCREMENTAL_INTERVAL = timedelta(minutes=30)
 
@@ -107,7 +107,7 @@ def discover_queue_and_process_vault_syncs(
             "syncs_failed": int(stats.get("failed", 0)),
         }
     )
-    store = build_object_store(settings)
+    store = build_object_store(object_store_config(settings))
     with session_factory() as db:
         counters["enrichment_jobs_queued"] = enqueue_library_enrichment(
             db, batch_size=batch_size, now=current_time

@@ -23,7 +23,7 @@ from trip_api.services import (
     stage_lod_cache_key,
     write_audit_event,
 )
-from trip_api.storage import LocalObjectStore, ObjectStore, S3ObjectStore
+from trip_object_store import LocalObjectStore, ObjectStore, S3ObjectStore
 
 from trip_airflow.storage_helpers import list_objects_with_mtime
 

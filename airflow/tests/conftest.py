@@ -18,7 +18,7 @@ from trip_api.config import Settings
 from trip_api.db import Project, Stage, User, create_db_engine, create_session_factory
 from trip_api.security import hash_password
 from trip_api.services import ingest_parsed_track
-from trip_api.storage import LocalObjectStore
+from trip_object_store import LocalObjectStore, ObjectInfo
 from trip_telemetry import parse_gpx_bytes
 
 # Constructed telemetry fixture; coordinates and timestamps are synthetic.
@@ -49,7 +49,7 @@ SAMPLE_GPX = b"""<?xml version="1.0" encoding="UTF-8"?>
 
 
 class FakeObjectStore:
-    """In-memory ObjectStore fake implementing `.list_keys(prefix)` like S3."""
+    """In-memory subset of the `ObjectStore` interface without ETags, like the local backend."""
 
     def __init__(self) -> None:
         self.blobs: dict[str, bytes] = {}
@@ -80,15 +80,16 @@ class FakeObjectStore:
         self.blobs.pop(clean, None)
         self.mtimes.pop(clean, None)
 
-    def list_keys(self, prefix: str = "") -> list[str]:
-        clean = prefix.lstrip("/")
-        return sorted(k for k in self.blobs if not clean or k.startswith(clean))
+    def exists(self, key: str) -> bool:
+        return key.lstrip("/") in self.blobs
 
-    def list_keys_with_mtime(self, prefix: str = "") -> dict[str, datetime | None]:
+    def iter_objects(self, prefix: str = "") -> Iterator[ObjectInfo]:
         clean = prefix.lstrip("/")
-        return {
-            k: self.mtimes.get(k) for k in sorted(self.blobs) if not clean or k.startswith(clean)
-        }
+        for key in sorted(self.blobs):
+            if key.startswith(clean):
+                yield ObjectInfo(
+                    key=key, size=len(self.blobs[key]), last_modified=self.mtimes[key], etag=None
+                )
 
 
 def fake_public_getaddrinfo(
