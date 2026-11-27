@@ -33,7 +33,7 @@ from trip_api.db import (
 from trip_api.deps import get_client_ip
 from trip_api.main import create_app
 from trip_api.security import hash_password, hash_session_token, verify_password
-from trip_api.storage import LocalObjectStore
+from trip_object_store import LocalObjectStore
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 if TYPE_CHECKING:

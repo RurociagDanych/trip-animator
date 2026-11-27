@@ -16,6 +16,7 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
+from trip_object_store import ObjectStore
 from trip_telemetry import ActivityType, infer_activity_type_from_strava, parse_strava_streams
 
 from trip_api.config import Settings
@@ -64,7 +65,6 @@ from trip_api.services import (
     stage_to_out,
     write_audit_event,
 )
-from trip_api.storage import ObjectStore
 from trip_api.vault_sync import (
     mirror_stage_to_vault,
     prepare_vault_geometry_from_parsed_track,

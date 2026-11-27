@@ -13,6 +13,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 from sqlalchemy import or_, select, text
 from sqlalchemy.orm import Session, sessionmaker
+from trip_object_store import ObjectStore, S3ObjectStore
 from trip_telemetry import (
     DEFAULT_ACTIVITY_TYPE,
     PhotoRecord,
@@ -31,7 +32,6 @@ from trip_api.render_backends import (
     sanitize_remote_error,
 )
 from trip_api.services import get_project_photos, get_project_stages, write_audit_event
-from trip_api.storage import ObjectStore, S3ObjectStore
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +162,7 @@ def _ingest_remote_outputs(
             tmp_root = Path(tmpdir)
             local_mp4 = tmp_root / f"{job_id}.mp4"
             backend.download_output(execution_ref, safe_output_key, local_mp4)
-            store.put_bytes(primary_output_key, local_mp4.read_bytes(), content_type="video/mp4")
+            store.put_file(primary_output_key, local_mp4, content_type="video/mp4")
 
             if safe_thumb_key is not None:
                 local_thumb = tmp_root / f"{job_id}.webp"

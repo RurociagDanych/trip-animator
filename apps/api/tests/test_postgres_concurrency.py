@@ -48,8 +48,8 @@ from trip_api.ingest import process_pending_ingest_jobs
 from trip_api.main import create_app
 from trip_api.rate_limit import check_rate_limit
 from trip_api.security import encrypt_secret, hash_password
-from trip_api.storage import LocalObjectStore
 from trip_api.vault_sync import upsert_strava_activity_to_vault
+from trip_object_store import LocalObjectStore
 from trip_telemetry import build_silver_dataframe, parse_track_bytes
 
 pytestmark = pytest.mark.postgres

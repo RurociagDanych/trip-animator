@@ -10,11 +10,11 @@ from typing import Annotated, cast
 from fastapi import Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
+from trip_object_store import ObjectStore
 
 from trip_api.config import Settings
 from trip_api.db import SessionRecord, User
 from trip_api.security import hash_session_token, verify_csrf_token
-from trip_api.storage import ObjectStore
 
 
 @dataclass(frozen=True, slots=True)

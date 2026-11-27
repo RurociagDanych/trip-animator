@@ -18,6 +18,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException
+from trip_object_store import ObjectStore
 from trip_telemetry.operational_events import record_api_failure, start_service_heartbeat
 
 from trip_api.config import Settings, get_settings
@@ -53,7 +54,6 @@ from trip_api.routers import (
     telemetry,
     vault,
 )
-from trip_api.storage import ObjectStore
 
 logger = logging.getLogger(__name__)
 

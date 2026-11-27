@@ -22,7 +22,7 @@ from trip_api.db import (
 )
 from trip_api.main import create_app
 from trip_api.security import hash_password
-from trip_api.storage import LocalObjectStore
+from trip_object_store import LocalObjectStore
 
 _DEFAULT_PW = "correct-horse-battery-staple"
 

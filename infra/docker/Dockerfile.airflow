@@ -26,12 +26,13 @@ COPY airflow/pyproject.toml airflow/uv.lock* ./airflow/
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ -f airflow/uv.lock ]; then \
-        uv sync --project /app/airflow --frozen --no-dev --no-install-workspace --no-install-package trip-api --no-install-package trip-telemetry; \
+        uv sync --project /app/airflow --frozen --no-dev --no-install-workspace --no-install-package trip-api --no-install-package trip-telemetry --no-install-package trip-object-store; \
     else \
-        uv sync --project /app/airflow --no-dev --no-install-workspace --no-install-package trip-api --no-install-package trip-telemetry; \
+        uv sync --project /app/airflow --no-dev --no-install-workspace --no-install-package trip-api --no-install-package trip-telemetry --no-install-package trip-object-store; \
     fi
 
 COPY packages/telemetry ./packages/telemetry
+COPY packages/object-store ./packages/object-store
 COPY apps/api ./apps/api
 COPY dbt ./dbt
 COPY airflow/src ./airflow/src

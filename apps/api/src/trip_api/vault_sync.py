@@ -14,6 +14,7 @@ import httpx
 import polars as pl
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
+from trip_object_store import ObjectStore
 from trip_telemetry import (
     DEFAULT_ACTIVITY_TYPE,
     ParsedTrack,
@@ -56,7 +57,6 @@ from trip_api.security import (
     validate_outbound_url,
 )
 from trip_api.services import materialize_silver_parquet
-from trip_api.storage import ObjectStore
 
 logger = logging.getLogger(__name__)
 

@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 from sqlalchemy import case, select
 from sqlalchemy.orm import Session
+from trip_object_store import ObjectStore
 from trip_telemetry import (
     CURRENT_ETL_VERSION,
     build_lod_cache_payload,
@@ -43,7 +44,6 @@ from trip_api.services import (
     stage_timeline_cache_key,
     write_audit_event,
 )
-from trip_api.storage import ObjectStore
 from trip_api.vault_sync import (
     PreparedStageVaultGeometry,
     apply_strava_track_geometry,

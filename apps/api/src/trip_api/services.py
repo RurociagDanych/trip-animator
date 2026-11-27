@@ -19,6 +19,7 @@ from fastapi import HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from trip_object_store import InvalidRangeError, ObjectStore, materialize
 from trip_telemetry import (
     CURRENT_ETL_VERSION,
     DEFAULT_ACTIVITY_TYPE,
@@ -86,7 +87,6 @@ from trip_api.schemas import (
     TelemetryTimelineStageOut,
     UserOut,
 )
-from trip_api.storage import InvalidRangeError, LocalObjectStore, ObjectStore
 
 logger = logging.getLogger(__name__)
 
@@ -939,14 +939,8 @@ def get_silver_total_elapsed_s(store: ObjectStore, stage: Stage) -> float:
 
 @contextmanager
 def materialize_silver_parquet(store: ObjectStore, stage: Stage) -> Iterator[Path]:
-    if isinstance(store, LocalObjectStore):
-        yield store.resolve_existing_path(stage.silver_object_key)
-        return
-
     with tempfile.TemporaryDirectory(prefix="trip_duckdb_one_") as tmpdir:
-        target = Path(tmpdir) / f"{stage.id}.parquet"
-        target.write_bytes(store.get_bytes(stage.silver_object_key))
-        yield target
+        yield materialize(store, stage.silver_object_key, Path(tmpdir) / f"{stage.id}.parquet")
 
 
 @contextmanager
@@ -954,21 +948,12 @@ def materialize_silver_parquets(
     store: ObjectStore,
     stages: list[Stage],
 ) -> Iterator[list[tuple[Stage, Path]]]:
-    if isinstance(store, LocalObjectStore):
-        pairs: list[tuple[Stage, Path]] = []
-        for stage in stages:
-            path = store.resolve_existing_path(stage.silver_object_key)
-            pairs.append((stage, path))
-        yield pairs
-        return
-
     with tempfile.TemporaryDirectory(prefix="trip_duckdb_") as tmpdir:
         tmp_root = Path(tmpdir)
 
         def _fetch_one(stage: Stage) -> tuple[Stage, Path]:
             target = tmp_root / f"{stage.id}.parquet"
-            target.write_bytes(store.get_bytes(stage.silver_object_key))
-            return stage, target
+            return stage, materialize(store, stage.silver_object_key, target)
 
         if len(stages) <= 1:
             yield [_fetch_one(s) for s in stages]
