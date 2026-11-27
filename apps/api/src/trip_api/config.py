@@ -6,7 +6,7 @@ import secrets
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -167,7 +167,7 @@ class Settings(BaseSettings):
             "\\" in value
             or parsed.query
             or parsed.fragment
-            or ".." in parsed.path.split("/")
+            or ".." in unquote(parsed.path).split("/")
             or not (root_relative or https_host)
         ):
             raise ValueError(

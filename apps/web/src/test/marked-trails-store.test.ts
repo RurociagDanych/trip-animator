@@ -17,6 +17,7 @@ describe("local Marked Trails store served by Vite", () => {
     writeFileSync(path.join(store, "builds", "2026-11-27", "marked-trails.pmtiles"), "PMTiles");
     writeFileSync(path.join(base, "outside.json"), "{}");
     symlinkSync(path.join(base, "outside.json"), path.join(store, "linked.json"));
+    symlinkSync(path.join(store, ".current.json.tmp"), path.join(store, "in-link.json"));
   });
 
   afterEach(() => {
@@ -37,6 +38,7 @@ describe("local Marked Trails store served by Vite", () => {
     expect(resolveMarkedTrailsStoreFile(store, "builds/.hidden/marked-trails.pmtiles")).toBeNull();
     expect(resolveMarkedTrailsStoreFile(store, "../outside.json")).toBeNull();
     expect(resolveMarkedTrailsStoreFile(store, "linked.json")).toBeNull();
+    expect(resolveMarkedTrailsStoreFile(store, "in-link.json")).toBeNull();
     expect(resolveMarkedTrailsStoreFile(store, "builds")).toBeNull();
     expect(resolveMarkedTrailsStoreFile(store, "missing.json")).toBeNull();
   });

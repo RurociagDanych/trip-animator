@@ -24,6 +24,9 @@ export function resolveMarkedTrailsStoreFile(root: string, relativePath: string)
   if (!realTarget.startsWith(realRoot + path.sep)) {
     return null;
   }
+  if (path.relative(realRoot, realTarget).split(path.sep).some((segment) => segment.startsWith("."))) {
+    return null;
+  }
   try {
     return statSync(realTarget).isFile() ? realTarget : null;
   } catch {

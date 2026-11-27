@@ -90,6 +90,8 @@ def test_public_config_exposes_marked_trails_base_url_without_trailing_slash(
         "https://",
         "javascript:alert(1)",
         "/tiles/../api",
+        "/tiles/%2e%2e/api",
+        "/tiles/%2E%2e/api",
         "/\\trails.example.test/base",
         "https://trails.example.test/base?x=1",
     ],
