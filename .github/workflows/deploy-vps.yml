@@ -215,6 +215,10 @@ jobs:
           fi
 
           prune_cache
+          echo "==> Building the Marked Trails builder image (its tools are copied into the airflow image)"
+          docker build -f infra/docker/Dockerfile.marked-trails-builder -t trip-animator-marked-trails-builder:local .
+
+          prune_cache
           echo "==> Building airflow image (shared by airflow, airflow-init)"
           "${compose_cmd[@]}" build airflow
 

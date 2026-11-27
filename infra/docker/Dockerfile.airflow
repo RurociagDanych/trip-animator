@@ -1,3 +1,18 @@
+# Named build context: compose builds it from the marked-trails-builder service; a plain
+# docker build needs --build-context marked-trails-builder=docker-image://<builder image>.
+FROM marked-trails-builder AS marked-trails-tools
+# The builder is Ubuntu and this image is Debian, so osmium ships with its non-glibc libraries and
+# a wrapper that points the loader at them. glibc itself stays the host's: osmium needs GLIBC 2.38,
+# Debian trixie has 2.41.
+RUN set -eux; \
+    mkdir -p /out/bin /out/libexec /out/lib; \
+    cp -L "$(command -v osmium)" /out/libexec/osmium; \
+    ldd /out/libexec/osmium | awk '/=> \//{print $3}' \
+        | grep -Ev '/(libc|libm|libdl|libpthread|librt)\.so' \
+        | xargs -r -I{} cp -L {} /out/lib/; \
+    printf '#!/bin/sh\nLD_LIBRARY_PATH=/opt/marked-trails/lib exec /opt/marked-trails/libexec/osmium "$@"\n' > /out/bin/osmium; \
+    chmod 0755 /out/bin/osmium
+
 FROM python:3.12-slim AS base
 
 COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /uvx /bin/
@@ -22,17 +37,19 @@ COPY packages/telemetry/pyproject.toml ./packages/telemetry/pyproject.toml
 COPY packages/object-store/pyproject.toml ./packages/object-store/pyproject.toml
 COPY apps/api/pyproject.toml ./apps/api/pyproject.toml
 COPY apps/worker/pyproject.toml ./apps/worker/pyproject.toml
+COPY packages/marked-trails/pyproject.toml ./packages/marked-trails/pyproject.toml
 COPY airflow/pyproject.toml airflow/uv.lock* ./airflow/
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ -f airflow/uv.lock ]; then \
-        uv sync --project /app/airflow --frozen --no-dev --no-install-workspace --no-install-package trip-api --no-install-package trip-telemetry --no-install-package trip-object-store; \
+        uv sync --project /app/airflow --frozen --no-dev --no-install-workspace --no-install-package trip-api --no-install-package trip-telemetry --no-install-package trip-object-store --no-install-package trip-marked-trails; \
     else \
-        uv sync --project /app/airflow --no-dev --no-install-workspace --no-install-package trip-api --no-install-package trip-telemetry --no-install-package trip-object-store; \
+        uv sync --project /app/airflow --no-dev --no-install-workspace --no-install-package trip-api --no-install-package trip-telemetry --no-install-package trip-object-store --no-install-package trip-marked-trails; \
     fi
 
 COPY packages/telemetry ./packages/telemetry
 COPY packages/object-store ./packages/object-store
+COPY packages/marked-trails/src ./packages/marked-trails/src
 COPY apps/api ./apps/api
 COPY dbt ./dbt
 COPY airflow/src ./airflow/src
@@ -48,13 +65,22 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 RUN groupadd --system --gid 10001 appgroup \
     && useradd --system --uid 10001 --gid appgroup --create-home --home-dir /home/appuser --shell /usr/sbin/nologin appuser \
-    && mkdir -p /home/appuser/.duckdb /opt/airflow/logs /data/objects /data/gold /app/data/ref \
+    && mkdir -p /home/appuser/.duckdb /opt/airflow/logs /data/objects /data/gold /app/data/ref /work/marked-trails \
     && /app/.venv/bin/python -c "from pathlib import Path; from trip_telemetry.ref_data import resolve_ref_data_dir; resolve_ref_data_dir(Path('/app/data/ref'), ensure_exists=True)" \
     && HOME=/home/appuser /app/.venv/bin/python -c "import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL parquet')" || true \
     && chmod -R a+rX /app/data/ref \
-    && chown -R 10001:10001 /home/appuser /opt/airflow /data/objects /data/gold
+    && chown -R 10001:10001 /home/appuser /opt/airflow /data/objects /data/gold /work/marked-trails
 
-ENV HOME=/home/appuser
+COPY --from=marked-trails-tools /out /opt/marked-trails
+COPY --from=marked-trails-tools /opt/java/openjdk /opt/java/openjdk
+COPY --from=marked-trails-tools /opt/marked-trails/classes /opt/marked-trails/classes
+COPY --from=marked-trails-tools /app/libs /app/libs
+
+ENV HOME=/home/appuser \
+    JAVA_HOME=/opt/java/openjdk \
+    PATH="/opt/marked-trails/bin:/opt/java/openjdk/bin:$PATH" \
+    MARKED_TRAILS_PLANETILER_CLASSPATH=/opt/marked-trails/classes:/app/libs/* \
+    MARKED_TRAILS_WORK_DIR=/work/marked-trails
 
 USER 10001:10001
 

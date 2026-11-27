@@ -350,6 +350,8 @@ services:
     build:
       context: ..
       dockerfile: infra/docker/Dockerfile.airflow
+      additional_contexts:
+        marked-trails-builder: docker-image://trip-animator-marked-trails-builder:local
     pull_policy: build
     env_file:
       - path: ../.env
@@ -404,7 +406,8 @@ services:
                     )
                 )
         PY
-        exec airflow db migrate
+        airflow db migrate
+        exec airflow pools set marked_trails_build 1 "Marked Trails build, one at a time"
     read_only: true
     tmpfs:
       - /tmp:size=64M,mode=1777,nosuid,nodev
@@ -422,6 +425,8 @@ services:
     build:
       context: ..
       dockerfile: infra/docker/Dockerfile.airflow
+      additional_contexts:
+        marked-trails-builder: docker-image://trip-animator-marked-trails-builder:local
     pull_policy: build
     env_file:
       - path: ../.env
@@ -431,6 +436,7 @@ services:
       HOME: /tmp
       AIRFLOW_HOME: /opt/airflow
       GOLD_OUTPUT_DIR: /data/gold
+      MARKED_TRAILS_WORK_DIR: /work/marked-trails
       TRIP_DBT_PROJECT_DIR: /app/dbt
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__PARALLELISM: "2"
@@ -451,6 +457,7 @@ services:
       - object_data:/data/objects
       - gold_data:/data/gold
       - airflow_logs:/opt/airflow/logs
+      - marked_trails_work:/work/marked-trails
       - ../airflow/dags:/app/airflow/dags:ro
     depends_on:
       airflow-init:
@@ -480,6 +487,7 @@ volumes:
   gold_data:
   tile_cache:
   airflow_logs:
+  marked_trails_work:
   caddy_data:
   caddy_config:
 

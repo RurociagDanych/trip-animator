@@ -237,3 +237,83 @@ def test_builder_image_publishes_fixture_pmtiles_and_pointer(
     assert all("name" not in f and "ref" not in f for z in range(5, 13) for f in by_zoom[z])
     assert any("name" in feature for feature in by_zoom[13])
     assert {feature["type"] for feature in by_zoom[13]} == {"hiking", "cycling", "mtb"}
+
+
+REGIONAL_SCRIPT = """
+import json, shutil
+from pathlib import Path
+import httpx
+from trip_marked_trails.pipeline import BuildTools, ResourceLimits
+from trip_marked_trails.regional import run_regional_build
+
+BASE = "https://download.geofabrik.de"
+index = {"features": [
+    {"properties": {"id": "europe", "urls": {"pbf": f"{BASE}/europe/europe-latest.osm.pbf"}}},
+    {"properties": {"id": "one", "parent": "europe",
+                    "urls": {"pbf": f"{BASE}/europe/one/one-latest.osm.pbf"}}},
+    {"properties": {"id": "two", "parent": "europe",
+                    "urls": {"pbf": f"{BASE}/europe/two/two-latest.osm.pbf"}}},
+]}
+client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=index)))
+downloaded = []
+
+def download(region, dest):
+    assert not downloaded or not Path(downloaded[-1]).exists()
+    shutil.copyfile("/fixtures/FIXTURE", dest)
+    downloaded.append(str(dest))
+
+tools = BuildTools(limits=ResourceLimits(memory_bytes=3 * 1024**3))
+artifact = run_regional_build(
+    "europe", Path("/work"), tools, downloader=download, index_client=client
+)
+print(json.dumps({
+    "count": artifact.marked_trail_count,
+    "date": artifact.osm_data_date,
+    "downloads": len(downloaded),
+    "size": artifact.pmtiles_path.stat().st_size,
+}))
+"""
+
+
+def test_builder_image_builds_two_countries_one_at_a_time_with_capped_tools(
+    tmp_path: Path, builder_image: str
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+
+    result = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--cpus",
+            "1",
+            "--memory",
+            "3g",
+            "--user",
+            f"{os.getuid()}:{os.getgid()}",
+            "-v",
+            f"{work}:/work",
+            "-v",
+            f"{FIXTURES_DIR}:/fixtures:ro",
+            "--entrypoint",
+            "python",
+            builder_image,
+            "-c",
+            REGIONAL_SCRIPT.replace("FIXTURE", FIXTURE_NAME),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=1800,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr[-4000:]
+
+    summary = json.loads(result.stdout.strip().splitlines()[-1])
+    assert summary["downloads"] == 2
+    assert summary["count"] == FIXTURE_ROUTE_RELATIONS
+    assert summary["date"] == FIXTURE_OSM_DATA_DATE
+    assert summary["size"] > 0
+    assert sorted(path.name for path in work.iterdir()) == ["marked-trails.pmtiles"]
