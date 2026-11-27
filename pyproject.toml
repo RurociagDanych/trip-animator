@@ -9,6 +9,7 @@ dependencies = []
 members = [
   "packages/telemetry",
   "packages/object-store",
+  "packages/marked-trails",
   "apps/api",
   "apps/worker",
 ]
@@ -43,7 +44,7 @@ python_version = "3.12"
 strict = true
 warn_unused_configs = true
 disallow_any_generics = true
-mypy_path = ["apps/api/src", "packages/telemetry/src", "packages/object-store/src"]
+mypy_path = ["apps/api/src", "packages/telemetry/src", "packages/object-store/src", "packages/marked-trails/src"]
 
 [tool.pytest.ini_options]
 addopts = "--strict-markers"
@@ -52,10 +53,12 @@ asyncio_default_fixture_loop_scope = "function"
 pythonpath = ["airflow/src"]
 markers = [
   "postgres: tests requiring a real PostgreSQL Docker container",
+  "docker: tests that build or run the Marked Trails builder image; skipped without Docker",
 ]
 testpaths = [
   "packages/telemetry/tests",
   "packages/object-store/tests",
+  "packages/marked-trails/tests",
   "apps/api/tests",
   "apps/worker/tests",
   "airflow/tests",

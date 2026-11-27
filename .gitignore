@@ -83,3 +83,6 @@ override.tf.json
 *_override.tf.json
 .terraformrc
 terraform.rc
+
+# Local build output (Marked Trails store and work dirs, scratch files)
+.tmp/

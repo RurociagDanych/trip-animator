@@ -1,4 +1,8 @@
-.PHONY: help setup bootstrap lint format format-check typecheck test test-pg dbt-parse dbt-build reap-dry-run check dev-api dev-web compose-config airflow-up airflow-down test-airflow lint-airflow remote-render-push remote-render-deploy
+.PHONY: help setup bootstrap lint format format-check typecheck test test-pg dbt-parse dbt-build reap-dry-run check dev-api dev-web compose-config airflow-up airflow-down test-airflow lint-airflow remote-render-push remote-render-deploy marked-trails-image marked-trails-local
+
+MARKED_TRAILS_REGION ?= europe/andorra
+MARKED_TRAILS_DIR ?= $(CURDIR)/.tmp/marked-trails
+MARKED_TRAILS_BUILDER_IMAGE ?= trip-animator-marked-trails-builder:local
 
 REMOTE_RENDER_TF_DIR ?= infra/terraform/standalone-remote-render
 REMOTE_RENDER_AWS_REGION ?= eu-central-1
@@ -28,7 +32,9 @@ help:
 		test-airflow 'Run the Airflow and infra script tests' \
 		lint-airflow 'Run Ruff and mypy on the Airflow project' \
 		remote-render-push 'Build and push the AWS Lambda render image to ECR' \
-		remote-render-deploy 'Bootstrap ECR, push Lambda image, and apply standalone AWS Terraform'
+		remote-render-deploy 'Bootstrap ECR, push Lambda image, and apply standalone AWS Terraform' \
+		marked-trails-image 'Build the Marked Trails builder image (osmium, Planetiler, CLI)' \
+		marked-trails-local 'Build and publish a small Marked Trails region to .tmp/marked-trails'
 
 setup:
 	uv sync --all-packages
@@ -48,7 +54,7 @@ format-check:
 	uv run ruff format --check apps packages airflow infra/scripts
 
 typecheck:
-	uv run mypy apps/api/src apps/worker/src packages/telemetry/src packages/object-store/src airflow/src
+	uv run mypy apps/api/src apps/worker/src packages/telemetry/src packages/object-store/src packages/marked-trails/src airflow/src
 	pnpm typecheck:web
 
 test:
@@ -121,6 +127,17 @@ test-airflow:
 lint-airflow:
 	uv run ruff check airflow
 	uv run mypy airflow/src
+
+marked-trails-image:
+	docker build -f infra/docker/Dockerfile.marked-trails-builder -t $(MARKED_TRAILS_BUILDER_IMAGE) .
+
+marked-trails-local: marked-trails-image
+	@mkdir -p "$(MARKED_TRAILS_DIR)/store" "$(MARKED_TRAILS_DIR)/work"
+	docker run --rm --cpus 1 --memory 3g --user "$$(id -u):$$(id -g)" \
+		-v "$(MARKED_TRAILS_DIR)/store:/store" \
+		-v "$(MARKED_TRAILS_DIR)/work:/work" \
+		$(MARKED_TRAILS_BUILDER_IMAGE) \
+		build-publish --region $(MARKED_TRAILS_REGION) --store-dir /store --work-dir /work
 
 remote-render-push:
 	@set -eu; \

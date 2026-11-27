@@ -1,0 +1,33 @@
+# syntax=docker/dockerfile:1
+# Planetiler is pinned by digest: `latest` moved during the prototype and the build must be reproducible.
+ARG PLANETILER_IMAGE=ghcr.io/onthegomap/planetiler@sha256:bde2424546edfa40460bdd1c40c19d54e3af332b25d16c6db9d980ca3355623d
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.31
+
+FROM ${PLANETILER_IMAGE} AS profile
+COPY packages/marked-trails/java /src/java
+RUN mkdir -p /opt/marked-trails/classes \
+ && javac -d /opt/marked-trails/classes -cp "/app/libs/*" $(find /src/java -name '*.java')
+
+FROM ${UV_IMAGE} AS uv
+
+FROM ${PLANETILER_IMAGE} AS python-env
+# The Ubuntu base ships a Python outside the project's >=3.12,<3.14 range, so uv installs 3.12.
+COPY --from=uv /uv /usr/local/bin/uv
+ENV UV_PYTHON_INSTALL_DIR=/opt/python \
+    UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=1 \
+    UV_PROJECT_ENVIRONMENT=/opt/marked-trails/venv
+WORKDIR /src
+COPY . .
+RUN uv sync --frozen --no-dev --no-editable --python 3.12 --package trip-marked-trails
+
+FROM ${PLANETILER_IMAGE}
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends osmium-tool \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=python-env /opt/python /opt/python
+COPY --from=python-env /opt/marked-trails/venv /opt/marked-trails/venv
+COPY --from=profile /opt/marked-trails/classes /opt/marked-trails/classes
+ENV PATH=/opt/marked-trails/venv/bin:${PATH} \
+    MARKED_TRAILS_PLANETILER_CLASSPATH=/opt/marked-trails/classes:/app/libs/*
+ENTRYPOINT ["trip-marked-trails"]
