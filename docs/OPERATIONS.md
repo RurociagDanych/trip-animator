@@ -68,6 +68,18 @@ make dev-web
 uv run python -c "from trip_worker.runner import run_worker_loop; run_worker_loop()"
 ```
 
+### Marked Trails local build
+
+The editor's hiking Marked Trails overlay reads a published trail store. To build one locally, run:
+
+```bash
+make marked-trails-local
+```
+
+The target builds the builder image (osmium, Planetiler and the `trip-marked-trails` CLI), downloads the Geofabrik extract of `MARKED_TRAILS_REGION` (default `europe/andorra`), verifies its md5, and publishes the PMTiles build and `current.json` into `.tmp/marked-trails/store`. The tools are capped at one CPU and 3 GB of memory. A second build on the same day gets a numeric suffix (`2026-11-27-2`); `current.json` keeps the previous build id. To build a local `.osm.pbf` instead of downloading, run the image with `build-publish --extract <path>`.
+
+`make dev-web` serves the store at `/tiles/marked-trails/`, which is the `MARKED_TRAILS_BASE_URL` value in `.env.example`. With `MARKED_TRAILS_BASE_URL` empty, the editor shows no Marked Trails toggle. `make test-marked-trails-image` runs the Docker test of the builder image on a committed fixture; `make test` skips it.
+
 ## Strava OAuth2 setup
 
 1. In your [Strava API Application settings](https://www.strava.com/settings/api), set **Authorization Callback Domain** to:
