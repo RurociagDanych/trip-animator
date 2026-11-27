@@ -89,7 +89,7 @@ The previous build is deleted when a new build starts, so after a failed run `pr
 To roll back, check that `builds/<previous_build_id>/marked-trails.pmtiles` exists in the store, then edit `current.json`:
 
 1. Set `current_build_id` to the old `previous_build_id`, and set `pmtiles_key` to `builds/<that build id>/marked-trails.pmtiles` (it must match `current_build_id`, or the next run refuses to prune), `size_bytes`, `sha256`, `osm_data_date` and `marked_trail_count` to that build's values.
-2. Set `previous_build_id` to `null`, or to the build being rolled back from.
+2. Set `previous_build_id` to the build being rolled back from, or to `null`. Never change or remove `last_build_id`: it is the highest build id ever allocated, and the next build id is allocated above it. Do not set `previous_build_id` to `null` on a pointer that has no `last_build_id` (written by an older version); first set `last_build_id` to the highest build id that existed.
 3. Write the file back with `Cache-Control: no-cache`. The next `build-publish` run then deletes every build except the new current one.
 
 ## Strava OAuth2 setup
