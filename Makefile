@@ -48,7 +48,7 @@ format-check:
 	uv run ruff format --check apps packages airflow infra/scripts
 
 typecheck:
-	uv run mypy apps/api/src apps/worker/src packages/telemetry/src airflow/src
+	uv run mypy apps/api/src apps/worker/src packages/telemetry/src packages/object-store/src airflow/src
 	pnpm typecheck:web
 
 test:

@@ -67,6 +67,7 @@ Data flows Bronze (raw GPX/Strava payloads) → Silver (Parquet via Polars) → 
 | `apps/api` | FastAPI backend: auth, authoring, GPX/Strava ingestion, DuckDB queries |
 | `apps/worker` | Playwright + FFmpeg render worker |
 | `packages/telemetry` | GPX parser, Silver ETL, simplification, downsampling |
+| `packages/object-store` | Shared Local and S3-compatible object store (`trip_object_store`) |
 | `dbt/` | Silver → Gold SQL models and tests |
 | `airflow/` | Strava Vault sync orchestration and optional scheduled jobs |
 | `infra/` | Docker Compose, Caddy, nginx |
@@ -143,7 +144,7 @@ Production settings (`APP_ENV=production`, `METRICS_TOKEN`, secret overrides) ar
 make help           # list all Makefile targets
 make lint           # ruff check apps packages + eslint
 make typecheck      # mypy --strict + tsc --noEmit
-make test           # pytest (telemetry, api, worker) + vitest
+make test           # pytest (telemetry, object-store, api, worker) + vitest
 make dbt-parse      # uv run dbt parse --project-dir dbt --profiles-dir dbt
 make compose-config # docker compose -f infra/compose.yaml --env-file .env.example config --quiet
 
@@ -151,6 +152,7 @@ make compose-config # docker compose -f infra/compose.yaml --env-file .env.examp
 uv run pytest apps/api/tests -v
 uv run pytest apps/worker/tests -v
 uv run pytest packages/telemetry/tests -v
+uv run pytest packages/object-store/tests -v
 uv run ruff check apps/api
 uv run mypy apps/api
 pnpm --filter @trip-animator/web build

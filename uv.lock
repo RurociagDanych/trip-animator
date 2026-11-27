@@ -6,6 +6,7 @@ requires-python = ">=3.12, <3.14"
 members = [
     "trip-animator-workspace",
     "trip-api",
+    "trip-object-store",
     "trip-telemetry",
     "trip-worker",
 ]
@@ -1973,6 +1974,17 @@ requires-dist = [
     { name = "trip-telemetry", editable = "packages/telemetry" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
 ]
+
+[[package]]
+name = "trip-object-store"
+version = "0.1.0"
+source = { editable = "packages/object-store" }
+dependencies = [
+    { name = "boto3" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "boto3", specifier = ">=1.36.0" }]
 
 [[package]]
 name = "trip-telemetry"
