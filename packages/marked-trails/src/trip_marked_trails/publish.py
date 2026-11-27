@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import re
 from dataclasses import asdict, dataclass, fields
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -20,6 +22,15 @@ POINTER_CACHE_CONTROL = "no-cache, no-store, must-revalidate"
 BUILDS_PREFIX = "builds/"
 DEFAULT_SIZE_BUDGET_BYTES = 1024**3
 MAX_RELATIVE_CHANGE_PERCENT = 20
+
+logger = logging.getLogger(__name__)
+
+
+BUILD_ID_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}(-[2-9]|-[1-9]\d+)?")
+
+
+class PointerError(Exception):
+    """`current.json` does not describe a build that is safe to keep or to prune around."""
 
 
 class ValidationError(Exception):
@@ -65,26 +76,61 @@ def read_pointer(store: ObjectStore) -> CurrentPointer | None:
     return CurrentPointer(**{key: value for key, value in data.items() if key in known})
 
 
-def allocate_build_id(store: ObjectStore, build_date: date) -> str:
-    """Return the build date, with a `-N` suffix for later builds on the same day."""
+def allocate_build_id(
+    store: ObjectStore, build_date: date, pointer: CurrentPointer | None = None
+) -> str:
+    """Return a build id for `build_date` that no build or pointer has used.
+
+    The first build of a day is the bare date, later ones get a numeric suffix one above the
+    highest seen in the store and in the pointer. Ids of deleted builds are never reused, so
+    a cached immutable object can never be shadowed by different content.
+    """
     base = build_date.isoformat()
-    candidate = base
-    suffix = 2
-    while store.exists(build_pmtiles_key(candidate)):
-        candidate = f"{base}-{suffix}"
-        suffix += 1
-    return candidate
+    seen = [*_store_build_ids(store)]
+    if pointer is not None:
+        seen += [pointer.current_build_id, pointer.previous_build_id or ""]
+    highest = 0
+    for build_id in seen:
+        if build_id == base:
+            highest = max(highest, 1)
+        elif build_id.startswith(f"{base}-") and build_id[len(base) + 1 :].isdecimal():
+            highest = max(highest, int(build_id[len(base) + 1 :]))
+    return base if highest == 0 else f"{base}-{highest + 1}"
+
+
+def _store_build_ids(store: ObjectStore) -> set[str]:
+    return {info.key.split("/")[1] for info in store.iter_objects(BUILDS_PREFIX)}
+
+
+def check_pointer_before_prune(store: ObjectStore, pointer: CurrentPointer) -> None:
+    """Raise `PointerError` unless the pointer names a build that exists in the store.
+
+    Pruning keeps only the build the pointer names, so a typo or a stale key would delete the
+    live build.
+    """
+    if not BUILD_ID_PATTERN.fullmatch(pointer.current_build_id):
+        raise PointerError(f"current_build_id {pointer.current_build_id!r} is not a build id")
+    expected = build_pmtiles_key(pointer.current_build_id)
+    if pointer.pmtiles_key != expected:
+        raise PointerError(
+            f"pmtiles_key {pointer.pmtiles_key!r} does not match current_build_id "
+            f"{pointer.current_build_id!r} (expected {expected!r})"
+        )
+    if not store.exists(expected):
+        raise PointerError(f"The current build object {expected!r} is not in the store")
 
 
 def delete_superseded_builds(store: ObjectStore, pointer: CurrentPointer | None) -> list[str]:
     """Delete every build except the current one and return the deleted keys.
 
     Run before a new build starts, so the store never holds more than two builds. Without a
-    pointer nothing is deleted: the store has no published build to protect or to keep.
+    pointer nothing is deleted: the store has no published build to protect or to keep. An
+    invalid pointer raises `PointerError` before anything is deleted.
     """
     if pointer is None:
         return []
-    keep = build_pmtiles_key(pointer.current_build_id).removesuffix(PMTILES_NAME)
+    check_pointer_before_prune(store, pointer)
+    keep = f"{BUILDS_PREFIX}{pointer.current_build_id}/"
     stale = [
         info.key for info in store.iter_objects(BUILDS_PREFIX) if not info.key.startswith(keep)
     ]
@@ -100,9 +146,16 @@ def validate_build(
 
     Size and trail count must be within `MAX_RELATIVE_CHANGE_PERCENT` of the current build.
     Without a current build only the budget applies, and a current build without a recorded
-    trail count skips the count check.
+    trail count skips the count check. An empty file or a build without trails is always
+    rejected, as is a budget of zero or below.
     """
+    if size_budget_bytes <= 0:
+        raise ValidationError(f"Size budget must be positive, got {size_budget_bytes}")
     size = artifact.pmtiles_path.stat().st_size
+    if size <= 0:
+        raise ValidationError("Build file is empty")
+    if artifact.marked_trail_count <= 0:
+        raise ValidationError(f"Build has {artifact.marked_trail_count} Marked Trail relations")
     if size > size_budget_bytes:
         raise ValidationError(f"Build is {size} bytes, over the budget of {size_budget_bytes}")
     if current is None:
@@ -128,46 +181,44 @@ def publish_build(
     region: str,
     build_date: date,
     artifact: BuildArtifact,
+    previous: CurrentPointer | None,
     size_budget_bytes: int = DEFAULT_SIZE_BUDGET_BYTES,
 ) -> CurrentPointer:
     """Validate a built PMTiles file, upload it under a new prefix, then switch `current.json`.
 
-    The file is validated before the upload, so a rejected build never reaches the store. The
-    pointer is written last, so a failure at any point leaves the previously published build
-    active; a failed upload removes its partial prefix.
+    `previous` is the pointer read once by the caller. Validation runs on the local file before
+    the upload, so a rejected build never reaches the store. A failed or short upload removes
+    its partial object. Once the pointer write starts the new build is never deleted: the
+    write may have reached the store, and a pointer naming a deleted build would break readers.
     """
-    previous = read_pointer(store)
     validate_build(artifact, previous, size_budget_bytes)
-    build_id = allocate_build_id(store, build_date)
+    size = artifact.pmtiles_path.stat().st_size
+    sha256 = _sha256_file(artifact.pmtiles_path)
+    build_id = allocate_build_id(store, build_date, previous)
     key = build_pmtiles_key(build_id)
     try:
-        return _upload_and_switch(store, previous, region, build_id, key, artifact)
-    except Exception:
-        store.delete(key)
+        store.put_file(
+            key,
+            artifact.pmtiles_path,
+            content_type=PMTILES_CONTENT_TYPE,
+            cache_control=BUILD_CACHE_CONTROL,
+        )
+        stored_size = store.stat(key).size
+        if stored_size != size:
+            raise ValidationError(f"Uploaded object has {stored_size} bytes, expected {size}")
+    except BaseException:
+        try:
+            store.delete(key)
+        except Exception:
+            logger.exception("Could not delete the partial upload %s", key)
         raise
-
-
-def _upload_and_switch(
-    store: ObjectStore,
-    previous: CurrentPointer | None,
-    region: str,
-    build_id: str,
-    key: str,
-    artifact: BuildArtifact,
-) -> CurrentPointer:
-    store.put_file(
-        key,
-        artifact.pmtiles_path,
-        content_type=PMTILES_CONTENT_TYPE,
-        cache_control=BUILD_CACHE_CONTROL,
-    )
     pointer = CurrentPointer(
         region=region,
         current_build_id=build_id,
         previous_build_id=previous.current_build_id if previous else None,
         pmtiles_key=key,
-        size_bytes=artifact.pmtiles_path.stat().st_size,
-        sha256=_sha256_file(artifact.pmtiles_path),
+        size_bytes=size,
+        sha256=sha256,
         osm_data_date=artifact.osm_data_date,
         built_at=datetime.now(UTC).isoformat(timespec="seconds"),
         marked_trail_count=artifact.marked_trail_count,

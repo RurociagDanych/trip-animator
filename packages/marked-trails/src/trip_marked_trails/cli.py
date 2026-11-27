@@ -30,6 +30,17 @@ logger = logging.getLogger("trip_marked_trails")
 BuildStep = Callable[[str, Path], BuildArtifact]
 
 
+def positive_int(value: str) -> int:
+    """Parse an integer argument that must be at least 1."""
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not an integer") from None
+    if number <= 0:
+        raise argparse.ArgumentTypeError(f"{value!r} must be greater than zero")
+    return number
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Return the argument parser of the `trip-marked-trails` command."""
     parser = argparse.ArgumentParser(prog="trip-marked-trails")
@@ -64,8 +75,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     publish.add_argument(
         "--size-budget-bytes",
-        type=int,
-        default=int(os.environ.get("MARKED_TRAILS_SIZE_BUDGET_BYTES", DEFAULT_SIZE_BUDGET_BYTES)),
+        type=positive_int,
+        default=os.environ.get("MARKED_TRAILS_SIZE_BUDGET_BYTES") or DEFAULT_SIZE_BUDGET_BYTES,
         help="Largest PMTiles file a build may have, in bytes; defaults to 1 GiB",
     )
     return parser
@@ -74,9 +85,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None, *, build_step: BuildStep | None = None) -> int:
     """Run a command and return the process exit code.
 
-    Order: delete the builds older than the current one, run the build, validate it, upload
-    it under its own prefix, then overwrite `current.json`. Any failure leaves `current.json`
-    unchanged and returns 1.
+    Order: check the pointer and delete the builds older than the current one, run the build,
+    validate the local file, upload it under its own prefix, then overwrite `current.json`.
+    Any failure returns 1 and leaves `current.json` as it was; an invalid pointer deletes
+    nothing.
 
     `build_step` replaces the osmium and Planetiler build in tests; publication policy is
     the same either way. The built file in the work directory is deleted once published.
@@ -86,14 +98,16 @@ def main(argv: Sequence[str] | None = None, *, build_step: BuildStep | None = No
     store = build_object_store(ObjectStoreConfig(backend="local", local_dir=args.store_dir))
     step = build_step or _default_build_step(args.planetiler_classpath, args.extract)
     try:
-        for key in delete_superseded_builds(store, read_pointer(store)):
+        pointer = read_pointer(store)
+        for key in delete_superseded_builds(store, pointer):
             logger.info("Deleted superseded build object %s", key)
         artifact = step(args.region, args.work_dir)
-        pointer = publish_build(
+        published = publish_build(
             store,
             region=args.region,
             build_date=build_date,
             artifact=artifact,
+            previous=pointer,
             size_budget_bytes=args.size_budget_bytes,
         )
     except Exception:
@@ -104,11 +118,11 @@ def main(argv: Sequence[str] | None = None, *, build_step: BuildStep | None = No
     artifact.pmtiles_path.unlink(missing_ok=True)
     logger.info(
         "Published build %s for %s (%d bytes, %s Marked Trail relations, sha256 %s)",
-        pointer.current_build_id,
-        pointer.region,
-        pointer.size_bytes,
-        pointer.marked_trail_count,
-        pointer.sha256,
+        published.current_build_id,
+        published.region,
+        published.size_bytes,
+        published.marked_trail_count,
+        published.sha256,
     )
     return 0
 

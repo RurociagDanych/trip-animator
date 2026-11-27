@@ -97,7 +97,8 @@ def test_publish_reads_a_pointer_with_unknown_keys_and_without_newer_fields(
     tmp_path: Path,
 ) -> None:
     store_dir = tmp_path / "store"
-    store_dir.mkdir()
+    (store_dir / "builds/2026-11-20").mkdir(parents=True)
+    (store_dir / "builds/2026-11-20/marked-trails.pmtiles").write_bytes(BUILD_PAYLOAD)
     (store_dir / "current.json").write_text(
         json.dumps(
             {
