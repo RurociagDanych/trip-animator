@@ -8,6 +8,7 @@ dependencies = []
 [tool.uv.workspace]
 members = [
   "packages/telemetry",
+  "packages/object-store",
   "apps/api",
   "apps/worker",
 ]
@@ -42,7 +43,7 @@ python_version = "3.12"
 strict = true
 warn_unused_configs = true
 disallow_any_generics = true
-mypy_path = ["apps/api/src", "packages/telemetry/src"]
+mypy_path = ["apps/api/src", "packages/telemetry/src", "packages/object-store/src"]
 
 [tool.pytest.ini_options]
 addopts = "--strict-markers"
@@ -54,6 +55,7 @@ markers = [
 ]
 testpaths = [
   "packages/telemetry/tests",
+  "packages/object-store/tests",
   "apps/api/tests",
   "apps/worker/tests",
   "airflow/tests",

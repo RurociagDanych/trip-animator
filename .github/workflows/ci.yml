@@ -57,7 +57,7 @@ jobs:
       - name: Ruff format check
         run: uv run ruff format --check apps packages airflow infra/scripts
       - name: Mypy typecheck
-        run: uv run mypy apps/api/src apps/worker/src packages/telemetry/src airflow/src
+        run: uv run mypy apps/api/src apps/worker/src packages/telemetry/src packages/object-store/src airflow/src
 
   python-tests:
     runs-on: ubuntu-latest
@@ -89,7 +89,7 @@ jobs:
       - name: Pytest suite (non-Postgres)
         run: >-
           uv run pytest --strict-markers -ra -m "not postgres"
-          packages/telemetry/tests apps/api/tests apps/worker/tests
+          packages/telemetry/tests packages/object-store/tests apps/api/tests apps/worker/tests
       - name: Pytest suite (Postgres integration, non-skipped)
         shell: bash
         run: |
