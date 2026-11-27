@@ -40,7 +40,7 @@ The build is a standalone CLI using osmium and Planetiler from a dedicated build
 - The Europe extract (35.6 GB) does not fit on the VPS, so the build downloads, filters and deletes one Geofabrik country at a time and merges the small results. Peak disk is the largest country plus the outputs, about 10 GB.
 - Build containers are capped at one CPU and 3 GB of memory, because the VPS has two vCPUs and no swap. A build takes an estimated 2 to 4 hours and slows the editor and the Strava sync meanwhile; the operator picks the time.
 - The build uses its own Airflow pool with one slot, so it never takes both LocalExecutor slots from the Strava sync.
-- Tiles stop at z13 and MapLibre overzooms above it, and local networks start at z9, to stay within a 1 GB budget. A prototype measurement of Poland and Germany alone gave 304 MB at z14. If the full build still exceeds 1 GB, the budget rises to 2 GB.
+- Tiles stop at z13 and MapLibre overzooms above it, and local networks start at z9, to stay within a 1 GiB budget. A prototype measurement of Poland and Germany alone gave 304 MB at z14. If the full build still exceeds 1 GiB, the budget rises to 2 GiB.
 - A build replaces the active version only if its size is within the budget and its size and trail count are within 20% of the previous build.
 - Map attribution "(c) OpenStreetMap contributors" (ODbL) is always shown in the editor and in exported films, together with the trail data date while the overlay is on. It also covers the OpenFreeMap basemap, which needed it already.
 - Projects store the enabled Marked Trail types in one list field; an empty list means the overlay is off, which is the default.

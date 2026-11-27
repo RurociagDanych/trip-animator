@@ -80,8 +80,8 @@ Trip Animator builds its own vector tileset of Marked Trails in Europe from Open
 
 - Store layout: one immutable prefix per build, named by build date with an optional numeric suffix for a later build on the same day (`2026-11-27-2`), holding the PMTiles file, plus a `current.json` pointer at the root.
 - `current.json` holds at least the current and previous build ids, the OpenStreetMap data date, and the checksum, size and trail count (`marked_trail_count`, the number of route relations in the build) of the current build. Readers ignore unknown keys, and fields added later have defaults.
-- Order of a build: delete the previous build, build and validate the new one under its own prefix, then overwrite `current.json`. The store never holds more than two builds.
-- Validation before switching: the file is at most 1 GB, and its size and trail count are within 20% of the current build. The first build is checked only against the size limit. If the full Europe build exceeds 1 GB with z13 and the local-network zoom cut, the limit rises to 2 GB.
+- Order of a build: check that `current.json` names an existing build, delete every other build, build the new one, validate it, upload it under its own prefix, then overwrite `current.json`. Build ids are never reused. The store never holds more than two builds.
+- Validation before switching runs on the local file before it is uploaded: the file is not empty, has at least one Marked Trail relation, is at most 1 GiB, and its size and trail count are within 20% of the current build. The first build is checked only against the size limit. After the upload the stored object size must equal the local size. If the full Europe build exceeds 1 GiB with z13 and the local-network zoom cut, the limit rises to 2 GiB.
 - A failed build or failed validation leaves `current.json` unchanged and fails the DAG run.
 - Build files are written with a long immutable cache lifetime; `current.json` is written with no caching.
 - The trail store uses the shared object store package (ADR 0002) for its S3 and local implementations. S3 is the only production target; the local implementation serves development and tests.
