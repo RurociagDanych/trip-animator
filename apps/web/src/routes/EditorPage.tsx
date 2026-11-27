@@ -45,7 +45,7 @@ import type {
   TelemetryTimelineOut,
 } from "../lib/api/types";
 import { generateDirectorKeyframes } from "../lib/geo/director";
-import { useMarkedTrailsBuild } from "../lib/geo/marked-trails";
+import { useMarkedTrailsBuildState } from "../lib/geo/marked-trails";
 import { parseResolutionPreset } from "../lib/geo/format";
 import {
   computeJourneyDurationS,
@@ -222,7 +222,8 @@ export function EditorPage() {
     retry: false,
     staleTime: 60_000,
   });
-  const markedTrailsBuild = useMarkedTrailsBuild(publicConfigQuery.data?.marked_trails_base_url);
+  const { availability: markedTrailsAvailability, build: markedTrailsBuild } =
+    useMarkedTrailsBuildState(publicConfigQuery.data?.marked_trails_base_url);
 
   useEffect(() => {
     if (
@@ -927,7 +928,7 @@ export function EditorPage() {
             unavailableReason: localExportUnavailableReason,
           }}
           invalidSpecValues={invalidSpecValues}
-          markedTrailsConfigured={Boolean(publicConfigQuery.data?.marked_trails_base_url)}
+          markedTrailsAvailability={markedTrailsAvailability}
         />
       </div>
 

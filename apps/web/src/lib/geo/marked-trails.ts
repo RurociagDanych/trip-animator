@@ -54,8 +54,9 @@ export function buildMarkedTrailsBuild(
 }
 
 /**
- * Returns the published build, or null when the store has no `current.json` yet.
- * Other failures throw, so React Query reports them instead of hiding a broken store.
+ * Returns the published build, or null when the store has none: `current.json` missing (404),
+ * not readable by the public (403) or invalid. Other failures throw, so React Query reports
+ * them instead of hiding a broken store.
  */
 export async function fetchMarkedTrailsBuild(
   baseUrl: string,
@@ -66,21 +67,35 @@ export async function fetchMarkedTrailsBuild(
     cache: "no-cache",
     signal,
   });
-  if (response.status === 404) {
+  if (response.status === 404 || response.status === 403) {
     return null;
   }
   if (!response.ok) {
     throw new Error(`Marked Trails pointer request failed with status ${response.status}`);
   }
-  const pointer = parseMarkedTrailsPointer(await response.json());
+  let raw: unknown;
+  try {
+    raw = await response.json();
+  } catch {
+    return null;
+  }
+  const pointer = parseMarkedTrailsPointer(raw);
   return pointer ? buildMarkedTrailsBuild(root, pointer) : null;
 }
 
+export type MarkedTrailsAvailability = "not-configured" | "loading" | "available" | "unavailable";
+
+export interface MarkedTrailsBuildState {
+  availability: MarkedTrailsAvailability;
+  build: MarkedTrailsBuild | null;
+}
+
 /**
- * Loads the published build of the store at `baseUrl`. Returns null while loading, when no
- * build is published, when the request fails, or when `baseUrl` is empty (overlay off).
+ * Loads the published build of the store at `baseUrl` and says why there is none: no store
+ * configured (`baseUrl` empty), still loading, or configured but without a usable build
+ * (no `current.json`, access denied, invalid, or the request failed).
  */
-export function useMarkedTrailsBuild(baseUrl: string | undefined): MarkedTrailsBuild | null {
+export function useMarkedTrailsBuildState(baseUrl: string | undefined): MarkedTrailsBuildState {
   const query = useQuery({
     queryKey: ["marked-trails", "build", baseUrl ?? ""],
     queryFn: ({ signal }) => fetchMarkedTrailsBuild(baseUrl ?? "", signal),
@@ -88,7 +103,37 @@ export function useMarkedTrailsBuild(baseUrl: string | undefined): MarkedTrailsB
     staleTime: 5 * 60_000,
     retry: false,
   });
-  return query.data ?? null;
+  if (!baseUrl) {
+    return { availability: "not-configured", build: null };
+  }
+  if (query.data) {
+    return { availability: "available", build: query.data };
+  }
+  if (query.isPending) {
+    return { availability: "loading", build: null };
+  }
+  return { availability: "unavailable", build: null };
+}
+
+/** Returns the published build, or null while loading or when none is usable. */
+export function useMarkedTrailsBuild(baseUrl: string | undefined): MarkedTrailsBuild | null {
+  return useMarkedTrailsBuildState(baseUrl).build;
+}
+
+/**
+ * Returns the date of the trail data as `YYYY-MM-DD`: the day of `osm_data_date`, else the
+ * build date from the build id (a same-day suffix is dropped), else null.
+ */
+export function markedTrailsDataDate(build: MarkedTrailsBuild | null): string | null {
+  if (!build) {
+    return null;
+  }
+  return leadingIsoDate(build.dataDate) ?? leadingIsoDate(build.buildId);
+}
+
+function leadingIsoDate(value: string | null): string | null {
+  const match = value ? /^\d{4}-\d{2}-\d{2}/.exec(value) : null;
+  return match ? match[0] : null;
 }
 
 /** Adds or removes one Marked Trail type and keeps the others in their order. */

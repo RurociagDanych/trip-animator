@@ -1,5 +1,5 @@
 import type { StyleSpecification } from "maplibre-gl";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type MapStylePreset,
   type MarkedTrailType,
@@ -18,6 +18,8 @@ import {
 } from "../lib/geo/map-config";
 import {
   buildMarkedTrailsBuild,
+  fetchMarkedTrailsBuild,
+  markedTrailsDataDate,
   parseMarkedTrailsPointer,
   toggleMarkedTrailType,
 } from "../lib/geo/marked-trails";
@@ -453,5 +455,79 @@ describe("Marked Trails render settings", () => {
       marked_trail_types: ["hiking", "skiing"] as unknown as MarkedTrailType[],
     });
     expect(normalized.marked_trail_types).toEqual(["hiking"]);
+  });
+});
+
+describe("Marked Trails style without a published build", () => {
+  it.each(PRESETS)("builds the plain basemap with all three types enabled for %s", (preset) => {
+    const withoutBuild = sanitizeMapStyle(
+      basemapStyle(),
+      preset,
+      resolveMarkedTrailsOverlay(["hiking", "cycling", "mtb"], null),
+    );
+
+    expect(withoutBuild).toEqual(sanitizeMapStyle(basemapStyle(), preset));
+    expect(withoutBuild.layers.some((layer) => layer.id.startsWith("trip-marked-trails"))).toBe(
+      false,
+    );
+    expect(withoutBuild.sources[MARKED_TRAILS_SOURCE_ID]).toBeUndefined();
+  });
+});
+
+describe("Marked Trails data date", () => {
+  const build = (buildId: string, dataDate: string | null) =>
+    buildMarkedTrailsBuild("/t", {
+      current_build_id: buildId,
+      pmtiles_key: `builds/${buildId}/marked-trails.pmtiles`,
+      osm_data_date: dataDate,
+    });
+
+  it("uses the day of osm_data_date", () => {
+    expect(markedTrailsDataDate(build("2026-11-27", "2026-11-26T21:21:00Z"))).toBe("2026-11-26");
+  });
+
+  it("falls back to the build date, ignoring a same-day suffix", () => {
+    expect(markedTrailsDataDate(build("2026-11-27-2", null))).toBe("2026-11-27");
+  });
+
+  it("is null without a build or a usable date", () => {
+    expect(markedTrailsDataDate(null)).toBeNull();
+    expect(markedTrailsDataDate(build("manual", "not a date"))).toBeNull();
+  });
+});
+
+describe("Marked Trails build lookup", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function stubPointerResponse(response: Response) {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
+  }
+
+  it.each([403, 404])("reports no build for status %i", async (status) => {
+    stubPointerResponse(new Response("{}", { status }));
+    await expect(fetchMarkedTrailsBuild("/t")).resolves.toBeNull();
+  });
+
+  it("reports no build for an invalid or unreadable pointer", async () => {
+    stubPointerResponse(new Response('{"current_build_id":"x"}', { status: 200 }));
+    await expect(fetchMarkedTrailsBuild("/t")).resolves.toBeNull();
+    stubPointerResponse(new Response("<html>", { status: 200 }));
+    await expect(fetchMarkedTrailsBuild("/t")).resolves.toBeNull();
+  });
+
+  it("returns the build for a valid pointer", async () => {
+    stubPointerResponse(
+      new Response(
+        JSON.stringify({
+          current_build_id: "2026-11-27",
+          pmtiles_key: "builds/2026-11-27/marked-trails.pmtiles",
+          osm_data_date: "2026-11-26T21:21:00Z",
+        }),
+        { status: 200 },
+      ),
+    );
+    await expect(fetchMarkedTrailsBuild("/t")).resolves.toMatchObject({ buildId: "2026-11-27" });
   });
 });

@@ -19,16 +19,18 @@ import { useEffect, useMemo, useState } from "react";
 import { TelemetryChart } from "../components/charts/TelemetryChart";
 import { ActivityIcon, getActivityIconMeta } from "../components/icons";
 import { TripStageCanvas } from "../components/stage/TripStageCanvas";
-import { shareApi } from "../lib/api/endpoints";
+import { shareApi, systemApi } from "../lib/api/endpoints";
 import {
   normalizeRenderSpecV2,
   type ProjectHighlightsOut,
+  type PublicConfigOut,
   type PublicProjectOut,
   type TelemetryChartOut,
   type TelemetryGeometryFeature,
   type TelemetryTimelineOut,
 } from "../lib/api/types";
 import { formatDistance, formatElapsedTime, formatElevation } from "../lib/geo/format";
+import { useMarkedTrailsBuild } from "../lib/geo/marked-trails";
 import {
   computePhotoStopTotalDurationS,
   evaluateTimelineSchedule,
@@ -57,6 +59,13 @@ export function ShareViewPage() {
     queryFn: ({ signal }) => shareApi.get(slug, signal),
     retry: false,
   });
+  const publicConfigQuery = useQuery<PublicConfigOut>({
+    queryKey: ["public-config"],
+    queryFn: ({ signal }) => systemApi.publicConfig(signal),
+    retry: false,
+    staleTime: 60_000,
+  });
+  const markedTrailsBuild = useMarkedTrailsBuild(publicConfigQuery.data?.marked_trails_base_url);
 
   const project = projectQuery.data;
   const spec = useMemo(
@@ -314,6 +323,7 @@ export function ShareViewPage() {
             activePhoto={schedule.activePhoto}
             climbs={climbs}
             projectTitle={project.title}
+            markedTrailsBuild={markedTrailsBuild}
           />
         </div>
         <div className="flex shrink-0 items-center justify-between gap-3 border-t border-border bg-surface px-3 py-2">
@@ -586,6 +596,7 @@ export function ShareViewPage() {
                   activePhoto={schedule.activePhoto}
                   climbs={climbs}
                   projectTitle={project.title}
+                  markedTrailsBuild={markedTrailsBuild}
                   totalStats={{
                     distanceM: project.total_distance_m,
                     elevationGainM: heroTotals.totalElevationGainM,

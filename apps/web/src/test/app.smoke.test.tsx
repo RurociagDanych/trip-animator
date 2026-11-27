@@ -23,14 +23,26 @@ function mockJsonResponse(body: unknown, status = 200, headers?: Record<string, 
   });
 }
 
-function mockStandardApiFetch(publicConfigExtra: Record<string, unknown> = {}) {
+const PUBLISHED_POINTER = {
+  current_build_id: "2026-11-27",
+  pmtiles_key: "builds/2026-11-27/marked-trails.pmtiles",
+  osm_data_date: "2026-11-26T21:21:00Z",
+};
+
+function mockStandardApiFetch(
+  publicConfigExtra: Record<string, unknown> = {},
+  markedTrailsPointer: { status: number; body: unknown } = {
+    status: 404,
+    body: { detail: "not published" },
+  },
+) {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
     if (url.includes("/api/v1/public-config")) {
       return mockJsonResponse({ dev_auth_enabled: true, strava_configured: true, ...publicConfigExtra });
     }
     if (url.endsWith("/tiles/marked-trails/current.json")) {
-      return mockJsonResponse({ detail: "not published" }, 404);
+      return mockJsonResponse(markedTrailsPointer.body, markedTrailsPointer.status);
     }
     if (url.includes("/api/v1/auth/me")) {
       return mockJsonResponse({
@@ -198,8 +210,61 @@ describe("Trip Animator web routes and config builders", () => {
     expect(screen.queryByRole("checkbox", { name: "Hiking Marked Trails" })).not.toBeInTheDocument();
   });
 
+  it.each([
+    ["missing", 404, { detail: "not published" }],
+    ["forbidden", 403, "<Error>AccessDenied</Error>"],
+    ["invalid", 200, { current_build_id: "2026-11-27", pmtiles_key: "elsewhere/x.pmtiles" }],
+  ])(
+    "disables the Marked Trails toggles with an explanation when the pointer is %s",
+    async (_name, status, body) => {
+      mockStandardApiFetch({ marked_trails_base_url: "/tiles/marked-trails" }, { status, body });
+      const router = createAppRouter(
+        createMemoryHistory({ initialEntries: ["/projects/fictional-route-2040"] }),
+      );
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      render(<App router={router} queryClient={queryClient} />);
+
+      expect(await screen.findByText(/Marked Trails data is not published yet/)).toBeInTheDocument();
+      for (const name of ["Hiking Marked Trails", "Cycling Marked Trails", "MTB Marked Trails"]) {
+        expect(screen.getByRole("checkbox", { name })).toBeDisabled();
+      }
+    },
+  );
+
+  it("enables the toggles and shows the trail data date in the attribution only while the overlay is on", async () => {
+    mockStandardApiFetch(
+      { marked_trails_base_url: "/tiles/marked-trails" },
+      { status: 200, body: PUBLISHED_POINTER },
+    );
+    const router = createAppRouter(
+      createMemoryHistory({ initialEntries: ["/projects/fictional-route-2040"] }),
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<App router={router} queryClient={queryClient} />);
+
+    const hiking = await screen.findByRole("checkbox", { name: "Hiking Marked Trails" });
+    await waitFor(() => expect(screen.getByTestId("map-attribution")).toBeInTheDocument());
+    expect(hiking).toBeEnabled();
+    expect(screen.queryByText(/Marked Trails data is not published yet/)).not.toBeInTheDocument();
+    expect(screen.getByTestId("map-attribution")).not.toHaveTextContent("Marked Trails data");
+
+    fireEvent.click(hiking);
+    await waitFor(() =>
+      expect(screen.getByTestId("map-attribution")).toHaveTextContent(
+        "© OpenStreetMap contributors · Marked Trails data: 2026-11-26",
+      ),
+    );
+    fireEvent.click(hiking);
+    await waitFor(() =>
+      expect(screen.getByTestId("map-attribution")).not.toHaveTextContent("Marked Trails data"),
+    );
+  });
+
   it("toggles hiking, cycling and MTB Marked Trails independently and saves each to the project", async () => {
-    const fetchSpy = mockStandardApiFetch({ marked_trails_base_url: "/tiles/marked-trails" });
+    const fetchSpy = mockStandardApiFetch(
+      { marked_trails_base_url: "/tiles/marked-trails" },
+      { status: 200, body: PUBLISHED_POINTER },
+    );
     const router = createAppRouter(
       createMemoryHistory({ initialEntries: ["/projects/fictional-route-2040"] }),
     );

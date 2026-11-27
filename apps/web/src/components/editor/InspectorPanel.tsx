@@ -32,7 +32,7 @@ import type {
 } from "../../lib/api/types";
 import { ALL_STATISTIC_METRICS } from "../../lib/api/types";
 import { generateDirectorKeyframes } from "../../lib/geo/director";
-import { toggleMarkedTrailType } from "../../lib/geo/marked-trails";
+import { type MarkedTrailsAvailability, toggleMarkedTrailType } from "../../lib/geo/marked-trails";
 import type { InspectorSection } from "../../lib/state/editor-store";
 import { ExportPanel } from "./ExportPanel";
 import type { LocalExportSource } from "./LocalExportControls";
@@ -116,7 +116,7 @@ export interface InspectorPanelProps {
   onFlushSave: () => Promise<boolean>;
   localExportSource?: LocalExportSource;
   invalidSpecValues?: InvalidRenderSpecValue[];
-  markedTrailsConfigured?: boolean;
+  markedTrailsAvailability?: MarkedTrailsAvailability;
 }
 
 const INVALID_SPEC_FIELD_LABEL: Record<InvalidRenderSpecValue["field"], string> = {
@@ -142,7 +142,7 @@ export function InspectorPanel({
   onFlushSave,
   localExportSource,
   invalidSpecValues = [],
-  markedTrailsConfigured = false,
+  markedTrailsAvailability = "not-configured",
 }: InspectorPanelProps) {
   const hud = spec.statistics_panel;
   const effectiveDays = Math.max(1, dayCount ?? stageCount);
@@ -265,7 +265,7 @@ export function InspectorPanel({
               </select>
             </label>
 
-            {markedTrailsConfigured ? (
+            {markedTrailsAvailability !== "not-configured" ? (
               <div className="space-y-2">
                 {MARKED_TRAIL_TOGGLES.map(({ type, label }) => (
                   <label key={type} className="flex items-center gap-2 text-ink">
@@ -281,11 +281,17 @@ export function InspectorPanel({
                           ),
                         })
                       }
-                      className="h-4 w-4 accent-sky-accent"
+                      disabled={markedTrailsAvailability === "unavailable"}
+                      className="h-4 w-4 accent-sky-accent disabled:cursor-not-allowed"
                     />
                     <span className="font-medium">{label}</span>
                   </label>
                 ))}
+                {markedTrailsAvailability === "unavailable" ? (
+                  <p className="text-[11px] text-ink-muted">
+                    Marked Trails data is not published yet, so trails cannot be shown or rendered.
+                  </p>
+                ) : null}
               </div>
             ) : null}
 

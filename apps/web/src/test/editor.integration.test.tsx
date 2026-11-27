@@ -691,6 +691,104 @@ describe("Login, Editor state, Stage reorder & Revision Conflict handling", () =
     });
   });
 
+  it("shows the trail data date in the shared playback attribution while the overlay is on", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
+      if (url.includes("/api/v1/public-config")) {
+        return jsonResponse({ marked_trails_base_url: "/tiles/marked-trails" });
+      }
+      if (url.endsWith("/tiles/marked-trails/current.json")) {
+        return jsonResponse({
+          current_build_id: "2026-11-27",
+          pmtiles_key: "builds/2026-11-27/marked-trails.pmtiles",
+          osm_data_date: "2026-11-26T21:21:00Z",
+        });
+      }
+      if (url.endsWith("/api/v1/share/active-slug")) {
+        return jsonResponse({
+          id: "proj-1",
+          title: "Shared Fictional Meridian Tour",
+          stage_count: 1,
+          total_distance_m: 20_000,
+          settings: { ...createDefaultRenderSpecV2(), marked_trail_types: ["hiking"] },
+          stages: [
+            {
+              id: "stage-1",
+              project_id: "proj-1",
+              source_type: "gpx",
+              activity_type: "cycling",
+              name: "Shared Stage 1",
+              stage_order: 0,
+              day_index: 1,
+              trim_start_s: null,
+              trim_end_s: null,
+              started_at: "2001-06-14T08:00:00Z",
+              point_count: 2,
+              distance_m: 20_000,
+              elevation_gain_m: 900,
+              elevation_loss_m: 200,
+              moving_seconds: 3600,
+              elapsed_seconds: 3800,
+              has_timestamps: true,
+              min_lat: 0.2173,
+              max_lat: 0.3128,
+              min_lon: 0.4512,
+              max_lon: 0.5897,
+              created_at: "2001-06-14T08:00:00Z",
+            },
+          ],
+          has_rendered_video: false,
+          latest_render_id: null,
+          created_at: "2001-06-14T08:00:00Z",
+          updated_at: "2001-06-14T08:00:00Z",
+        });
+      }
+      if (url.includes("/api/v1/share/active-slug/stages/stage-1/geometry")) {
+        return jsonResponse({
+          type: "Feature",
+          id: "stage-1",
+          geometry: { type: "MultiLineString", coordinates: [[[0.4512, 0.2173], [0.5897, 0.3128]]] },
+          properties: {
+            lod: "medium",
+            point_count: 2,
+            original_point_count: 2,
+            segment_count: 1,
+            bbox: [0.4512, 0.2173, 0.5897, 0.3128],
+            crosses_antimeridian: false,
+            stage_id: "stage-1",
+            name: "Shared Stage 1",
+            day_index: 1,
+            stage_order: 0,
+            source_type: "gpx",
+            activity_type: "cycling",
+            distance_m: 20_000,
+            elevation_gain_m: 900,
+          },
+        });
+      }
+      if (url.includes("/api/v1/share/active-slug/chart")) {
+        return jsonResponse({ project_id: "proj-1", total_distance_m: 20_000, points: [] });
+      }
+      if (url.endsWith("/api/v1/share/disabled-slug")) {
+        return jsonResponse({ detail: "Not found" }, 404);
+      }
+      return jsonResponse({}, 404);
+    });
+
+    const router = createAppRouter(
+      createMemoryHistory({ initialEntries: ["/share/active-slug"] }),
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<App router={router} queryClient={queryClient} />);
+
+    await screen.findByText("Shared Fictional Meridian Tour");
+    await waitFor(() =>
+      expect(screen.getByTestId("map-attribution")).toHaveTextContent(
+        "© OpenStreetMap contributors · Marked Trails data: 2026-11-26",
+      ),
+    );
+  });
+
   it("renders public share view (/share/:slug) and shows unavailable message on 404", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
