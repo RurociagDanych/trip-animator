@@ -29,6 +29,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     fi
 
 COPY packages/telemetry ./packages/telemetry
+COPY packages/object-store ./packages/object-store
 COPY apps/api ./apps/api
 COPY dbt ./dbt
 

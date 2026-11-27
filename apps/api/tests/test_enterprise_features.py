@@ -24,7 +24,7 @@ from trip_api.services import (
     persist_or_delete_stage_lod_cache,
     stage_lod_cache_key,
 )
-from trip_api.storage import LocalObjectStore, ObjectStream, S3ObjectStore, parse_byte_range
+from trip_object_store import LocalObjectStore, ObjectStream, S3ObjectStore, parse_byte_range
 from trip_telemetry import parse_gpx_bytes
 
 if TYPE_CHECKING:
@@ -661,6 +661,9 @@ def test_non_local_store_materialization_and_lod_cache_error_fallbacks(
             if key not in self._blobs:
                 raise FileNotFoundError(key)
             return self._blobs[key]
+
+        def get_file(self, key: str, dest: Path) -> None:
+            dest.write_bytes(self.get_bytes(key))
 
         def open_stream(
             self,

@@ -27,7 +27,7 @@ from trip_api.db import (
     create_session_factory,
 )
 from trip_api.reaper import build_object_store, reap_expired
-from trip_api.storage import LocalObjectStore, S3ObjectStore
+from trip_object_store import LocalObjectStore, S3ObjectStore
 
 if TYPE_CHECKING:
     from conftest import AppHarness
@@ -397,11 +397,16 @@ def test_reap_orphan_jobs_missing_blobs_s3_and_validation(
     deleted_s3_keys: list[str] = []
 
     class FakeS3Client:
+        def head_object(self, **kwargs: Any) -> dict[str, Any]:
+            if str(kwargs["Key"]) == "outputs/missing-s3.mp4":
+                raise ClientError(
+                    {"Error": {"Code": "404"}, "ResponseMetadata": {"HTTPStatusCode": 404}},
+                    "HeadObject",
+                )
+            return {"ContentLength": 4}
+
         def delete_object(self, **kwargs: Any) -> None:
-            key = str(kwargs["Key"])
-            deleted_s3_keys.append(key)
-            if key == "outputs/missing-s3.mp4":
-                raise ClientError({"Error": {"Code": "NoSuchKey"}}, "DeleteObject")
+            deleted_s3_keys.append(str(kwargs["Key"]))
 
     monkeypatch.setattr(boto3, "client", lambda *_args, **_kwargs: FakeS3Client())
     s3_cfg = Settings(
@@ -437,8 +442,8 @@ def test_reap_orphan_jobs_missing_blobs_s3_and_validation(
         db.commit()
         s3_res = reap_expired(db, built_store, now=now)
         assert s3_res.render_jobs_deleted == 1
-        assert s3_res.blobs_deleted == 2
-        assert deleted_s3_keys == ["outputs/missing-s3.mp4", "outputs/present-s3.webp"]
+        assert s3_res.blobs_deleted == 1
+        assert deleted_s3_keys == ["outputs/present-s3.webp"]
 
 
 def test_cli_reap_dry_run_and_execute(

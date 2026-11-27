@@ -34,7 +34,7 @@ from trip_api.db import (
 from trip_api.ingest import _resolve_target_project_for_job, process_pending_ingest_jobs
 from trip_api.routers.strava import _parse_strava_epoch
 from trip_api.security import decrypt_secret, encrypt_secret
-from trip_api.storage import S3ObjectStore
+from trip_object_store import S3ObjectStore
 
 if TYPE_CHECKING:
     from conftest import AppHarness, HarnessFactory
@@ -1326,64 +1326,9 @@ def test_render_download_streaming_ranges_and_s3_404(
     assert client.get(f"/api/v1/renders/{job_id}/thumbnail").status_code == 404
 
 
-def test_local_and_s3_object_store_copy_zero_copy(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from trip_api.storage import LocalObjectStore
-
-    local = LocalObjectStore(tmp_path)
-    local.put_bytes("outputs/src.mp4", b"mp4-binary-payload", content_type="video/mp4")
-    local.copy("outputs/src.mp4", "outputs/nested/dst.mp4", content_type="video/mp4")
-    assert local.get_bytes("outputs/nested/dst.mp4") == b"mp4-binary-payload"
-    assert local.get_bytes("outputs/src.mp4") == b"mp4-binary-payload"
-
-    with pytest.raises(FileNotFoundError):
-        local.copy("outputs/missing.mp4", "outputs/dst2.mp4")
-    with pytest.raises(ValueError, match="Unsafe object key"):
-        local.copy("outputs/src.mp4", "../escape.mp4")
-
-    s3_copy_calls: list[tuple[Any, ...]] = []
-
-    class FakeS3CopyClient:
-        def copy(
-            self,
-            copy_source: dict[str, str],
-            bucket: str,
-            key: str,
-            ExtraArgs: dict[str, Any] | None = None,
-        ) -> None:
-            s3_copy_calls.append((copy_source, bucket, key, ExtraArgs))
-            if copy_source["Key"] == "outputs/missing.mp4":
-                raise ClientError(
-                    {"Error": {"Code": "NoSuchKey", "Message": "Missing"}},
-                    "CopyObject",
-                )
-
-    monkeypatch.setattr(boto3, "client", lambda *_args, **_kwargs: FakeS3CopyClient())
-    s3 = S3ObjectStore(
-        endpoint_url="",
-        access_key_id="",
-        secret_access_key="",
-        bucket="my-bucket",
-        region="us-east-1",
-    )
-    s3.copy("outputs/a.mp4", "outputs/b.mp4", content_type="video/mp4")
-    assert s3_copy_calls == [
-        (
-            {"Bucket": "my-bucket", "Key": "outputs/a.mp4"},
-            "my-bucket",
-            "outputs/b.mp4",
-            {"ContentType": "video/mp4", "MetadataDirective": "REPLACE"},
-        )
-    ]
-    with pytest.raises(FileNotFoundError):
-        s3.copy("outputs/missing.mp4", "outputs/c.mp4")
-
-
 def test_try_copy_cached_render_artifacts_uses_store_copy(tmp_path: Path) -> None:
     from trip_api.routers.renders import _try_copy_cached_render_artifacts
-    from trip_api.storage import LocalObjectStore
+    from trip_object_store import LocalObjectStore
 
     class CopySpyStore(LocalObjectStore):
         def __init__(self, root: Path) -> None:

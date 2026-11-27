@@ -20,11 +20,13 @@ dependencies = [
   "pydantic-settings>=2.7.0",
   "python-multipart>=0.0.20",
   "sqlalchemy>=2.0.37",
+  "trip-object-store",
   "trip-telemetry",
   "uvicorn[standard]>=0.34.0",
 ]
 
 [tool.uv.sources]
+trip-object-store = { workspace = true }
 trip-telemetry = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
