@@ -12,7 +12,7 @@
 - Out of Scope
 - Further Notes
 
-Status: Draft. Decisions are recorded in [ADR 0001](../decisions/0001-own-marked-trail-tiles.md). Delivered so far: the hiking tracer bullet (local build with `make marked-trails-local`, `marked_trail_types` in render settings, the hiking layer in the editor through the local store). The hiking toggle is shown only when `MARKED_TRAILS_BASE_URL` is set; it is empty by default, so production shows no toggle until the render ticket lands. Until then, export and shared playback ignore the setting. Everything else in this spec is not implemented. Build cost was measured once with a prototype on the production VPS (Poland and Germany only); see Further Notes.
+Status: Draft. Decisions are recorded in [ADR 0001](../decisions/0001-own-marked-trail-tiles.md). Delivered so far: the hiking tracer bullet (local build with `make marked-trails-local`, `marked_trail_types` in render settings, the hiking layer in the editor through the local store), and the publication policy in the CLI (two-build limit, size and count validation, failure keeps the pointer; rollback in [OPERATIONS.md](../OPERATIONS.md)). The hiking toggle is shown only when `MARKED_TRAILS_BASE_URL` is set; it is empty by default, so production shows no toggle until the render ticket lands. Until then, export and shared playback ignore the setting. Everything else in this spec is not implemented. Build cost was measured once with a prototype on the production VPS (Poland and Germany only); see Further Notes.
 
 ## Problem Statement
 

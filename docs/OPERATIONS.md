@@ -80,6 +80,18 @@ The target builds the builder image (osmium, Planetiler and the `trip-marked-tra
 
 `make dev-web` serves the store at `/tiles/marked-trails/`, and `make dev-api` sets `MARKED_TRAILS_BASE_URL` to that path unless the environment sets it; `.env.example` leaves it empty. With `MARKED_TRAILS_BASE_URL` empty, the editor shows no Marked Trails toggle. `make test-marked-trails-image` runs the Docker test of the builder image on a committed fixture; `make test` skips it.
 
+### Marked Trails publication policy and rollback
+
+`build-publish` follows one order: delete every build except the current one, build the new PMTiles file, validate it, upload it under `builds/<build id>/`, then overwrite `current.json`. The store never holds more than two builds, the current one and the previous one kept for rollback. Validation requires the file to be at most `--size-budget-bytes` (environment `MARKED_TRAILS_SIZE_BUDGET_BYTES`, default 1073741824, 1 GiB) and, when a current build exists, its size and `marked_trail_count` to be within 20% of the current build. The first build is checked only against the budget. A failed build or failed validation leaves `current.json` unchanged and the command exits with status 1.
+
+The previous build is deleted when a new build starts, so after a failed run `previous_build_id` in `current.json` can name a build that no longer exists. Rollback is only possible while the previous build is in the store, which is right after a successful run.
+
+To roll back, check that `builds/<previous_build_id>/marked-trails.pmtiles` exists in the store, then edit `current.json`:
+
+1. Set `current_build_id` to the old `previous_build_id`, and set `pmtiles_key`, `size_bytes`, `sha256`, `osm_data_date` and `marked_trail_count` to that build's values.
+2. Set `previous_build_id` to `null`, or to the build being rolled back from.
+3. Write the file back with `Cache-Control: no-cache`. The next `build-publish` run then deletes every build except the new current one.
+
 ## Strava OAuth2 setup
 
 1. In your [Strava API Application settings](https://www.strava.com/settings/api), set **Authorization Callback Domain** to:
