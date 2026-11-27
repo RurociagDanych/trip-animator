@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session, sessionmaker
 from trip_telemetry import (
     DEFAULT_ACTIVITY_TYPE,
@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 _TERMINAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
 _DISPATCH_LEASE_SECONDS = 120
+_REMOTE_DISPATCH_ADVISORY_LOCK_KEY = 71042913
 
 
 class RenderCallbackPayload(BaseModel):
@@ -336,6 +337,7 @@ def _update_remote_progress(
         changed = job.status != "running" or new_pct != job.progress_pct
         job.status = "running"
         job.progress_pct = new_pct
+        job.lease_expires_at = None
         job.updated_at = now
         if changed:
             _notify_job_event(
@@ -453,6 +455,31 @@ def _claim_undispatched_remote_job(
     now = datetime.now(UTC)
     lease_until = now + timedelta(seconds=_DISPATCH_LEASE_SECONDS)
     with session_factory() as db:
+        if settings.database_url.startswith("postgresql"):
+            db.execute(
+                text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                {"lock_key": _REMOTE_DISPATCH_ADVISORY_LOCK_KEY},
+            )
+        inflight_count = int(
+            db.scalar(
+                select(func.count())
+                .select_from(RenderJob)
+                .where(
+                    RenderJob.render_backend == backend_name,
+                    RenderJob.status.in_(("queued", "running")),
+                    or_(
+                        RenderJob.remote_dispatched_at.is_not(None),
+                        (
+                            RenderJob.lease_expires_at.is_not(None)
+                            & (RenderJob.lease_expires_at >= now)
+                        ),
+                    ),
+                )
+            )
+            or 0
+        )
+        if inflight_count >= settings.render_remote_max_inflight:
+            return None
         stmt = (
             select(RenderJob)
             .where(
@@ -653,19 +680,32 @@ def process_remote_renders_once(
         else:
             dispatched += 1
 
+    reconcile_now = datetime.now(UTC)
+    reconcile_lease_until = reconcile_now + timedelta(seconds=30)
     with session_factory() as db:
-        active_rows = list(
-            db.execute(
-                select(RenderJob.id, RenderJob.external_execution_id)
-                .where(
-                    RenderJob.render_backend == backend.name,
-                    RenderJob.status == "running",
-                    RenderJob.external_execution_id.is_not(None),
-                )
-                .order_by(RenderJob.updated_at.asc())
-                .limit(max_reconcile)
-            ).all()
+        reconcile_stmt = (
+            select(RenderJob)
+            .where(
+                RenderJob.render_backend == backend.name,
+                RenderJob.status == "running",
+                RenderJob.external_execution_id.is_not(None),
+                or_(
+                    RenderJob.lease_expires_at.is_(None),
+                    RenderJob.lease_expires_at < reconcile_now,
+                ),
+            )
+            .order_by(RenderJob.updated_at.asc())
+            .limit(max_reconcile)
         )
+        if settings.database_url.startswith("postgresql"):
+            reconcile_stmt = reconcile_stmt.with_for_update(skip_locked=True)
+        claimed_running = list(db.scalars(reconcile_stmt).all())
+        active_rows: list[tuple[uuid.UUID, str | None]] = []
+        for running_job in claimed_running:
+            running_job.lease_expires_at = reconcile_lease_until
+            active_rows.append((running_job.id, running_job.external_execution_id))
+        if claimed_running:
+            db.commit()
 
     for active_job_id, execution_id in active_rows:
         if not execution_id:
@@ -674,6 +714,11 @@ def process_remote_renders_once(
             remote_status = backend.get_status(str(execution_id))
         except Exception as exc:
             logger.warning("Remote status poll failed for job %s: %s", active_job_id, exc)
+            with session_factory() as db:
+                job_err = _select_job_for_update(db, active_job_id, settings.database_url)
+                if job_err is not None and job_err.status == "running":
+                    job_err.lease_expires_at = None
+                    db.commit()
             continue
 
         if remote_status.state == "running":

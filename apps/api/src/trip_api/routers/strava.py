@@ -981,6 +981,7 @@ async def _import_single_strava_activity(
         activity_type=resolved_activity,
         external_source_id=str(activity_id),
         strava_activity_id=activity_id,
+        max_stages_per_project=settings.max_stages_per_project,
     )
     mirror_stage_to_vault(
         db,

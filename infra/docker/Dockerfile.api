@@ -47,10 +47,11 @@ RUN groupadd --system --gid 10001 appgroup \
     && chown -R 10001:10001 /home/appuser /data/objects
 
 ENV HOME=/home/appuser \
-    FORWARDED_ALLOW_IPS="127.0.0.1,::1"
+    FORWARDED_ALLOW_IPS="127.0.0.1,::1" \
+    UVICORN_WORKERS="1"
 
 USER 10001:10001
 
 EXPOSE 8000
 
-CMD ["uvicorn", "trip_api.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]
+CMD ["sh", "-c", "exec uvicorn trip_api.main:app --host 0.0.0.0 --port 8000 --proxy-headers --workers \"${UVICORN_WORKERS:-1}\""]

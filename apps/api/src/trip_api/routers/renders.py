@@ -10,7 +10,6 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, cast
 
-import psycopg
 from fastapi import APIRouter, Header, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select, text
@@ -42,6 +41,7 @@ from trip_api.render_backends import (
     build_render_backend,
     verify_render_callback_signature,
 )
+from trip_api.render_events import RenderEventHub
 from trip_api.schemas import RenderJobOut, RenderQuoteOut, validate_stage_maps_against_project
 from trip_api.services import (
     get_owned_project,
@@ -57,14 +57,6 @@ router = APIRouter(tags=["renders"])
 logger = logging.getLogger(__name__)
 
 _TERMINAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
-
-
-def _to_psycopg_dsn(database_url: str) -> str:
-    if database_url.startswith("postgresql+psycopg://"):
-        return "postgresql://" + database_url.removeprefix("postgresql+psycopg://")
-    if database_url.startswith("postgres://"):
-        return "postgresql://" + database_url.removeprefix("postgres://")
-    return database_url
 
 
 def _get_owned_job(db: Session, job_id: uuid.UUID, user_id: uuid.UUID) -> RenderJob:
@@ -171,18 +163,44 @@ def _count_matched_photos(photos: list[ProjectPhoto]) -> int:
     return sum(1 for p in photos if p.match_method != "unmatched")
 
 
+def _enforce_server_render_caps(spec: RenderSpecV2, settings: AppSettings) -> None:
+    if spec.duration_seconds > settings.server_render_max_duration_s:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Server render duration cannot exceed {settings.server_render_max_duration_s:g}s "
+                "(use Local Export for longer films)"
+            ),
+        )
+    max_fps = (
+        settings.server_render_max_fps_remote
+        if settings.render_backend == "aws_sfn_lambda"
+        else settings.server_render_max_fps_local
+    )
+    if spec.fps > max_fps:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Server render FPS cannot exceed {max_fps} for the "
+                f"{settings.render_backend} backend"
+            ),
+        )
+
+
 @router.post("/api/v1/projects/{project_id}/renders/quote", response_model=RenderQuoteOut)
 def quote_render_job(
     project_id: uuid.UUID,
     spec: RenderSpecV2,
     auth: CurrentAuth,
     db: DbSession,
+    settings: AppSettings,
 ) -> RenderQuoteOut:
     project = get_owned_project(db, project_id, auth.user.id)
     stages = get_project_stages(db, project.id)
     if not stages:
         raise HTTPException(status_code=422, detail="Cannot quote a project with zero stages")
     validate_stage_maps_against_project(spec, {str(s.id) for s in stages})
+    _enforce_server_render_caps(spec, settings)
 
     photos = get_project_photos(db, project.id, only_enabled=True)
     content_hash = _compute_content_hash(spec, stages, photos)
@@ -275,6 +293,8 @@ def create_render_job(
             )
         return render_job_to_out(existing)
 
+    _enforce_server_render_caps(spec, settings)
+
     photos = get_project_photos(db, project.id, only_enabled=True)
     content_hash = _compute_content_hash(spec, stages, photos)
     now = datetime.now(UTC)
@@ -340,6 +360,25 @@ def create_render_job(
                     detail="Idempotency-Key was already used with a different render specification",
                 )
             return render_job_to_out(existing_after_lock)
+        active_renders = int(
+            db.scalar(
+                select(func.count())
+                .select_from(RenderJob)
+                .where(
+                    RenderJob.owner_user_id == auth.user.id,
+                    RenderJob.status.in_(("queued", "running")),
+                )
+            )
+            or 0
+        )
+        if active_renders >= settings.max_active_renders_per_user:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"Maximum of {settings.max_active_renders_per_user} active server render(s) "
+                    "allowed at a time. Wait for your current render to finish or cancel it."
+                ),
+            )
         balance = get_user_credit_balance(db, auth.user.id)
         if balance < quote.credits:
             raise HTTPException(
@@ -497,12 +536,10 @@ async def stream_render_events(
         last_sig: tuple[str, int, str | None] | None = None
         start_mono = time.monotonic()
 
-        if use_pg_listen:
-            dsn = _to_psycopg_dsn(settings.database_url)
+        hub = cast(RenderEventHub | None, getattr(request.app.state, "render_event_hub", None))
+        if use_pg_listen and hub is not None and hub.is_postgres:
             try:
-                async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as aconn:
-                    await aconn.execute("LISTEN render_job_events")
-
+                async with hub.subscribe(job_id) as queue:
                     while (time.monotonic() - start_mono) < deadline_s:
                         if await request.is_disconnected():
                             break
@@ -520,19 +557,11 @@ async def stream_render_events(
                         if current.status in _TERMINAL_STATES:
                             return
 
-                        received_for_job = False
-                        async for notify in aconn.notifies(timeout=15.0):
+                        try:
+                            await asyncio.wait_for(queue.get(), timeout=15.0)
+                        except TimeoutError:
                             if await request.is_disconnected():
                                 return
-                            try:
-                                msg = json.loads(notify.payload)
-                                if isinstance(msg, dict) and msg.get("job_id") == str(job_id):
-                                    received_for_job = True
-                                    break
-                            except Exception:
-                                received_for_job = True
-                                break
-                        if not received_for_job:
                             yield ": keepalive\n\n"
                     return
             except Exception as exc:

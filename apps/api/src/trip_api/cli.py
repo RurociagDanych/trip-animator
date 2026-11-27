@@ -9,6 +9,7 @@ import signal
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -50,7 +51,7 @@ from trip_api.ingest import (
     count_pending_ingest_jobs,
     process_pending_ingest_jobs,
 )
-from trip_api.reaper import build_object_store, run_reap
+from trip_api.reaper import build_object_store, reap_expired, run_reap
 from trip_api.remote_renders import (
     RemoteRenderCycleReport,
     process_remote_renders_once,
@@ -332,6 +333,7 @@ def run_ingest_worker_loop(
     dry_run: bool = False,
     database_url: str | None = None,
     poll_interval_s: float = 5.0,
+    reap_interval_s: float = 0.0,
     max_attempts: int = 5,
     stop_event: threading.Event | None = None,
     max_iterations: int | None = None,
@@ -339,6 +341,8 @@ def run_ingest_worker_loop(
 ) -> IngestProcessReport:
     if poll_interval_s <= 0.0:
         raise ValueError("poll_interval_s must be > 0")
+    if reap_interval_s < 0.0:
+        raise ValueError("reap_interval_s must be >= 0")
     if limit < 1:
         raise ValueError("limit must be >= 1")
     if max_attempts < 1:
@@ -371,6 +375,7 @@ def run_ingest_worker_loop(
     total_deferred = 0
 
     iterations = 0
+    last_reap_mono: float | None = None
     heartbeat_stop = start_service_heartbeat("ingest", stop_event=shutdown_event)
 
     try:
@@ -416,6 +421,43 @@ def run_ingest_worker_loop(
             except Exception as exc:
                 record_ingest_error(type(exc).__name__)
                 raise
+
+            if (
+                not dry_run
+                and reap_interval_s > 0.0
+                and (
+                    last_reap_mono is None or (time.monotonic() - last_reap_mono) >= reap_interval_s
+                )
+            ):
+                last_reap_mono = time.monotonic()
+                try:
+                    with sf() as reap_db:
+                        reap_rep = reap_expired(
+                            reap_db,
+                            store,
+                            render_retention_days=cfg.render_retention_days,
+                            rate_limit_retention_hours=cfg.rate_limit_retention_hours,
+                        )
+                        if (
+                            reap_rep.sessions_deleted
+                            or reap_rep.oauth_states_deleted
+                            or reap_rep.rate_limits_deleted
+                            or reap_rep.render_jobs_deleted
+                            or reap_rep.blobs_deleted
+                            or reap_rep.verification_tokens_deleted
+                            or reap_rep.password_reset_tokens_deleted
+                        ):
+                            logger.info(
+                                "Periodic retention reap pruned sessions=%d oauth=%d "
+                                "rate_limits=%d render_jobs=%d blobs=%d",
+                                reap_rep.sessions_deleted,
+                                reap_rep.oauth_states_deleted,
+                                reap_rep.rate_limits_deleted,
+                                reap_rep.render_jobs_deleted,
+                                reap_rep.blobs_deleted,
+                            )
+                except Exception as exc:
+                    logger.warning("Periodic retention reap failed: %s", type(exc).__name__)
 
             iterations += 1
             if max_iterations is not None and iterations >= max_iterations:
@@ -518,6 +560,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=5.0,
         help="Polling interval in seconds when --loop is enabled",
+    )
+    ing_p.add_argument(
+        "--reap-interval-s",
+        type=float,
+        default=0.0,
+        help="Optional periodic retention reap interval in seconds when --loop is enabled",
     )
     ing_p.add_argument(
         "--max-attempts",
@@ -686,6 +734,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     dry_run=bool(args.dry_run),
                     database_url=args.database_url,
                     poll_interval_s=args.poll_interval_s,
+                    reap_interval_s=args.reap_interval_s,
                     max_attempts=args.max_attempts,
                 )
             else:

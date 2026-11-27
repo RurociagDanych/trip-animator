@@ -2,7 +2,7 @@
 
 > Purpose: Explain how to set up, run, integrate and maintain a self-hosted Trip Animator deployment.
 > Audience: operators
-> Last reviewed: 2026-11-26
+> Last reviewed: 2026-11-27
 
 Sections:
 
@@ -10,6 +10,7 @@ Sections:
 - Local development setup
 - Strava OAuth2 setup
 - Docker Compose deployment
+- Quotas, scaling, and VPS backups
 
 Deployment, integration and maintenance notes for self-hosting Trip Animator.
 
@@ -152,11 +153,29 @@ uv run python -m trip_api.cli reap --dry-run --json
 uv run python -m trip_api.cli reap
 ```
 
-In Docker Compose, run the reaper on a host cron or systemd timer:
+In Docker Compose, the `ingest` service runs periodic retention reaping every hour (`--reap-interval-s 3600`). You can also trigger an immediate pass manually:
 
 ```bash
 docker compose -f infra/compose.yaml exec -T api python -m trip_api.cli reap
 ```
+
+## Quotas, scaling, and VPS backups
+
+- **Per-user quotas** (configured in `.env`): `MAX_PROJECTS_PER_USER=25`, `MAX_STAGES_PER_PROJECT=30`, `MAX_ACTIVE_RENDERS_PER_USER=1` (alongside `MAX_PHOTOS_PER_PROJECT=100`).
+- **Server Render caps**: `SERVER_RENDER_MAX_DURATION_S=120.0`, `SERVER_RENDER_MAX_FPS_LOCAL=30`, and `SERVER_RENDER_MAX_FPS_REMOTE=60`. Local browser export remains uncapped by these server limits.
+- **AWS Lambda concurrency ceiling**: `RENDER_REMOTE_MAX_INFLIGHT=3` throttles the remote outbox dispatcher across API workers. Pair this with `reserved_concurrent_executions = 24` (`3 x 8`) in `infra/terraform/standalone-remote-render/terraform.tfvars`.
+- **Multi-worker API & SSE scaling**: `UVICORN_WORKERS=2` (default in `infra/compose.yaml`) runs multiple FastAPI workers safely behind Caddy. Open render SSE streams share one in-process PostgreSQL `LISTEN render_job_events` connection per API worker.
+- **PostgreSQL backups**: Schedule `scripts/backup-vps.sh` via host cron or systemd timer to capture `pg_dump --format=custom` archives, prune local files older than `BACKUP_RETENTION_DAYS` (default `14`), and optionally sync to S3/R2/B2 via `BACKUP_S3_URI` (and optional `BACKUP_S3_ENDPOINT_URL`):
+
+```bash
+# Dry-run check
+./scripts/backup-vps.sh --dry-run
+
+# Run backup immediately
+BACKUP_DIR=/var/backups/trip-animator BACKUP_RETENTION_DAYS=14 ./scripts/backup-vps.sh
+```
+
+Verify backups periodically by restoring into a scratch PostgreSQL instance with `pg_restore --clean --if-exists`.
 
 ### Apache Airflow 3 Orchestration
 

@@ -761,6 +761,7 @@ def persist_prepared_stage(
     external_source_id: str | None = None,
     strava_activity_id: int | None = None,
     auto_align_photos: bool = True,
+    max_stages_per_project: int | None = None,
 ) -> Stage:
     if db.get_bind().dialect.name == "postgresql":
         locked_project = db.scalar(
@@ -768,6 +769,17 @@ def persist_prepared_stage(
         )
         if locked_project is None:
             raise ValueError(f"Project {project.id} not found")
+
+    if max_stages_per_project is not None:
+        stage_count = int(
+            db.scalar(select(func.count()).select_from(Stage).where(Stage.project_id == project.id))
+            or 0
+        )
+        if stage_count >= max_stages_per_project:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Maximum of {max_stages_per_project} stages per project reached",
+            )
 
     max_order = db.scalar(
         select(func.coalesce(func.max(Stage.stage_order), -1)).where(Stage.project_id == project.id)
@@ -840,6 +852,7 @@ def ingest_parsed_track(
     external_source_id: str | None = None,
     strava_activity_id: int | None = None,
     auto_align_photos: bool = True,
+    max_stages_per_project: int | None = None,
 ) -> Stage:
     prepared = prepare_stage_artifacts(
         store=store,
@@ -862,6 +875,7 @@ def ingest_parsed_track(
         external_source_id=external_source_id,
         strava_activity_id=strava_activity_id,
         auto_align_photos=auto_align_photos,
+        max_stages_per_project=max_stages_per_project,
     )
 
 

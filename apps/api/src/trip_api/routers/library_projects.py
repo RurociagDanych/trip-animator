@@ -1,5 +1,3 @@
-"""Create projects from private Activity Library material."""
-
 from __future__ import annotations
 
 import hashlib
@@ -21,8 +19,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from trip_telemetry import build_silver_dataframe, parse_strava_streams, parse_track_bytes
 
-from trip_api.db import IngestJob, Project, Stage, VaultActivity
-from trip_api.deps import CsrfAuth, DbSession, StoreDep
+from trip_api.db import IngestJob, Project, Stage, User, VaultActivity
+from trip_api.deps import AppSettings, CsrfAuth, DbSession, StoreDep
 from trip_api.reuse_preview import ReusePreviewCache
 from trip_api.schemas import ProjectReuseEligibility
 
@@ -31,8 +29,6 @@ logger = logging.getLogger(__name__)
 
 
 class LibraryProjectCreateRequest(BaseModel):
-    """Describe a project created from selected library activities."""
-
     title: str = Field(min_length=1, max_length=160)
     activity_ids: list[uuid.UUID] = Field(min_length=1, max_length=100)
 
@@ -45,8 +41,6 @@ class LibraryProjectCreateRequest(BaseModel):
 
 
 class LibraryProjectReuseRequest(BaseModel):
-    """Describe library activities appended to an existing project."""
-
     activity_ids: list[uuid.UUID] = Field(min_length=1, max_length=100)
 
     @field_validator("activity_ids")
@@ -58,8 +52,6 @@ class LibraryProjectReuseRequest(BaseModel):
 
 
 class LibraryProjectOut(BaseModel):
-    """Identify a project and the stages created by a library action."""
-
     project_id: uuid.UUID
     title: str
     stage_ids: list[uuid.UUID]
@@ -84,8 +76,6 @@ def _owned_activities(
     result: list[tuple[VaultActivity, Stage]] = []
     for activity_id in activity_ids:
         activity = by_id[activity_id]
-        # Canonical standalone bytes are independent of project stages, which
-        # may have been locally trimmed or edited since provider sync.
         source = _standalone_original(store, activity)
         if source is None and activity.source_stage_id is None:
             source = _find_unlinked_original(db, store, user_id, activity)
@@ -108,7 +98,6 @@ def _owned_activities(
 def project_reuse_eligibility(
     db: Session, store: StoreDep, activity: VaultActivity
 ) -> Literal["ready", "waiting", "no_gps", "unavailable"]:
-    """Report readiness using the same owner-scoped original validation as project reuse."""
     if not activity.has_gps:
         return "no_gps"
     try:
@@ -147,7 +136,6 @@ def batch_reuse_preview(
     user_id: uuid.UUID,
     activities: list[VaultActivity],
 ) -> dict[uuid.UUID, ProjectReuseEligibility]:
-    """Validate connected, owner-scoped activities without per-activity SQL."""
     statuses: dict[uuid.UUID, ProjectReuseEligibility] = {}
     unresolved = []
     for activity in activities:
@@ -156,7 +144,6 @@ def batch_reuse_preview(
         elif cache.is_ready(activity):
             statuses[activity.id] = "ready"
         elif _standalone_original(store, activity) is not None:
-            # Standalone resolution compares the full telemetry, not just geometry.
             cache.mark_ready(activity)
             statuses[activity.id] = "ready"
         else:
@@ -240,7 +227,6 @@ def batch_reuse_preview(
 
 
 def _standalone_original(store: StoreDep, activity: VaultActivity) -> Stage | None:
-    """Build transient stage metadata only from digest-verified original provider bytes."""
     if (
         activity.source_provider != "strava"
         or activity.strava_activity_id is None
@@ -419,8 +405,6 @@ def _lock_and_validate_sources(
         if _row_snapshot(activity) != activity_snapshot:
             raise HTTPException(status_code=409, detail="Library activity changed during reuse")
         if prepared_source.id == uuid.uuid5(activity.id, "standalone-source"):
-            # Artifacts were verified before locking. Under locks, only
-            # database snapshots are revalidated; do no storage I/O.
             source = prepared_source
         elif activity_snapshot["source_stage_id"] is None:
             source = db.scalar(
@@ -613,9 +597,25 @@ def create_project_from_library(
     body: LibraryProjectCreateRequest,
     auth: CsrfAuth,
     db: DbSession,
+    settings: AppSettings,
     store: StoreDep,
 ) -> LibraryProjectOut:
-    """Create a project with independent local copies of selected activities."""
+    if len(body.activity_ids) > settings.max_stages_per_project:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Maximum of {settings.max_stages_per_project} stages per project reached",
+        )
+    existing_projects = int(
+        db.scalar(
+            select(func.count()).select_from(Project).where(Project.owner_user_id == auth.user.id)
+        )
+        or 0
+    )
+    if existing_projects >= settings.max_projects_per_user:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Maximum of {settings.max_projects_per_user} projects per user reached",
+        )
     sources = _owned_activities(db, store, auth.user.id, body.activity_ids)
     snapshots = [(_row_snapshot(activity), _row_snapshot(source)) for activity, source in sources]
     artifacts = _validate_artifacts(store, sources)
@@ -631,6 +631,21 @@ def create_project_from_library(
     stages = _build_stages(project, sources)
     created_keys = _copy_artifacts(store, stages, artifacts)
     try:
+        if db.get_bind().dialect.name == "postgresql":
+            db.scalar(select(User.id).where(User.id == auth.user.id).with_for_update())
+        authoritative_projects = int(
+            db.scalar(
+                select(func.count())
+                .select_from(Project)
+                .where(Project.owner_user_id == auth.user.id)
+            )
+            or 0
+        )
+        if authoritative_projects >= settings.max_projects_per_user:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Maximum of {settings.max_projects_per_user} projects per user reached",
+            )
         sources = _lock_and_validate_sources(
             db, store, auth.user.id, body.activity_ids, sources, snapshots
         )
@@ -660,9 +675,9 @@ def add_library_activities_to_project(
     body: LibraryProjectReuseRequest,
     auth: CsrfAuth,
     db: DbSession,
+    settings: AppSettings,
     store: StoreDep,
 ) -> LibraryProjectOut:
-    """Append independent local copies of selected activities to a project."""
     sources = _owned_activities(db, store, auth.user.id, body.activity_ids)
     snapshots = [(_row_snapshot(activity), _row_snapshot(source)) for activity, source in sources]
     artifacts = _validate_artifacts(store, sources)
@@ -671,6 +686,15 @@ def add_library_activities_to_project(
     )
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
+    existing_stages = int(
+        db.scalar(select(func.count()).select_from(Stage).where(Stage.project_id == project.id))
+        or 0
+    )
+    if existing_stages + len(body.activity_ids) > settings.max_stages_per_project:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Maximum of {settings.max_stages_per_project} stages per project reached",
+        )
     stages = _build_stages(project, sources)
     created_keys = _copy_artifacts(store, stages, artifacts)
     try:
@@ -685,6 +709,15 @@ def add_library_activities_to_project(
         )
         if project is None:
             raise HTTPException(status_code=404, detail="Project not found")
+        authoritative_stages = int(
+            db.scalar(select(func.count()).select_from(Stage).where(Stage.project_id == project.id))
+            or 0
+        )
+        if authoritative_stages + len(stages) > settings.max_stages_per_project:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Maximum of {settings.max_stages_per_project} stages per project reached",
+            )
         max_order = db.scalar(
             select(func.coalesce(func.max(Stage.stage_order), -1)).where(
                 Stage.project_id == project.id

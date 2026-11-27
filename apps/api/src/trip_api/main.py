@@ -36,6 +36,7 @@ from trip_api.http_metrics import HttpMetrics
 from trip_api.reaper import build_object_store
 from trip_api.remote_renders import process_remote_renders_once
 from trip_api.render_backends import RenderBackend, build_render_backend
+from trip_api.render_events import RenderEventHub
 from trip_api.reuse_preview import ReusePreviewCache
 from trip_api.routers import (
     analytics,
@@ -113,6 +114,7 @@ def create_app(
     db_session_factory = session_factory or create_session_factory(db_engine)
     store = object_store or _build_object_store(cfg)
     active_render_backend = render_backend or build_render_backend(cfg)
+    render_event_hub = RenderEventHub(cfg.database_url)
     http_metrics = HttpMetrics()
 
     @asynccontextmanager
@@ -152,6 +154,7 @@ def create_app(
                     await remote_task
                 except asyncio.CancelledError:
                     pass
+            await render_event_hub.close()
             heartbeat_stop.set()
 
     application = FastAPI(
@@ -167,6 +170,7 @@ def create_app(
     application.state.session_factory = db_session_factory
     application.state.object_store = store
     application.state.render_backend = active_render_backend
+    application.state.render_event_hub = render_event_hub
     application.state.reuse_preview = ReusePreviewCache()
 
     application.add_middleware(
