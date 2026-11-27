@@ -29,6 +29,8 @@ MapStylePreset = Literal[
     "satellite-hybrid",
     "editorial-mono",
 ]
+# Only hiking is styled in this build; cycling and MTB join this Literal with their styling.
+MarkedTrailType = Literal["hiking"]
 TimelineMode = Literal["distance", "recorded-time"]
 CameraMode = Literal["fit-track", "follow-marker"]
 CameraPreset = Literal["flat", "dynamic-3d", "drone-orbit"]
@@ -737,6 +739,7 @@ class RenderSpecV2(BaseModel):
     resolution: ResolutionPreset = "1920x1080"
     fps: Literal[15, 30, 60] = 30
     map_style: MapStylePreset = "liberty"
+    marked_trail_types: list[MarkedTrailType] = Field(default_factory=list)
     duration_seconds: float = Field(default=20.0, ge=3.0, le=180.0)
     timeline_mode: TimelineMode = "distance"
     camera_mode: CameraMode = "follow-marker"
