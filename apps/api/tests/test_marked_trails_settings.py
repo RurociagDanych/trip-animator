@@ -60,3 +60,14 @@ def test_unknown_marked_trail_type_is_rejected_and_stored_value_is_kept(
 
     detail = client.get(f"/api/v1/projects/{project_id}").json()
     assert detail["settings"]["marked_trail_types"] == []
+
+
+def test_public_config_exposes_marked_trails_base_url_without_trailing_slash(
+    make_harness: HarnessFactory,
+) -> None:
+    default_config = TestClient(make_harness().app).get("/api/v1/public-config").json()
+    assert default_config["marked_trails_base_url"] == "/tiles/marked-trails"
+
+    configured = make_harness(marked_trails_base_url="https://trails.example.test/base/")
+    config = TestClient(configured.app).get("/api/v1/public-config").json()
+    assert config["marked_trails_base_url"] == "https://trails.example.test/base"

@@ -77,6 +77,7 @@ class Settings(BaseSettings):
     s3_region: str = "us-east-1"
 
     strava_client_id: str = ""
+    marked_trails_base_url: str = "/tiles/marked-trails"
     strava_client_secret: str = ""
     strava_redirect_uri: str = "http://localhost:5173/strava/callback"
     strava_verify_token: str = ""

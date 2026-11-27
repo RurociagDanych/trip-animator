@@ -398,6 +398,7 @@ def create_app(
             "google_auth_enabled": cfg.google_auth_enabled,
             "strava_configured": bool(cfg.strava_client_id),
             "google_photos_configured": bool(cfg.google_client_id and cfg.google_client_secret),
+            "marked_trails_base_url": cfg.marked_trails_base_url.rstrip("/"),
         }
 
     application.include_router(auth.router)
