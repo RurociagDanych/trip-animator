@@ -18,7 +18,12 @@ from trip_marked_trails.pipeline import (
     run_build,
     validate_region,
 )
-from trip_marked_trails.publish import publish_build
+from trip_marked_trails.publish import (
+    DEFAULT_SIZE_BUDGET_BYTES,
+    delete_superseded_builds,
+    publish_build,
+    read_pointer,
+)
 
 logger = logging.getLogger("trip_marked_trails")
 
@@ -57,11 +62,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("MARKED_TRAILS_PLANETILER_CLASSPATH", DEFAULT_PLANETILER_CLASSPATH),
         help="Classpath with the compiled Marked Trails profile and Planetiler jars",
     )
+    publish.add_argument(
+        "--size-budget-bytes",
+        type=int,
+        default=int(os.environ.get("MARKED_TRAILS_SIZE_BUDGET_BYTES", DEFAULT_SIZE_BUDGET_BYTES)),
+        help="Largest PMTiles file a build may have, in bytes; defaults to 1 GiB",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None, *, build_step: BuildStep | None = None) -> int:
     """Run a command and return the process exit code.
+
+    Order: delete the builds older than the current one, run the build, validate it, upload
+    it under its own prefix, then overwrite `current.json`. Any failure leaves `current.json`
+    unchanged and returns 1.
 
     `build_step` replaces the osmium and Planetiler build in tests; publication policy is
     the same either way. The built file in the work directory is deleted once published.
@@ -71,12 +86,15 @@ def main(argv: Sequence[str] | None = None, *, build_step: BuildStep | None = No
     store = build_object_store(ObjectStoreConfig(backend="local", local_dir=args.store_dir))
     step = build_step or _default_build_step(args.planetiler_classpath, args.extract)
     try:
+        for key in delete_superseded_builds(store, read_pointer(store)):
+            logger.info("Deleted superseded build object %s", key)
         artifact = step(args.region, args.work_dir)
         pointer = publish_build(
             store,
             region=args.region,
             build_date=build_date,
             artifact=artifact,
+            size_budget_bytes=args.size_budget_bytes,
         )
     except Exception:
         logger.exception(
