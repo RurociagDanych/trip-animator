@@ -22,7 +22,10 @@ regexes = ['''^\s*headers=\{"X-CSRF-Token": csrf, "Idempotency-Key": "pg-idem-ke
 description = "Fake S3 client: deliberately nonexistent object filename used to test 404 handling"
 condition = "AND"
 regexTarget = "line"
-paths = ['''(^|/)apps/api/tests/test_security_and_health\.py$''']
+paths = [
+  '''(^|/)apps/api/tests/test_security_and_health\.py$''',
+  '''(^|/)packages/object-store/tests/test_object_store_s3\.py$''',
+]
 regexes = ['''^\s*if key == "missing-nokey\.mp4":$''']
 
 [[rules.allowlists]]
