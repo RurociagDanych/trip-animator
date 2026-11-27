@@ -82,6 +82,7 @@ import {
   type TimelineStage,
 } from "../../lib/geo/timeline";
 import { ActivityIcon, ActivityMarkerBadge, ActivitySvgGroup } from "../icons";
+import { MapAttribution } from "./MapAttribution";
 import { StatisticsHud } from "./StatisticsHud";
 
 const BUILDINGS_LAYER_ID = "trip-3d-buildings";
@@ -2440,19 +2441,20 @@ export function TripStageCanvas({
       {previewWatermark || isPreview || spec.is_preview ? (
         <div
           data-testid="preview-watermark"
-          className="pointer-events-none absolute right-3 bottom-3 z-[60] rounded border border-amber-accent/40 bg-canvas/75 px-2.5 py-1 text-[11px] font-semibold tracking-wider text-amber-accent backdrop-blur-sm"
+          className="pointer-events-none absolute right-3 bottom-7 z-[60] rounded border border-amber-accent/40 bg-canvas/75 px-2.5 py-1 text-[11px] font-semibold tracking-wider text-amber-accent backdrop-blur-sm"
         >
           PREVIEW • TRIP ANIMATOR
         </div>
       ) : null}
 
       {renderMode === "interactive" && !isPreview && !spec.is_preview ? (
-        <div className="pointer-events-none absolute right-3 bottom-3 z-10 flex items-center gap-1.5 rounded border border-border/80 bg-canvas/80 px-2 py-0.5 text-[10px] text-ink-muted backdrop-blur-sm">
+        <div className="pointer-events-none absolute right-3 bottom-7 z-10 flex items-center gap-1.5 rounded border border-border/80 bg-canvas/80 px-2 py-0.5 text-[10px] text-ink-muted backdrop-blur-sm">
           <span className="tabular-telemetry">{spec.resolution}</span>
           <span>•</span>
           <span>{spec.map_style}</span>
         </div>
       ) : null}
+      <MapAttribution styleId={spec.map_style} />
     </div>
   );
 }
