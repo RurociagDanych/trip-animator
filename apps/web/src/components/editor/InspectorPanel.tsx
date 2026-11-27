@@ -255,6 +255,18 @@ export function InspectorPanel({
               </select>
             </label>
 
+            <label className="flex items-center gap-2 text-ink">
+              <input
+                type="checkbox"
+                checked={spec.marked_trail_types.includes("hiking")}
+                onChange={(e) =>
+                  onUpdateSpec({ marked_trail_types: e.currentTarget.checked ? ["hiking"] : [] })
+                }
+                className="h-4 w-4 accent-sky-accent"
+              />
+              <span className="font-medium">Hiking Marked Trails</span>
+            </label>
+
             <label className="block space-y-1.5">
               <span className="block font-medium text-ink-muted">Trip place labels</span>
               <select

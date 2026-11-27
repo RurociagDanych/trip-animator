@@ -183,6 +183,32 @@ describe("Trip Animator web routes and config builders", () => {
     expect(screen.getByTestId("editor-map-frame")).toBeInTheDocument();
   });
 
+  it("toggles hiking Marked Trails in the route inspector and saves them to the project", async () => {
+    const fetchSpy = mockStandardApiFetch();
+    const router = createAppRouter(
+      createMemoryHistory({ initialEntries: ["/projects/fictional-route-2040"] }),
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<App router={router} queryClient={queryClient} />);
+
+    const toggle = await screen.findByRole("checkbox", { name: "Hiking Marked Trails" });
+    expect(toggle).not.toBeChecked();
+    fireEvent.click(toggle);
+
+    await waitFor(
+      () => {
+        const saved = fetchSpy.mock.calls.some(
+          ([, init]) =>
+            init?.method === "PATCH" &&
+            typeof init.body === "string" &&
+            init.body.includes('"marked_trail_types":["hiking"]'),
+        );
+        expect(saved).toBe(true);
+      },
+      { timeout: 4000 },
+    );
+  });
+
   it("renders the deterministic render harness route", async () => {
     const router = createAppRouter(createMemoryHistory({ initialEntries: ["/render/job-42"] }));
     render(<App router={router} />);

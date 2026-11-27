@@ -45,6 +45,7 @@ import type {
   TelemetryTimelineOut,
 } from "../lib/api/types";
 import { generateDirectorKeyframes } from "../lib/geo/director";
+import { useMarkedTrailsBuild } from "../lib/geo/marked-trails";
 import { parseResolutionPreset } from "../lib/geo/format";
 import {
   computeJourneyDurationS,
@@ -221,6 +222,7 @@ export function EditorPage() {
     retry: false,
     staleTime: 60_000,
   });
+  const markedTrailsBuild = useMarkedTrailsBuild(publicConfigQuery.data?.marked_trails_base_url);
 
   useEffect(() => {
     if (
@@ -878,6 +880,7 @@ export function EditorPage() {
         <EditorPlaybackDock
           timelineStages={timelineStages}
           spec={spec}
+          markedTrailsBuild={markedTrailsBuild}
           matchedPhotos={matchedPhotos}
           climbs={highlightsQuery.data?.climbs ?? EMPTY_CLIMBS}
           chartPoints={chartQuery.data?.points ?? EMPTY_CHART_POINTS}

@@ -14,6 +14,7 @@ import {
   progressRatioToTimeRatio,
   type MatchedPhoto,
 } from "../../lib/geo/photos";
+import type { MarkedTrailsBuild } from "../../lib/geo/marked-trails";
 import type { TimelineStage } from "../../lib/geo/timeline";
 import { type PlaybackSpeed, useEditorStore } from "../../lib/state/editor-store";
 import { StoryTrackStrip } from "../charts/StoryTrackStrip";
@@ -42,6 +43,7 @@ export interface EditorPlaybackDockProps {
   onSelectStage: (stageId: string | null) => void;
   onUpdateKeyframes: (keyframes: CameraKeyframe[]) => void;
   onTrimBrush?: (startM: number, endM: number) => void;
+  markedTrailsBuild?: MarkedTrailsBuild | null;
 }
 
 export const EditorPlaybackDock = memo(function EditorPlaybackDock({
@@ -64,6 +66,7 @@ export const EditorPlaybackDock = memo(function EditorPlaybackDock({
   onSelectStage,
   onUpdateKeyframes,
   onTrimBrush,
+  markedTrailsBuild,
 }: EditorPlaybackDockProps) {
   const currentTimeRatio = useEditorStore((s) => s.currentTimeRatio);
   const isPlaying = useEditorStore((s) => s.isPlaying);
@@ -188,6 +191,7 @@ export const EditorPlaybackDock = memo(function EditorPlaybackDock({
             onMapPinClick={onMapPinClick}
             onCancelPinMode={onCancelPinMode}
             projectTitle={projectTitle}
+            markedTrailsBuild={markedTrailsBuild}
             totalStats={totalStats}
           />
         </div>

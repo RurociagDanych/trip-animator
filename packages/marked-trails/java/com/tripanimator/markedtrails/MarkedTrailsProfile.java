@@ -48,9 +48,9 @@ public class MarkedTrailsProfile implements Profile {
       relation.id(),
       type,
       network,
-      relation.getString("colour", ""),
-      relation.getString("ref", ""),
-      relation.getString("name", ""),
+      nullIfEmpty(relation.getString("colour", "")),
+      nullIfEmpty(relation.getString("ref", "")),
+      nullIfEmpty(relation.getString("name", "")),
       "local".equals(network) ? LOCAL_MIN_ZOOM : MIN_ZOOM
     ));
   }
@@ -97,6 +97,11 @@ public class MarkedTrailsProfile implements Profile {
   @Override
   public String attribution() {
     return "<a href=\"https://www.openstreetmap.org/copyright\" target=\"_blank\">&copy; OpenStreetMap contributors</a>";
+  }
+
+  /** Planetiler drops null attributes, so absent OSM tags leave no attribute in the tile. */
+  static String nullIfEmpty(String value) {
+    return value.isEmpty() ? null : value;
   }
 
   /** Folds `foot` into `hiking`, the only trail type the app reads in this build. */

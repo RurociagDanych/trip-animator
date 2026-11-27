@@ -2,7 +2,7 @@ import type { Layer, LayersList } from "@deck.gl/core";
 import { ArcLayer, PathLayer, PolygonLayer, ScatterplotLayer } from "@deck.gl/layers";
 import type { MapboxOverlayProps } from "@deck.gl/mapbox";
 import type { MapOptions, RasterDEMSourceSpecification, StyleSpecification } from "maplibre-gl";
-import type { ColorByMode, MapStylePreset } from "../api/types";
+import type { ColorByMode, MapStylePreset, MarkedTrailType } from "../api/types";
 import { hexToRgbTuple } from "./format";
 import type { ClimbProgressMarker, StopMarker, TimelineStage, TransferArcSegment, VisiblePathSegment } from "./timeline";
 
@@ -12,6 +12,15 @@ export const ESRI_SATELLITE_TILE_URL =
   "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
 export const TERRAIN_SOURCE_ID = "trip-terrarium-dem";
 export const HILLSHADE_SOURCE_ID = "trip-terrarium-hillshade";
+export const MARKED_TRAILS_SOURCE_ID = "trip-marked-trails";
+export const MARKED_TRAILS_HIKING_LAYER_ID = "trip-marked-trails-hiking";
+// Used when OSM carries no colour tag for the relation.
+const HIKING_DEFAULT_COLOUR = "#b91c1c";
+
+export interface MarkedTrailsStyleOverlay {
+  trailTypes: readonly MarkedTrailType[];
+  pmtilesUrl: string | null;
+}
 
 export interface TrackFeatureDatum {
   id: string;
@@ -79,12 +88,63 @@ function coerceNumericPaintExpr(expr: unknown, fallback: number): unknown {
 }
 
 /**
- * Guards bare `["get", ...]` numeric expressions in OpenFreeMap styles so MapLibre v5
- * does not emit "Expected value to be of type number, but found null instead" warnings
- * when vector tile features omit optional attributes like `ref_length`, `rank`, or `render_height`,
- * and applies preset transforms for `topo-relief`, `satellite-hybrid`, and `editorial-mono`.
+ * Applies the basemap fixes and, when `markedTrails` names a published build and a trail
+ * type, the Marked Trail source and layer.
+ *
+ * The basemap fixes guard bare `["get", ...]` numeric expressions in OpenFreeMap styles so MapLibre v5
+ * does not emit "Expected value to be of type number, but found null instead" warnings when
+ * vector tile features omit optional attributes like `ref_length`, `rank`, or `render_height`,
+ * and apply preset transforms for `topo-relief`, `satellite-hybrid`, and `editorial-mono`.
+ * The trail layer goes before the first symbol layer so labels stay on top of it; deck.gl
+ * draws the user's route above the whole style.
  */
 export function sanitizeMapStyle(
+  style: StyleSpecification,
+  styleId?: MapStylePreset,
+  markedTrails?: MarkedTrailsStyleOverlay,
+): StyleSpecification {
+  const basemap = applyBasemapSanitizers(style, styleId);
+  return markedTrails ? injectMarkedTrailLayers(basemap, markedTrails) : basemap;
+}
+
+function injectMarkedTrailLayers(
+  style: StyleSpecification,
+  overlay: MarkedTrailsStyleOverlay,
+): StyleSpecification {
+  if (!overlay.pmtilesUrl || !overlay.trailTypes.includes("hiking")) {
+    return style;
+  }
+  const hikingLayer = {
+    id: MARKED_TRAILS_HIKING_LAYER_ID,
+    type: "line",
+    source: MARKED_TRAILS_SOURCE_ID,
+    "source-layer": "marked_trails",
+    minzoom: 5,
+    filter: ["==", ["get", "type"], "hiking"],
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: {
+      "line-color": ["coalesce", ["get", "colour"], HIKING_DEFAULT_COLOUR],
+      "line-width": ["interpolate", ["linear"], ["zoom"], 9, 1, 13, 2.5],
+      "line-opacity": 0.75,
+    },
+  } as unknown as StyleSpecification["layers"][number];
+  const layers = [...style.layers];
+  const firstSymbolIndex = layers.findIndex((layer) => layer.type === "symbol");
+  layers.splice(firstSymbolIndex >= 0 ? firstSymbolIndex : layers.length, 0, hikingLayer);
+  return {
+    ...style,
+    sources: {
+      ...(style.sources ?? {}),
+      [MARKED_TRAILS_SOURCE_ID]: {
+        type: "vector",
+        url: `pmtiles://${overlay.pmtilesUrl}`,
+      },
+    } as StyleSpecification["sources"],
+    layers,
+  };
+}
+
+function applyBasemapSanitizers(
   style: StyleSpecification,
   styleId?: MapStylePreset,
 ): StyleSpecification {
