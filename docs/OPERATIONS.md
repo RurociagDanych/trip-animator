@@ -102,7 +102,7 @@ export MARKED_TRAILS_S3_REGION=us-east-1
 trip-marked-trails build-publish --region europe/andorra --work-dir /work
 ```
 
-`MARKED_TRAILS_S3_PREFIX` must equal `marked_trails_prefix`. Build files are uploaded as `application/vnd.pmtiles` with `public, max-age=31536000, immutable`; `current.json` is uploaded as `application/json` with `no-cache, no-store, must-revalidate`. The bucket has no expiration rule: only the publisher deletes builds. Bucket versioning is off, so a deleted or overwritten object cannot be restored from the bucket. CloudFront serves `current.json` with the managed CachingDisabled policy and the builds with CachingOptimized. A key that does not exist answers 403 through CloudFront, not 404, because the origin access control grants only `GetObject`.
+`MARKED_TRAILS_S3_PREFIX` must equal `marked_trails_prefix`. Build files are uploaded as `application/vnd.pmtiles` with `public, max-age=31536000, immutable`; `current.json` is uploaded as `application/json` with `no-cache, no-store, must-revalidate`. The bucket has no expiration rule: only the publisher deletes builds. Bucket versioning is off, so a deleted or overwritten object cannot be restored from the bucket. CloudFront serves `current.json` with the managed CachingDisabled policy and the builds with CachingOptimized. A key that does not exist answers 403 through CloudFront, not 404, because the bucket policy grants CloudFront only `s3:GetObject` and no `s3:ListBucket`.
 
 ### Marked Trails publication policy and rollback
 

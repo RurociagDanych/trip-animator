@@ -14,9 +14,11 @@ DEFAULT_S3_PREFIX = "marked-trails"
 class ListingS3ObjectStore(S3ObjectStore):
     """S3 store whose `exists` lists the key instead of sending a HEAD request.
 
-    A HEAD for a missing key answers 403 unless the caller may list the whole bucket. The
-    publisher policy grants `s3:ListBucket` only under the trail prefix, and a listing whose
-    `Prefix` is the full key stays inside that grant. Permission errors propagate.
+    S3 answers a HEAD for a missing key with 403 when the caller lacks `s3:ListBucket`
+    (https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html). The publisher
+    policy grants `s3:ListBucket` only under the trail prefix; whether such a conditioned grant
+    turns that 403 into 404 is unverified, so `exists` lists the full key instead, which stays
+    inside the grant. Permission errors propagate.
     """
 
     def exists(self, key: str) -> bool:
