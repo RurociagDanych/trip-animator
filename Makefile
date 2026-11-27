@@ -106,6 +106,7 @@ reap-dry-run:
 
 check: lint format-check typecheck test test-airflow dbt-build compose-config
 
+dev-api: export MARKED_TRAILS_BASE_URL ?= /tiles/marked-trails
 dev-api:
 	uv run uvicorn trip_api.main:app --reload --host 0.0.0.0 --port 8000
 
