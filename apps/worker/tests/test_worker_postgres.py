@@ -16,9 +16,9 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import psycopg
 import pytest
 from psycopg import sql
+from trip_object_store import LocalObjectStore
 from trip_telemetry import ParsedTrack, TrackPoint, build_silver_dataframe, write_silver_parquet
 from trip_worker import (
-    LocalObjectStore,
     RenderCancelledError,
     RenderManifest,
     WorkerSettings,

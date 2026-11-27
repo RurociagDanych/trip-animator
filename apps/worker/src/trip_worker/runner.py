@@ -18,6 +18,7 @@ from typing import Any, Protocol
 
 import psycopg
 from pydantic import ValidationError
+from trip_object_store import ObjectStore, build_object_store
 from trip_telemetry import DEFAULT_ACTIVITY_TYPE, RenderSpecV2, normalize_activity_type
 from trip_telemetry.operational_events import record_render_outcome, start_service_heartbeat
 
@@ -45,7 +46,6 @@ from trip_worker.renderer import (
     probe_manifest_frame_count,
     render_manifest_to_mp4,
 )
-from trip_worker.storage import ObjectStore, build_object_store
 
 logger = logging.getLogger(__name__)
 
@@ -2428,7 +2428,7 @@ def run_once(
 ) -> bool:
     cfg = settings or WorkerSettings()
     cf = conn_factory or default_conn_factory(cfg)
-    obj_store = store or build_object_store(cfg)
+    obj_store = store or build_object_store(cfg.object_store_config())
 
     with cf() as conn:
         reap_exhausted_jobs(conn, max_attempts=cfg.max_attempts)

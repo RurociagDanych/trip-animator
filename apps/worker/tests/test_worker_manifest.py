@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from trip_object_store import LocalObjectStore
 from trip_telemetry import (
     ActivityType,
     ParsedTrack,
@@ -15,7 +16,6 @@ from trip_telemetry import (
     write_silver_parquet,
 )
 from trip_worker import (
-    LocalObjectStore,
     ManifestPoint,
     PhotoRecord,
     StageRecord,

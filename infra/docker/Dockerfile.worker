@@ -41,6 +41,7 @@ RUN /app/.venv/bin/playwright install-deps chromium \
     && rm -rf /var/lib/apt/lists/*
 
 COPY packages/telemetry ./packages/telemetry
+COPY packages/object-store ./packages/object-store
 COPY apps/worker ./apps/worker
 
 RUN --mount=type=cache,target=/root/.cache/uv \

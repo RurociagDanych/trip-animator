@@ -16,10 +16,10 @@ import psycopg
 import pytest
 from boto3.exceptions import S3UploadFailedError
 from botocore.exceptions import ClientError
+from trip_object_store import LocalObjectStore
 from trip_telemetry import ParsedTrack, TrackPoint, build_silver_dataframe, write_silver_parquet
 from trip_worker import (
     ClaimedJob,
-    LocalObjectStore,
     RenderCancelledError,
     RenderManifest,
     WorkerSettings,
