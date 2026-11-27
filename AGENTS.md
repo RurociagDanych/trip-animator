@@ -15,7 +15,7 @@ Repository guide for AI coding agents working on Trip Animator: a GPX/TCX and St
 - `dbt/`: DuckDB Gold marts (`mart_stage_summary`, `fct_climbs`, `fct_splits`, `fct_dwell_stops`, `mart_stage_geo_context`, `mart_spatial_coverage_h3`, `mart_trip_daily_summary`, `mart_user_career_summary`) and data tests.
 - `docs/`: architecture, operations, threat model, deployment docs, decision records (`docs/decisions/`), specifications (`docs/specs/`) and demo assets (`docs/demo/`).
 - `infra/`: Docker Compose (`compose.yaml`), Caddy, nginx, Dockerfiles and optional AWS Terraform (`infra/terraform/`).
-- `packages/`: `packages/telemetry`, the Polars + DuckDB + GeoParquet Bronze-to-Silver pipeline, DEM elevation backfill, climb/split/dwell analytics and photo alignment; `packages/object-store`, the shared Local and S3-compatible `ObjectStore` (`trip_object_store`).
+- `packages/`: `packages/telemetry`, the Polars + DuckDB + GeoParquet Bronze-to-Silver pipeline, DEM elevation backfill, climb/split/dwell analytics and photo alignment; `packages/object-store`, the shared Local and S3-compatible `ObjectStore` (`trip_object_store`); `packages/marked-trails`, the build-and-publish CLI for Marked Trails PMTiles with its Java Planetiler profile (`infra/docker/Dockerfile.marked-trails-builder`).
 - `scripts/`: local bootstrap and publication secret gates with their tests.
 
 ## Commands
@@ -24,6 +24,7 @@ Repository guide for AI coding agents working on Trip Animator: a GPX/TCX and St
 - Lint: `make lint`, `make format-check`, `make typecheck`, `make lint-airflow`.
 - Test: `make test` (pytest + vitest), `make test-pg` (PostgreSQL tests), `make test-airflow`, `make dbt-build`.
 - Run: `make dev-api` (FastAPI on :8000) and `make dev-web` (Vite on :5173); full stack with `docker compose -f infra/compose.yaml --env-file .env up -d --build`.
+- Marked Trails: `make marked-trails-local` builds and publishes a small Geofabrik region (default `europe/andorra`) into `.tmp/marked-trails/store`, which Vite serves at `/tiles/marked-trails/`; `make marked-trails-image` builds only the builder image.
 - Deploy dry run: `make compose-config`; `terraform fmt -check -recursive infra/terraform`, then `terraform init -backend=false && terraform validate` in `infra/terraform/environments/dev` and `prod`.
 - Help: `make help` lists every Makefile target.
 - Full local gate: `make check` before opening or updating a PR.
@@ -32,12 +33,12 @@ Repository guide for AI coding agents working on Trip Animator: a GPX/TCX and St
 
 - Language: English only for identifiers, filenames, test names, log messages, error strings, commit messages and docs.
 - Public modules, classes and functions have docstrings. Comments explain why, not what. Tool directives such as # noqa are allowed.
-- Formatters and linters: Ruff (`uv run ruff check` / `uv run ruff format --check` on `apps packages airflow infra/scripts`), mypy (`apps/api/src apps/worker/src packages/telemetry/src packages/object-store/src airflow/src`), ESLint and `tsc --noEmit` for `apps/web`.
+- Formatters and linters: Ruff (`uv run ruff check` / `uv run ruff format --check` on `apps packages airflow infra/scripts`), mypy (`apps/api/src apps/worker/src packages/telemetry/src packages/object-store/src packages/marked-trails/src airflow/src`), ESLint and `tsc --noEmit` for `apps/web`.
 - Commit style: Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, `test:`, `ci:`, optional scope such as `feat(web):`).
 - PR branches: use `feat/`, `fix/`, `docs/`, or `chore/` followed by a short lowercase kebab-case description (for example, `fix/preview-aspect-matches-resolution`). Branch from current `origin/main` and open the PR against `main` unless the task specifies another base.
 - PR titles: use `type(scope): short imperative summary` in English (for example, `fix(web): fit preview to the selected aspect ratio`). Choose the type for the change and the scope for the affected component, regardless of the branch prefix.
 - PR body: follow the default template at [`RurociagDanych/.github` (`PULL_REQUEST_TEMPLATE.md`)](https://github.com/RurociagDanych/.github/blob/main/.github/PULL_REQUEST_TEMPLATE.md) (`Summary`, `Changes`, `Not changed and why`, `Owner decisions applied`, `Verification`, `Open risks`), filling every section and removing HTML comments; never merge PRs (the owner merges).
-- Test locations: `apps/api/tests`, `apps/worker/tests`, `packages/telemetry/tests`, `packages/object-store/tests`, `airflow/tests`, `scripts/tests`, `infra/scripts/tests`, `dbt/tests`, and Vitest tests in `apps/web/src/test`.
+- Test locations: `apps/api/tests`, `apps/worker/tests`, `packages/telemetry/tests`, `packages/object-store/tests`, `packages/marked-trails/tests`, `airflow/tests`, `scripts/tests`, `infra/scripts/tests`, `dbt/tests`, and Vitest tests in `apps/web/src/test`.
 
 ### Code invariants
 
