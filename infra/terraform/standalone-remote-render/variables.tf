@@ -76,3 +76,31 @@ variable "tags" {
   default     = {}
   description = "Additional AWS resource tags."
 }
+
+variable "marked_trails_app_origins" {
+  type        = list(string)
+  default     = []
+  description = "App origins allowed to read Marked Trails through CloudFront with CORS, for example [\"https://trips.example.com\"]. An empty list creates no Marked Trails resources."
+
+  validation {
+    condition     = alltrue([for origin in var.marked_trails_app_origins : can(regex("^https?://[^/*]+$", origin))])
+    error_message = "marked_trails_app_origins must be empty or list origins like https://host[:port], without a path or a wildcard."
+  }
+}
+
+variable "marked_trails_prefix" {
+  type        = string
+  default     = "marked-trails"
+  description = "Key prefix of the trail store in the Marked Trails bucket; it must equal MARKED_TRAILS_S3_PREFIX of the publisher."
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*/?$", var.marked_trails_prefix))
+    error_message = "marked_trails_prefix must be a plain key prefix such as marked-trails."
+  }
+}
+
+variable "marked_trails_price_class" {
+  type        = string
+  default     = "PriceClass_100"
+  description = "CloudFront price class of the Marked Trails distribution."
+}

@@ -8,8 +8,7 @@ import os
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
-
-from trip_object_store import ObjectStoreConfig, build_object_store
+from typing import Any
 
 from trip_marked_trails.pipeline import (
     DEFAULT_PLANETILER_CLASSPATH,
@@ -25,8 +24,15 @@ from trip_marked_trails.publish import (
     publish_build,
     read_pointer,
 )
+from trip_marked_trails.trail_store import (
+    DEFAULT_S3_PREFIX,
+    TrailStoreSettings,
+    build_trail_store,
+)
 
 logger = logging.getLogger("trip_marked_trails")
+
+STORE_CHOICES = ("local", "s3")
 
 BuildStep = Callable[[str, Path], BuildArtifact]
 
@@ -59,7 +65,28 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Local .osm.pbf extract to build instead of downloading the region from Geofabrik",
     )
-    publish.add_argument("--store-dir", required=True, type=Path, help="Local trail store root")
+    publish.add_argument(
+        "--store",
+        default=os.environ.get("MARKED_TRAILS_STORE") or "local",
+        help="Trail store backend; defaults to MARKED_TRAILS_STORE, then local",
+    )
+    publish.add_argument("--store-dir", type=Path, default=None, help="Local trail store root")
+    publish.add_argument(
+        "--s3-bucket",
+        default=os.environ.get("MARKED_TRAILS_S3_BUCKET", ""),
+        help="S3 bucket of the trail store; defaults to MARKED_TRAILS_S3_BUCKET",
+    )
+    publish.add_argument(
+        "--s3-prefix",
+        default=os.environ.get("MARKED_TRAILS_S3_PREFIX") or DEFAULT_S3_PREFIX,
+        help="Key prefix inside the bucket; defaults to MARKED_TRAILS_S3_PREFIX, then "
+        f"{DEFAULT_S3_PREFIX}",
+    )
+    publish.add_argument(
+        "--s3-region",
+        default=os.environ.get("MARKED_TRAILS_S3_REGION") or None,
+        help="AWS region of the bucket; defaults to MARKED_TRAILS_S3_REGION, then the AWS chain",
+    )
     publish.add_argument(
         "--work-dir", required=True, type=Path, help="Scratch directory for the build"
     )
@@ -83,7 +110,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None, *, build_step: BuildStep | None = None) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    build_step: BuildStep | None = None,
+    s3_client: Any | None = None,
+) -> int:
     """Run a command and return the process exit code.
 
     Order: check the pointer and delete the builds older than the current one, run the build,
@@ -92,12 +124,36 @@ def main(argv: Sequence[str] | None = None, *, build_step: BuildStep | None = No
     pointer write itself fails it may or may not have changed, and the log says so. An invalid
     pointer deletes nothing.
 
-    `build_step` replaces the osmium and Planetiler build in tests; publication policy is
-    the same either way. The built file in the work directory is deleted once published.
+    `build_step` replaces the osmium and Planetiler build in tests and `s3_client` replaces
+    the boto3 client; publication policy is the same either way. The built file in the work
+    directory is deleted once published.
     """
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     build_date = args.build_date or datetime.now(UTC).date()
-    store = build_object_store(ObjectStoreConfig(backend="local", local_dir=args.store_dir))
+    if args.store not in STORE_CHOICES:
+        parser.error(
+            f"MARKED_TRAILS_STORE must be one of {', '.join(STORE_CHOICES)}, got {args.store!r}"
+        )
+    if args.store == "local" and args.store_dir is None:
+        parser.error("--store-dir is required for the local store")
+    if args.store == "s3":
+        if args.store_dir is not None:
+            parser.error("--store-dir cannot be used with --store s3")
+        if not args.s3_bucket.strip():
+            parser.error("--s3-bucket or MARKED_TRAILS_S3_BUCKET is required for the s3 store")
+        if not args.s3_prefix.strip().strip("/"):
+            parser.error("--s3-prefix or MARKED_TRAILS_S3_PREFIX must not be empty")
+    store = build_trail_store(
+        TrailStoreSettings(
+            backend=args.store,
+            store_dir=args.store_dir,
+            s3_bucket=args.s3_bucket,
+            s3_prefix=args.s3_prefix,
+            s3_region=args.s3_region,
+        ),
+        s3_client=s3_client,
+    )
     step = build_step or _default_build_step(args.planetiler_classpath, args.extract)
     try:
         pointer = read_pointer(store)

@@ -1,4 +1,4 @@
-aws_region             = "eu-central-1"
+aws_region             = "us-east-1"
 name_prefix            = "trip-animator-remote-render"
 image_tag              = "latest"
 lambda_memory_mb       = 10240
@@ -8,3 +8,5 @@ sfn_max_concurrency            = 8
 staging_retention_days = 3
 map_tile_allowlist     = "https://tiles.openfreemap.org"
 render_callback_secret = ""
+marked_trails_app_origins = ["https://trips.example.com"]
+marked_trails_prefix      = "marked-trails"

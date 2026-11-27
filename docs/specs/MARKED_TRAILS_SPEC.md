@@ -12,7 +12,7 @@
 - Out of Scope
 - Further Notes
 
-Status: Draft. Decisions are recorded in [ADR 0001](../decisions/0001-own-marked-trail-tiles.md). Delivered so far: the hiking tracer bullet (local build with `make marked-trails-local`, `marked_trail_types` in render settings, the hiking layer in the editor through the local store), the publication policy in the CLI (two-build limit, size and count validation, failure keeps the pointer; rollback in [OPERATIONS.md](../OPERATIONS.md)), and the cycling and MTB types with full trail styling (per-type layers with signposted colours, line width by network level, trail labels from z13, dashed cycling and MTB lines). The three toggles are shown only when `MARKED_TRAILS_BASE_URL` is set; it is empty by default, so production shows no toggle until the render ticket lands. Until then, export and shared playback ignore the setting. Everything else in this spec is not implemented. Build cost was measured once with a prototype on the production VPS (Poland and Germany only); see Further Notes.
+Status: Draft. Decisions are recorded in [ADR 0001](../decisions/0001-own-marked-trail-tiles.md). Delivered so far: the hiking tracer bullet (local build with `make marked-trails-local`, `marked_trail_types` in render settings, the hiking layer in the editor through the local store), the publication policy in the CLI (two-build limit, size and count validation, failure keeps the pointer; rollback in [OPERATIONS.md](../OPERATIONS.md)), and the cycling and MTB types with full trail styling (per-type layers with signposted colours, line width by network level, trail labels from z13, dashed cycling and MTB lines). The three toggles are shown only when `MARKED_TRAILS_BASE_URL` is set; it is empty by default, so production shows no toggle until the render ticket lands. Until then, export and shared playback ignore the setting. The S3 trail store, the CLI selection between local and S3 and the Terraform for the bucket, CloudFront and publisher policy are written but not applied. Everything else in this spec is not implemented. Build cost was measured once with a prototype on the production VPS (Poland and Germany only); see Further Notes.
 
 ## Problem Statement
 
@@ -92,7 +92,7 @@ Trip Animator builds its own vector tileset of Marked Trails in Europe from Open
 - A CloudFront distribution with origin access control, serving the bucket to the editor and to the render Lambdas, with CORS that allows `Range` requests from the app origin.
 - An IAM identity for Airflow that can write and delete only under the trail prefix.
 - The CloudFront host is added to the edge CSP tile origins and to the render tile allowlist.
-- Infrastructure is added to the existing Terraform.
+- Infrastructure is added to the existing Terraform, in the `infra/terraform/standalone-remote-render` root; setup steps are in [Operations](../OPERATIONS.md#marked-trails-on-aws).
 
 ### Project settings and API
 
