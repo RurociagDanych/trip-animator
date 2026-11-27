@@ -152,7 +152,7 @@ def test_build_objects_are_immutable_and_pointer_is_not_cached(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     recording = RecordingStore(tmp_path / "store")
-    monkeypatch.setattr(cli, "build_object_store", lambda config: recording)
+    monkeypatch.setattr(cli, "build_trail_store", lambda settings, **kwargs: recording)
 
     assert publish(tmp_path, "2026-11-27") == 0
 
