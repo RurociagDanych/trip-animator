@@ -32,32 +32,39 @@ interface MarkedTrailTypeStyle {
   labelLayerId: string;
   defaultColour: string;
   dashArray: number[] | null;
+  lineOffset: number;
 }
 
-// Hiking stays solid; the dashes differ so cycling and MTB read apart from it and from each other.
+// Hiking stays solid; cycling is dashed and MTB is dash-dot. Dash units scale with the line width,
+// so every unit stays at least 1.5 to keep 2 px and 1.5 px lines readable. The small offsets keep
+// ways shared by several types from hiding each other.
 const MARKED_TRAIL_TYPE_STYLES: Record<MarkedTrailType, MarkedTrailTypeStyle> = {
   hiking: {
     lineLayerId: MARKED_TRAILS_HIKING_LAYER_ID,
     labelLayerId: MARKED_TRAILS_LABEL_LAYER_IDS[0],
     defaultColour: "#b91c1c",
     dashArray: null,
+    lineOffset: -1.25,
   },
   cycling: {
     lineLayerId: MARKED_TRAILS_CYCLING_LAYER_ID,
     labelLayerId: MARKED_TRAILS_LABEL_LAYER_IDS[1],
     defaultColour: "#1d4ed8",
     dashArray: [3, 2],
+    lineOffset: 0,
   },
   mtb: {
     lineLayerId: MARKED_TRAILS_MTB_LAYER_ID,
     labelLayerId: MARKED_TRAILS_LABEL_LAYER_IDS[2],
     defaultColour: "#7e22ce",
-    dashArray: [1, 1.5],
+    dashArray: [4, 2, 1.5, 2],
+    lineOffset: 1.25,
   },
 };
 const MARKED_TRAIL_TYPE_ORDER: readonly MarkedTrailType[] = ["hiking", "cycling", "mtb"];
 
 // Widths in px at the zoom stops; an unknown or missing network falls through to the local width.
+// The z5 local width is never drawn: the tile build keeps local ways from z9 only.
 const NETWORK_WIDTHS: Array<{ zoom: number; international: number; national: number; regional: number; local: number }> = [
   { zoom: 5, international: 2, national: 1.5, regional: 1, local: 0.6 },
   { zoom: 9, international: 2.5, national: 2, regional: 1.5, local: 1 },
@@ -103,7 +110,7 @@ export function resolveMarkedTrailsOverlay(
 
 /** Returns a key that changes exactly when the map style has to be rebuilt. */
 export function mapStyleKey(mapStyle: MapStylePreset, overlay: MarkedTrailsStyleOverlay): string {
-  return `${mapStyle}|${overlay.pmtilesUrl ?? ""}|${overlay.markedTrailTypes.join(",")}`;
+  return `${mapStyle}|${overlay.pmtilesUrl ?? ""}|${MARKED_TRAIL_TYPE_ORDER.filter((type) => overlay.markedTrailTypes.includes(type)).join(",")}`;
 }
 
 export interface TrackFeatureDatum {
@@ -179,8 +186,8 @@ function coerceNumericPaintExpr(expr: unknown, fallback: number): unknown {
  * does not emit "Expected value to be of type number, but found null instead" warnings when
  * vector tile features omit optional attributes like `ref_length`, `rank`, or `render_height`,
  * and apply preset transforms for `topo-relief`, `satellite-hybrid`, and `editorial-mono`.
- * The trail lines go before the first symbol layer so basemap labels stay on top of them; the
- * trail labels are added last. deck.gl draws the user's route above the whole style, so every
+ * The trail lines go after the last non-symbol basemap layer (roads, paths, railways, bridges,
+ * buildings) so basemap labels stay on top of them; the trail labels are added last. deck.gl draws the user's route above the whole style, so every
  * trail layer is below the route.
  */
 export function sanitizeMapStyle(
@@ -189,7 +196,7 @@ export function sanitizeMapStyle(
   markedTrails?: MarkedTrailsStyleOverlay,
 ): StyleSpecification {
   const basemap = applyBasemapSanitizers(style, styleId);
-  return markedTrails ? injectMarkedTrailLayers(basemap, markedTrails) : basemap;
+  return markedTrails ? injectMarkedTrailLayers(basemap, markedTrails, styleId) : basemap;
 }
 
 function markedTrailLineLayer(type: MarkedTrailType) {
@@ -207,12 +214,16 @@ function markedTrailLineLayer(type: MarkedTrailType) {
       "line-color": ["to-color", ["get", "colour"], config.defaultColour],
       "line-width": networkWidthExpression(),
       "line-opacity": 0.75,
+      "line-offset": config.lineOffset,
       ...(config.dashArray ? { "line-dasharray": config.dashArray } : {}),
     },
   };
 }
 
-function markedTrailLabelLayer(type: MarkedTrailType) {
+const DARK_LABEL_PRESETS: ReadonlySet<MapStylePreset> = new Set(["dark", "satellite-hybrid"]);
+
+function markedTrailLabelLayer(type: MarkedTrailType, styleId?: MapStylePreset) {
+  const onDark = styleId !== undefined && DARK_LABEL_PRESETS.has(styleId);
   const config = MARKED_TRAIL_TYPE_STYLES[type];
   return {
     id: config.labelLayerId,
@@ -228,8 +239,8 @@ function markedTrailLabelLayer(type: MarkedTrailType) {
       "text-size": 11,
     },
     paint: {
-      "text-color": "#1f2937",
-      "text-halo-color": "rgba(255,255,255,0.9)",
+      "text-color": onDark ? "#f3f4f6" : "#1f2937",
+      "text-halo-color": onDark ? "rgba(17,24,39,0.9)" : "rgba(255,255,255,0.9)",
       "text-halo-width": 1.5,
     },
   };
@@ -238,17 +249,18 @@ function markedTrailLabelLayer(type: MarkedTrailType) {
 function injectMarkedTrailLayers(
   style: StyleSpecification,
   overlay: MarkedTrailsStyleOverlay,
+  styleId?: MapStylePreset,
 ): StyleSpecification {
   const enabled = MARKED_TRAIL_TYPE_ORDER.filter((type) => overlay.markedTrailTypes.includes(type));
   if (!overlay.pmtilesUrl || enabled.length === 0) {
     return style;
   }
   const lineLayers = enabled.map(markedTrailLineLayer);
-  const labelLayers = enabled.map(markedTrailLabelLayer);
+  const labelLayers = enabled.map((type) => markedTrailLabelLayer(type, styleId));
   const layers = [...style.layers];
-  const firstSymbolIndex = layers.findIndex((layer) => layer.type === "symbol");
+  const lastNonSymbolIndex = layers.findLastIndex((layer) => layer.type !== "symbol");
   layers.splice(
-    firstSymbolIndex >= 0 ? firstSymbolIndex : layers.length,
+    lastNonSymbolIndex + 1,
     0,
     ...(lineLayers as unknown as StyleSpecification["layers"]),
   );

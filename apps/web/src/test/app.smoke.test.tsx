@@ -217,9 +217,11 @@ describe("Trip Animator web routes and config builders", () => {
     expect(hiking).not.toBeChecked();
     expect(mtb).not.toBeChecked();
     fireEvent.click(hiking);
+    fireEvent.click(mtb);
     fireEvent.click(cycling);
     expect(cycling).not.toBeChecked();
     expect(hiking).toBeChecked();
+    expect(mtb).toBeChecked();
 
     await waitFor(
       () => {
@@ -227,7 +229,7 @@ describe("Trip Animator web routes and config builders", () => {
           ([, init]) =>
             init?.method === "PATCH" &&
             typeof init.body === "string" &&
-            init.body.includes('"marked_trail_types":["hiking"]'),
+            init.body.includes('"marked_trail_types":["hiking","mtb"]'),
         );
         expect(saved).toBe(true);
       },
