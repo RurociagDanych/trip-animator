@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
+from trip_api.config import Settings
 
 if TYPE_CHECKING:
     from conftest import HarnessFactory
@@ -50,7 +53,7 @@ def test_unknown_marked_trail_type_is_rejected_and_stored_value_is_kept(
     project_id = _create_project(client, csrf)
     revision = client.get(f"/api/v1/projects/{project_id}").json()["revision"]
 
-    for bad_value in (["skiing"], ["hiking", "trail"], "hiking"):
+    for bad_value in (["skiing"], ["hiking", "trail"], "hiking", ["hiking", "hiking"]):
         response = client.patch(
             f"/api/v1/projects/{project_id}",
             json={"revision": revision, "settings": {"marked_trail_types": bad_value}},
@@ -63,11 +66,34 @@ def test_unknown_marked_trail_type_is_rejected_and_stored_value_is_kept(
 
 
 def test_public_config_exposes_marked_trails_base_url_without_trailing_slash(
-    make_harness: HarnessFactory,
+    make_harness: HarnessFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.delenv("MARKED_TRAILS_BASE_URL", raising=False)
     default_config = TestClient(make_harness().app).get("/api/v1/public-config").json()
-    assert default_config["marked_trails_base_url"] == "/tiles/marked-trails"
+    assert default_config["marked_trails_base_url"] == ""
 
     configured = make_harness(marked_trails_base_url="https://trails.example.test/base/")
     config = TestClient(configured.app).get("/api/v1/public-config").json()
     assert config["marked_trails_base_url"] == "https://trails.example.test/base"
+
+    local = make_harness(marked_trails_base_url="/tiles/marked-trails")
+    config = TestClient(local.app).get("/api/v1/public-config").json()
+    assert config["marked_trails_base_url"] == "/tiles/marked-trails"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "tiles/marked-trails",
+        "//trails.example.test/base",
+        "http://trails.example.test/base",
+        "https://",
+        "javascript:alert(1)",
+        "/tiles/../api",
+        "/\\trails.example.test/base",
+        "https://trails.example.test/base?x=1",
+    ],
+)
+def test_marked_trails_base_url_must_be_root_relative_or_https(value: str) -> None:
+    with pytest.raises(ValidationError, match="marked_trails_base_url"):
+        Settings(_env_file=None, marked_trails_base_url=value)

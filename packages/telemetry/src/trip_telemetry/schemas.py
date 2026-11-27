@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 CURRENT_ETL_VERSION = 2
 
@@ -786,6 +786,15 @@ class RenderSpecV2(BaseModel):
     climb_callout_duration_s: float = Field(default=4.0, ge=0.0, le=30.0)
     photo_card_style: PhotoCardStyle = "corner"
     telemetry_smoothing: int = Field(default=5, ge=1, le=31)
+
+    @field_validator("marked_trail_types")
+    @classmethod
+    def _reject_duplicate_marked_trail_types(
+        cls, value: list[MarkedTrailType]
+    ) -> list[MarkedTrailType]:
+        if len(set(value)) != len(value):
+            raise ValueError("marked_trail_types must not repeat a Marked Trail type")
+        return value
 
     @model_validator(mode="after")
     def validate_color_values(self) -> "RenderSpecV2":

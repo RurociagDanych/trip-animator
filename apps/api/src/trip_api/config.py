@@ -6,6 +6,7 @@ import secrets
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -76,8 +77,9 @@ class Settings(BaseSettings):
     s3_bucket: str = "trip-animator"
     s3_region: str = "us-east-1"
 
+    marked_trails_base_url: str = ""
+
     strava_client_id: str = ""
-    marked_trails_base_url: str = "/tiles/marked-trails"
     strava_client_secret: str = ""
     strava_redirect_uri: str = "http://localhost:5173/strava/callback"
     strava_verify_token: str = ""
@@ -149,6 +151,29 @@ class Settings(BaseSettings):
     rate_limit_render_window_s: int = 60
     rate_limit_voucher_redeem_max: int = 10
     rate_limit_voucher_redeem_window_s: int = 900
+
+    @field_validator("marked_trails_base_url")
+    @classmethod
+    def _validate_marked_trails_base_url(cls, value: str) -> str:
+        # Empty turns the overlay off. The browser fetches from this base, so only the app's
+        # own origin or an HTTPS host is accepted; browsers read a leading "/\" as "//".
+        value = value.strip()
+        if not value:
+            return ""
+        parsed = urlsplit(value)
+        root_relative = value.startswith("/") and not parsed.scheme and not parsed.netloc
+        https_host = parsed.scheme == "https" and bool(parsed.netloc)
+        if (
+            "\\" in value
+            or parsed.query
+            or parsed.fragment
+            or ".." in parsed.path.split("/")
+            or not (root_relative or https_host)
+        ):
+            raise ValueError(
+                "marked_trails_base_url must be empty, a root-relative path or an https URL"
+            )
+        return value
 
     @field_validator("strava_webhook_subscription_id", mode="before")
     @classmethod
