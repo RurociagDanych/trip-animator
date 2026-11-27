@@ -40,9 +40,9 @@ export function TermsPage() {
       <section className="space-y-2.5">
         <h2 className="text-base font-semibold text-ink">4. Third-Party Services</h2>
         <p className="text-sm leading-relaxed text-ink-muted">
-          Optional integrations with Strava and public map tile providers are subject to those
-          providers&apos; respective terms and rate limits. We cannot guarantee uninterrupted
-          availability of third-party APIs or map tile servers.
+          Optional integrations with Google sign-in, Strava, and public map tile providers are
+          subject to those providers&apos; respective terms and rate limits. We cannot guarantee
+          uninterrupted availability of third-party APIs or map tile servers.
         </p>
       </section>
 

@@ -1,5 +1,3 @@
-"""Shared domain services for project ownership, Bronze/Silver ingestion, caching, and mapping."""
-
 from __future__ import annotations
 
 import gzip
@@ -100,17 +98,14 @@ def current_etl_version() -> int:
 
 
 def stage_lod_cache_key(project_id: uuid.UUID, stage_id: uuid.UUID) -> str:
-    """Return the canonical object storage key for a stage's `.lod.json.gz` geometry cache."""
     return f"silver/{project_id}/{stage_id}.lod.json.gz"
 
 
 def stage_chart_cache_key(project_id: uuid.UUID, stage_id: uuid.UUID) -> str:
-    """Return the canonical object storage key for a stage's `.chart.json.gz` profile cache."""
     return f"silver/{project_id}/{stage_id}.chart.json.gz"
 
 
 def stage_events_cache_key(project_id: uuid.UUID, stage_id: uuid.UUID) -> str:
-    """Return the canonical object storage key for a stage's `_events.parquet` sidecar."""
     return f"silver/{project_id}/{stage_id}_events.parquet"
 
 
@@ -122,7 +117,6 @@ def write_audit_event(
     project_id: uuid.UUID | None = None,
     metadata: dict[str, object] | None = None,
 ) -> AuditEvent:
-    """Stage an AuditEvent on the current SQLAlchemy session (caller commits)."""
     event = AuditEvent(
         user_id=user_id,
         project_id=project_id,
@@ -145,6 +139,7 @@ def user_to_out(db: Session, user: User) -> UserOut:
         email=user.email,
         display_name=user.display_name or user.email.split("@", 1)[0],
         strava_connected=strava_conn is not None,
+        has_password=user.password_hash is not None,
     )
 
 
@@ -205,7 +200,6 @@ def stage_to_out(stage: Stage) -> StageOut:
 
 
 def public_stage_to_out(stage: Stage) -> PublicStageOut:
-    """Serialize a Stage for public unauthenticated share links with private metadata stripped."""
     source_type = cast(Literal["gpx", "strava"], stage.source_type)
     source_format = _normalize_stage_format(getattr(stage, "source_format", None), source_type)
     activity_type = normalize_activity_type(stage.activity_type, DEFAULT_ACTIVITY_TYPE)
@@ -286,7 +280,6 @@ def photo_to_out(photo: ProjectPhoto) -> ProjectPhotoOut:
 
 
 def public_photo_to_out(photo: ProjectPhoto) -> PublicPhotoOut:
-    """Serialize a ProjectPhoto for public share links with internal keys & camera info redacted."""
     match_method = cast(PhotoMatchMethod, photo.match_method)
     return PublicPhotoOut(
         id=photo.id,
@@ -327,7 +320,6 @@ def public_project_to_out(
     photos: list[ProjectPhoto] | None = None,
     latest_render_id: uuid.UUID | None = None,
 ) -> PublicProjectOut:
-    """Serialize a shared Project without owner IDs, share slugs, or private stage metadata."""
     total_distance = sum(s.distance_m for s in stages)
     return PublicProjectOut(
         id=project.id,
@@ -395,7 +387,6 @@ def build_stage_chart_cache_bytes(
     trim_start_s: float | None = None,
     trim_end_s: float | None = None,
 ) -> bytes:
-    """Build `.chart.json.gz` cache payload via trip_telemetry."""
     return build_chart_cache_from_parquet(
         parquet_path,
         max_points=max_points,
@@ -441,10 +432,6 @@ def align_project_photos(
     persist: bool = True,
     materialized: list[tuple[Stage, Path]] | None = None,
 ) -> list[ProjectPhoto]:
-    """Align non-manual project photos against project stages via DuckDB ASOF + spatial.
-
-    `materialized` reuses already downloaded Silver parquets of the same stages.
-    """
     photos = get_project_photos(db, project_id)
     stages = get_project_stages(db, project_id)
     if not photos:
@@ -527,8 +514,6 @@ def align_project_photos(
 
 @dataclass(frozen=True, slots=True)
 class PreparedStageArtifacts:
-    """CPU-transformed and ObjectStore-uploaded stage artifacts ready for DB persistence."""
-
     stage_id: uuid.UUID
     full_sha256: str
     bronze_key: str
@@ -559,7 +544,6 @@ def prepare_stage_artifacts(
     bronze_ext: str,
     bronze_content_type: str,
 ) -> PreparedStageArtifacts:
-    """Build Silver Parquet + caches/sidecars and upload all stage blobs to ObjectStore."""
     stage_id = uuid.uuid4()
     full_sha256 = hashlib.sha256(raw_bronze_bytes).hexdigest()
     digest = full_sha256[:16]
@@ -611,8 +595,6 @@ def prepare_stage_artifacts(
 
 @dataclass(frozen=True, slots=True)
 class PreparedSplitArtifacts:
-    """CPU-transformed and staged split artifacts ready for DB persistence."""
-
     part1_id: uuid.UUID
     part2_id: uuid.UUID
     source_silver_key: str
@@ -660,7 +642,6 @@ def _build_split_part_blobs(
 
 
 def rollback_split_stage_artifacts(store: ObjectStore, prepared: PreparedSplitArtifacts) -> None:
-    """Best-effort cleanup of newly uploaded immutable split blobs on DB failure."""
     for key in (
         prepared.part1_silver_key,
         prepared.part2_silver_key,
@@ -681,7 +662,6 @@ def prepare_split_stage_artifacts(
     split_distance_m: float | None = None,
     split_elapsed_s: float | None = None,
 ) -> PreparedSplitArtifacts:
-    """Split Silver telemetry and upload immutable split blobs before acquiring DB locks."""
     part1_id = stage.id
     part2_id = uuid.uuid4()
     project_id = stage.project_id
@@ -739,7 +719,6 @@ def prepare_split_stage_artifacts(
         part2_started_at=part2_started_at,
     )
 
-    # Upload only new immutable keys pre-commit; live Part 1 sidecar keys are updated post-commit.
     try:
         store.put_bytes(
             part2_silver_key,
@@ -782,7 +761,6 @@ def persist_prepared_stage(
     strava_activity_id: int | None = None,
     auto_align_photos: bool = True,
 ) -> Stage:
-    """Insert a Stage row for already-uploaded artifacts and commit on the DB session."""
     if db.get_bind().dialect.name == "postgresql":
         locked_project = db.scalar(
             select(Project).where(Project.id == project.id).with_for_update()
@@ -862,7 +840,6 @@ def ingest_parsed_track(
     strava_activity_id: int | None = None,
     auto_align_photos: bool = True,
 ) -> Stage:
-    """Persist Bronze payload, Silver Parquet + caches/sidecars, and insert Stage."""
     prepared = prepare_stage_artifacts(
         store=store,
         project_id=project.id,
@@ -895,7 +872,6 @@ def recompute_stage_trim_artifacts(
     trim_start_s: float | None,
     trim_end_s: float | None,
 ) -> tuple[bytes, bytes]:
-    """Update Silver Parquet `is_trimmed` and return `(lod_gz_bytes, chart_gz_bytes)`."""
     with materialize_silver_parquet(store, stage) as parquet_path:
         df = pl.read_parquet(parquet_path)
         trimmed_df, summary = apply_non_destructive_trim(
@@ -946,7 +922,6 @@ def recompute_stage_trim_artifacts(
 
 
 def get_silver_total_elapsed_s(store: ObjectStore, stage: Stage) -> float:
-    """Return total untrimmed duration in seconds from Silver Parquet (fallback to stage column)."""
     try:
         with materialize_silver_parquet(store, stage) as parquet_path:
             df = pl.read_parquet(parquet_path, columns=["ts_utc"])
@@ -963,7 +938,6 @@ def get_silver_total_elapsed_s(store: ObjectStore, stage: Stage) -> float:
 
 @contextmanager
 def materialize_silver_parquet(store: ObjectStore, stage: Stage) -> Iterator[Path]:
-    """Yield a local filesystem path for one stage's Silver Parquet, cleaning up temp files."""
     if isinstance(store, LocalObjectStore):
         yield store.resolve_existing_path(stage.silver_object_key)
         return
@@ -979,7 +953,6 @@ def materialize_silver_parquets(
     store: ObjectStore,
     stages: list[Stage],
 ) -> Iterator[list[tuple[Stage, Path]]]:
-    """Yield local filesystem paths for each stage's Silver Parquet, cleaning up temp files."""
     if isinstance(store, LocalObjectStore):
         pairs: list[tuple[Stage, Path]] = []
         for stage in stages:
@@ -1012,7 +985,6 @@ def validate_and_build_stage_lod_cache(
     trim_start_s: float | None,
     trim_end_s: float | None,
 ) -> bytes:
-    """Validate trim bounds against Silver Parquet and build `.lod.json.gz` cache bytes."""
     with materialize_silver_parquet(store, stage) as parquet_path:
         if trim_start_s is not None or trim_end_s is not None:
             kpis = query_stage_kpis(
@@ -1034,7 +1006,6 @@ def persist_or_delete_stage_lod_cache(
     stage: Stage,
     gz_bytes: bytes,
 ) -> None:
-    """Write precomputed `.lod.json.gz` bytes, deleting any stale cache if write fails."""
     lod_key = stage_lod_cache_key(stage.project_id, stage.id)
     try:
         store.put_bytes(lod_key, gz_bytes, content_type="application/gzip")
@@ -1051,10 +1022,6 @@ def persist_or_delete_stage_chart_cache(
     stage: Stage,
     gz_bytes: bytes,
 ) -> None:
-    """Write precomputed `.chart.json.gz` bytes, deleting any stale cache if write fails.
-
-    Also drops the stage timeline cache, which is derived from the same Silver data.
-    """
     chart_key = stage_chart_cache_key(stage.project_id, stage.id)
     try:
         store.delete(stage_timeline_cache_key(stage.project_id, stage.id))
@@ -1071,7 +1038,6 @@ def persist_or_delete_stage_chart_cache(
 
 
 def invalidate_or_rebuild_stage_lod_cache(store: ObjectStore, stage: Stage) -> None:
-    """Rebuild `.lod.json.gz` after a stage trim change, falling back to cache deletion."""
     lod_key = stage_lod_cache_key(stage.project_id, stage.id)
     try:
         gz_bytes = validate_and_build_stage_lod_cache(
@@ -1100,7 +1066,6 @@ def stream_video_response(
     content_disposition: str,
     extra_headers: dict[str, str] | None = None,
 ) -> Response:
-    """Stream an MP4 artifact in chunks with HTTP Range (206) support."""
     range_header = request.headers.get("range")
     try:
         stream = store.open_stream(object_key, range_header=range_header)
@@ -1135,7 +1100,6 @@ def build_stage_geometry_feature(
     stage: Stage,
     lod: LodLevel,
 ) -> dict[str, object]:
-    """Return a GeoJSON Feature for `stage` at `lod`, serving `.lod.json.gz` cache on hit."""
     lod_key = stage_lod_cache_key(stage.project_id, stage.id)
     has_trim = stage.trim_start_s is not None or stage.trim_end_s is not None
 
@@ -1216,7 +1180,6 @@ def build_project_geometry_collection(
     stages: list[Stage],
     lod: LodLevel,
 ) -> TelemetryGeometryOut:
-    """Resolve GeoJSON features for all `stages` in parallel via `.lod.json.gz` cache."""
     if not stages:
         return TelemetryGeometryOut(project_id=project_id, features=[])
 
@@ -1234,10 +1197,6 @@ TIMELINE_CACHE_SCHEMA_VERSION = 1
 
 
 def stage_timeline_cache_key(project_id: uuid.UUID, stage_id: uuid.UUID) -> str:
-    """Return the object storage key for a stage's compact timeline cache.
-
-    The schema version is part of the key so a payload change never reads stale entries.
-    """
     return f"silver/{project_id}/{stage_id}.timeline.v{TIMELINE_CACHE_SCHEMA_VERSION}.json.gz"
 
 
@@ -1247,7 +1206,6 @@ def build_timeline_cache_payload(
     trim_start_s: float | None,
     trim_end_s: float | None,
 ) -> bytes:
-    """Serialize timeline points as `[cum_dist_m, ts_ms]` pairs into gzip JSON bytes."""
     envelope = {
         "v": TIMELINE_CACHE_SCHEMA_VERSION,
         "trim_start_s": trim_start_s,
@@ -1264,7 +1222,6 @@ def parse_timeline_cache_payload(
     trim_start_s: float | None,
     trim_end_s: float | None,
 ) -> list[TelemetryTimelinePointOut] | None:
-    """Decode a timeline cache entry; return None when corrupt, stale or for other trim bounds."""
     try:
         data = json.loads(gzip.decompress(raw_gz_bytes).decode("utf-8"))
         if not isinstance(data, dict) or data.get("v") != TIMELINE_CACHE_SCHEMA_VERSION:
@@ -1325,7 +1282,6 @@ def build_project_timeline(
     project_id: uuid.UUID,
     stages: list[Stage],
 ) -> TelemetryTimelineOut:
-    """Return per-stage compact `cum_dist_m` / `ts_ms` points, resolved in parallel and cached."""
     if not stages:
         return TelemetryTimelineOut(project_id=project_id, stages=[])
     if len(stages) == 1:
@@ -1446,7 +1402,6 @@ def build_project_telemetry_chart(
     stages: list[Stage],
     max_points: int,
 ) -> TelemetryChartOut:
-    """Build combined LTTB telemetry chart points with lazy Silver Parquet materialization."""
     if not stages:
         return TelemetryChartOut(project_id=project_id, total_distance_m=0.0, points=[])
 
@@ -1500,7 +1455,6 @@ def build_project_highlights(
     project_id: uuid.UUID,
     stages: list[Stage],
 ) -> ProjectHighlightsOut:
-    """Assemble climbs, splits, dwell stops, peak efforts, and geo context for a project."""
     if not stages:
         return ProjectHighlightsOut(project_id=project_id)
 

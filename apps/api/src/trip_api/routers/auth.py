@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import logging
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response
-from sqlalchemy import case, delete, select
+import httpx
+from fastapi import APIRouter, BackgroundTasks, Body, HTTPException, Request, Response
+from sqlalchemy import case, delete, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -18,15 +20,28 @@ from trip_api.config import Settings
 from trip_api.db import (
     AuditEvent,
     EmailVerificationToken,
+    OAuthConnection,
+    OAuthState,
     PasswordResetToken,
+    Project,
+    ProjectPhoto,
+    RenderJob,
+    RenderJobChunk,
     SessionRecord,
+    Stage,
     User,
+    UserIdentity,
+    VaultActivity,
+    VaultActivityTile,
+    VaultGear,
+    VaultSyncState,
 )
 from trip_api.deps import (
     AppSettings,
     CsrfAuth,
     CurrentAuth,
     DbSession,
+    StoreDep,
     ensure_utc,
     get_client_ip,
 )
@@ -36,13 +51,27 @@ from trip_api.email import (
     send_password_reset_email,
     send_verification_email,
 )
+from trip_api.google_oidc import (
+    GOOGLE_OIDC_COOKIE_NAME,
+    GOOGLE_OIDC_COOKIE_PATH,
+    GOOGLE_OIDC_STATE_TTL_SECONDS,
+    GoogleOidcState,
+    build_google_authorize_url,
+    decode_oidc_state_cookie,
+    encode_oidc_state_cookie,
+    exchange_google_code,
+)
+from trip_api.library_view import LibraryView
 from trip_api.rate_limit import check_rate_limit
 from trip_api.schemas import (
     AuthSessionOut,
     ChangePasswordRequest,
     ChangePasswordResponse,
+    DeleteAccountRequest,
     ForgotPasswordRequest,
     ForgotPasswordResponse,
+    GoogleAuthCallbackRequest,
+    GoogleAuthStartOut,
     LoginRequest,
     LogoutAllResponse,
     RegisterRequest,
@@ -52,15 +81,26 @@ from trip_api.schemas import (
     ResetPasswordRequest,
     ResetPasswordResponse,
     SessionInfoOut,
+    SetPasswordRequest,
     VerifyEmailRequest,
 )
 from trip_api.security import (
+    SsrfBlockedError,
+    decrypt_secret,
     generate_opaque_token,
+    generate_pkce_pair,
     hash_password,
     hash_session_token,
+    validate_outbound_url,
     verify_password,
 )
-from trip_api.services import user_to_out
+from trip_api.services import (
+    stage_chart_cache_key,
+    stage_events_cache_key,
+    stage_lod_cache_key,
+    stage_timeline_cache_key,
+    user_to_out,
+)
 from trip_api.turnstile import verify_turnstile_token
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
@@ -192,7 +232,7 @@ def login(
     )
 
     user = db.scalar(select(User).where(User.email == email))
-    if user is None:
+    if user is None or user.password_hash is None:
         verify_password(_DUMMY_ARGON2_HASH, body.password)
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
@@ -586,6 +626,12 @@ def change_password(
     auth: CsrfAuth,
     db: DbSession,
 ) -> ChangePasswordResponse:
+    if auth.user.password_hash is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Account does not have a password set yet. Use set-password instead.",
+        )
+
     if not verify_password(auth.user.password_hash, body.current_password):
         raise HTTPException(status_code=400, detail="Current password is incorrect")
 
@@ -631,6 +677,280 @@ def change_password(
     )
     db.commit()
     return ChangePasswordResponse(ok=True, revoked_sessions_count=revoked_count)
+
+
+@router.post("/set-password", response_model=ChangePasswordResponse)
+def set_password(
+    body: SetPasswordRequest,
+    auth: CsrfAuth,
+    db: DbSession,
+) -> ChangePasswordResponse:
+    if auth.user.password_hash is not None:
+        raise HTTPException(status_code=400, detail="A password is already set on this account")
+
+    now = datetime.now(UTC)
+    auth.user.password_hash = hash_password(body.new_password)
+    db.execute(
+        delete(SessionRecord).where(
+            SessionRecord.user_id == auth.user.id,
+            SessionRecord.id != auth.session.id,
+            SessionRecord.expires_at <= now,
+        )
+    )
+    revoked_res = cast(
+        CursorResult[Any],
+        db.execute(
+            delete(SessionRecord).where(
+                SessionRecord.user_id == auth.user.id,
+                SessionRecord.id != auth.session.id,
+            )
+        ),
+    )
+    revoked_count = max(0, int(revoked_res.rowcount or 0))
+    db.execute(
+        delete(PasswordResetToken).where(
+            PasswordResetToken.user_id == auth.user.id,
+            PasswordResetToken.used_at.is_(None),
+        )
+    )
+    db.add(
+        AuditEvent(
+            user_id=auth.user.id,
+            event_type="auth.password_set",
+            metadata_json={"revoked_sessions_count": revoked_count},
+        )
+    )
+    db.commit()
+    return ChangePasswordResponse(ok=True, revoked_sessions_count=revoked_count)
+
+
+def _clear_google_oidc_cookie_headers(settings: Settings) -> dict[str, str]:
+    secure_part = "; Secure" if settings.app_env == "production" else ""
+    return {
+        "Set-Cookie": (
+            f"{GOOGLE_OIDC_COOKIE_NAME}=; Max-Age=0; Path={GOOGLE_OIDC_COOKIE_PATH}; "
+            f"HttpOnly; SameSite=lax{secure_part}"
+        )
+    }
+
+
+@router.get("/google/start", response_model=GoogleAuthStartOut)
+def google_auth_start(
+    request: Request,
+    response: Response,
+    db: DbSession,
+    settings: AppSettings,
+) -> GoogleAuthStartOut:
+    client_ip = get_client_ip(request)
+    check_rate_limit(
+        db,
+        bucket_key=f"google_auth:ip:{client_ip}",
+        limit=settings.rate_limit_google_auth_max,
+        window_seconds=settings.rate_limit_google_auth_window_s,
+    )
+
+    if not settings.google_auth_enabled:
+        raise HTTPException(status_code=503, detail="Google sign-in is not configured")
+
+    state = generate_opaque_token(32)
+    nonce = generate_opaque_token(32)
+    code_verifier, code_challenge = generate_pkce_pair()
+    expires_at = int(datetime.now(UTC).timestamp()) + GOOGLE_OIDC_STATE_TTL_SECONDS
+
+    cookie_value = encode_oidc_state_cookie(
+        GoogleOidcState(
+            state=state,
+            nonce=nonce,
+            code_verifier=code_verifier,
+            expires_at=expires_at,
+        ),
+        settings,
+    )
+    response.set_cookie(
+        key=GOOGLE_OIDC_COOKIE_NAME,
+        value=cookie_value,
+        httponly=True,
+        samesite="lax",
+        secure=settings.app_env == "production",
+        path=GOOGLE_OIDC_COOKIE_PATH,
+        max_age=GOOGLE_OIDC_STATE_TTL_SECONDS,
+    )
+    return GoogleAuthStartOut(
+        authorize_url=build_google_authorize_url(
+            settings=settings,
+            state=state,
+            nonce=nonce,
+            code_challenge=code_challenge,
+        )
+    )
+
+
+@router.post("/google/callback", response_model=SessionInfoOut)
+async def google_auth_callback(
+    body: GoogleAuthCallbackRequest,
+    request: Request,
+    response: Response,
+    db: DbSession,
+    settings: AppSettings,
+) -> SessionInfoOut:
+    client_ip = get_client_ip(request)
+    check_rate_limit(
+        db,
+        bucket_key=f"google_auth:ip:{client_ip}",
+        limit=settings.rate_limit_google_auth_max,
+        window_seconds=settings.rate_limit_google_auth_window_s,
+    )
+
+    clear_headers = _clear_google_oidc_cookie_headers(settings)
+    if not settings.google_auth_enabled:
+        raise HTTPException(
+            status_code=503,
+            detail="Google sign-in is not configured",
+            headers=clear_headers,
+        )
+
+    oidc_state = decode_oidc_state_cookie(
+        request.cookies.get(GOOGLE_OIDC_COOKIE_NAME),
+        settings,
+    )
+    if oidc_state is None or not hmac.compare_digest(
+        oidc_state.state.encode("utf-8"), body.state.encode("utf-8")
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired Google sign-in state",
+            headers=clear_headers,
+        )
+
+    try:
+        claims = await exchange_google_code(
+            request=request,
+            settings=settings,
+            code=body.code,
+            code_verifier=oidc_state.code_verifier,
+            expected_nonce=oidc_state.nonce,
+        )
+    except HTTPException as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+            headers=clear_headers,
+        ) from exc
+
+    identity = db.scalar(
+        select(UserIdentity).where(
+            UserIdentity.provider == "google",
+            UserIdentity.provider_subject == claims.subject,
+        )
+    )
+    if identity is not None:
+        user = db.get(User, identity.user_id)
+        if user is None or not user.is_active:
+            raise HTTPException(status_code=401, detail="Account inactive", headers=clear_headers)
+        if identity.email != claims.email:
+            identity.email = claims.email
+        db.add(AuditEvent(user_id=user.id, event_type="auth.google_login", metadata_json={}))
+        response.delete_cookie(
+            key=GOOGLE_OIDC_COOKIE_NAME,
+            path=GOOGLE_OIDC_COOKIE_PATH,
+            httponly=True,
+            samesite="lax",
+            secure=settings.app_env == "production",
+        )
+        return _issue_session(db=db, response=response, settings=settings, user=user)
+
+    existing_user = db.scalar(select(User).where(User.email == claims.email))
+    if existing_user is None:
+        if not settings.registration_enabled:
+            raise HTTPException(
+                status_code=403,
+                detail="Account registration is disabled",
+                headers=clear_headers,
+            )
+        now = datetime.now(UTC)
+        new_user = User(
+            email=claims.email,
+            display_name=claims.display_name,
+            password_hash=None,
+            is_active=True,
+            email_verified_at=now,
+        )
+        db.add(new_user)
+        try:
+            db.flush()
+            db.add(
+                UserIdentity(
+                    user_id=new_user.id,
+                    provider="google",
+                    provider_subject=claims.subject,
+                    email=claims.email,
+                )
+            )
+            db.add(
+                AuditEvent(user_id=new_user.id, event_type="auth.google_register", metadata_json={})
+            )
+            response.delete_cookie(
+                key=GOOGLE_OIDC_COOKIE_NAME,
+                path=GOOGLE_OIDC_COOKIE_PATH,
+                httponly=True,
+                samesite="lax",
+                secure=settings.app_env == "production",
+            )
+            return _issue_session(db=db, response=response, settings=settings, user=new_user)
+        except IntegrityError as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="Account creation conflicted with an existing sign-in. Please try again.",
+                headers=clear_headers,
+            ) from exc
+
+    if not existing_user.is_active:
+        raise HTTPException(status_code=401, detail="Account inactive", headers=clear_headers)
+
+    if existing_user.email_verified_at is None:
+        db.add(
+            AuditEvent(
+                user_id=existing_user.id,
+                event_type="auth.google_link_blocked_unverified",
+                metadata_json={},
+            )
+        )
+        db.commit()
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "An unverified account with this email already exists. "
+                "Please verify your email or reset your password before signing in with Google."
+            ),
+            headers=clear_headers,
+        )
+
+    db.add(
+        UserIdentity(
+            user_id=existing_user.id,
+            provider="google",
+            provider_subject=claims.subject,
+            email=claims.email,
+        )
+    )
+    db.add(AuditEvent(user_id=existing_user.id, event_type="auth.google_linked", metadata_json={}))
+    try:
+        response.delete_cookie(
+            key=GOOGLE_OIDC_COOKIE_NAME,
+            path=GOOGLE_OIDC_COOKIE_PATH,
+            httponly=True,
+            samesite="lax",
+            secure=settings.app_env == "production",
+        )
+        return _issue_session(db=db, response=response, settings=settings, user=existing_user)
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Google account linking conflicted with another request. Please try again.",
+            headers=clear_headers,
+        ) from exc
 
 
 @router.get("/sessions", response_model=list[AuthSessionOut])
@@ -727,3 +1047,207 @@ def me(
         csrf_token=auth.session.csrf_token,
         dev_auth_enabled=settings.dev_auth_enabled and settings.app_env != "production",
     )
+
+
+async def _deauthorize_strava_best_effort(
+    request: Request,
+    settings: Settings,
+    access_token: str,
+) -> None:
+    custom_factory = getattr(request.app.state, "http_client_factory", None)
+    url = f"{settings.strava_api_base_url.rstrip('/')}/oauth/deauthorize"
+    try:
+        validate_outbound_url(
+            url,
+            allowed_hosts=settings.strava_allowed_hosts,
+            resolve_dns=(custom_factory is None),
+        )
+    except SsrfBlockedError:
+        logger.warning("Skipped Strava deauthorization for disallowed outbound URL")
+        return
+
+    client_factory: Callable[[], httpx.AsyncClient] = (
+        cast(Callable[[], httpx.AsyncClient], custom_factory)
+        if custom_factory is not None
+        else (lambda: httpx.AsyncClient(timeout=10.0, follow_redirects=False))
+    )
+    try:
+        async with client_factory() as client:
+            await client.post(
+                url,
+                data={"access_token": access_token},
+                follow_redirects=False,
+            )
+    except Exception:
+        logger.warning("Best-effort Strava deauthorization failed during account deletion")
+
+
+@router.delete("/me", status_code=204)
+async def delete_account(
+    request: Request,
+    auth: CsrfAuth,
+    db: DbSession,
+    settings: AppSettings,
+    store: StoreDep,
+    body: Annotated[DeleteAccountRequest | None, Body()] = None,
+) -> Response:
+    user = auth.user
+    if user.password_hash is not None:
+        provided_password = body.current_password if body is not None else None
+        if not provided_password or not await asyncio.to_thread(
+            verify_password, user.password_hash, provided_password
+        ):
+            raise HTTPException(status_code=400, detail="Current password is incorrect")
+    else:
+        confirmation = (body.confirmation or "").strip() if body is not None else ""
+        if confirmation != "DELETE":
+            raise HTTPException(
+                status_code=400,
+                detail='Type "DELETE" to confirm permanent account deletion',
+            )
+
+    user_id = user.id
+    strava_access_token: str | None = None
+    strava_conn = db.scalar(
+        select(OAuthConnection).where(
+            OAuthConnection.user_id == user_id,
+            OAuthConnection.provider == "strava",
+        )
+    )
+    if strava_conn is not None:
+        try:
+            strava_access_token = decrypt_secret(
+                strava_conn.access_token_enc,
+                settings.decoded_encryption_key,
+                aad=f"oauth:{user_id}:strava".encode(),
+            )
+        except Exception:
+            logger.warning("Could not decrypt Strava access token during account deletion")
+
+    project_ids = list(db.scalars(select(Project.id).where(Project.owner_user_id == user_id)).all())
+    stages = (
+        list(db.scalars(select(Stage).where(Stage.project_id.in_(project_ids))).all())
+        if project_ids
+        else []
+    )
+    photos = (
+        list(db.scalars(select(ProjectPhoto).where(ProjectPhoto.project_id.in_(project_ids))).all())
+        if project_ids
+        else []
+    )
+    render_jobs = list(
+        db.scalars(
+            select(RenderJob).where(
+                (RenderJob.owner_user_id == user_id)
+                | (RenderJob.project_id.in_(project_ids) if project_ids else False)
+            )
+        ).all()
+    )
+    render_job_ids = [job.id for job in render_jobs]
+    render_chunks = (
+        list(
+            db.scalars(
+                select(RenderJobChunk).where(RenderJobChunk.render_job_id.in_(render_job_ids))
+            ).all()
+        )
+        if render_job_ids
+        else []
+    )
+    vault_activities = list(
+        db.scalars(select(VaultActivity).where(VaultActivity.user_id == user_id)).all()
+    )
+
+    keys_to_delete: list[str] = []
+    for stage in stages:
+        keys_to_delete.extend(
+            [
+                stage.bronze_object_key,
+                stage.silver_object_key,
+                stage_lod_cache_key(stage.project_id, stage.id),
+                stage_chart_cache_key(stage.project_id, stage.id),
+                stage_timeline_cache_key(stage.project_id, stage.id),
+                stage_events_cache_key(stage.project_id, stage.id),
+            ]
+        )
+    for photo in photos:
+        keys_to_delete.extend([photo.object_key, photo.thumb_object_key])
+    remote_executions_to_cancel: list[str] = []
+    remote_jobs_to_cleanup: list[uuid.UUID] = []
+    for job in render_jobs:
+        if job.output_object_key:
+            keys_to_delete.append(job.output_object_key)
+        if job.thumbnail_key:
+            keys_to_delete.append(job.thumbnail_key)
+        if job.is_chunked:
+            keys_to_delete.append(f"outputs/manifests/{job.id}.json")
+        if job.render_backend == "aws_sfn_lambda":
+            remote_jobs_to_cleanup.append(job.id)
+            if job.external_execution_id and job.status in ("queued", "running"):
+                remote_executions_to_cancel.append(job.external_execution_id)
+    for chunk in render_chunks:
+        if chunk.chunk_object_key:
+            keys_to_delete.append(chunk.chunk_object_key)
+    for activity in vault_activities:
+        if activity.bronze_object_key:
+            keys_to_delete.append(activity.bronze_object_key)
+        if activity.silver_object_key:
+            keys_to_delete.append(activity.silver_object_key)
+
+    db.execute(delete(LibraryView).where(LibraryView.user_id == user_id))
+    db.execute(delete(VaultActivityTile).where(VaultActivityTile.user_id == user_id))
+    db.execute(delete(VaultActivity).where(VaultActivity.user_id == user_id))
+    db.execute(delete(VaultSyncState).where(VaultSyncState.user_id == user_id))
+    db.execute(delete(VaultGear).where(VaultGear.user_id == user_id))
+    if render_job_ids:
+        db.execute(delete(RenderJobChunk).where(RenderJobChunk.render_job_id.in_(render_job_ids)))
+        db.execute(delete(RenderJob).where(RenderJob.id.in_(render_job_ids)))
+    if project_ids:
+        db.execute(delete(ProjectPhoto).where(ProjectPhoto.project_id.in_(project_ids)))
+        db.execute(delete(Stage).where(Stage.project_id.in_(project_ids)))
+        db.execute(delete(Project).where(Project.id.in_(project_ids)))
+    db.execute(delete(OAuthState).where(OAuthState.user_id == user_id))
+    db.execute(delete(OAuthConnection).where(OAuthConnection.user_id == user_id))
+    db.execute(delete(UserIdentity).where(UserIdentity.user_id == user_id))
+    db.execute(delete(EmailVerificationToken).where(EmailVerificationToken.user_id == user_id))
+    db.execute(delete(PasswordResetToken).where(PasswordResetToken.user_id == user_id))
+    db.execute(delete(SessionRecord).where(SessionRecord.user_id == user_id))
+    db.execute(
+        update(AuditEvent)
+        .where(AuditEvent.user_id == user_id)
+        .values(user_id=None, project_id=None)
+    )
+    db.add(AuditEvent(user_id=None, event_type="auth.account_deleted", metadata_json={}))
+    db.delete(user)
+    db.commit()
+
+    if strava_access_token is not None:
+        await _deauthorize_strava_best_effort(request, settings, strava_access_token)
+
+    render_backend = getattr(request.app.state, "render_backend", None)
+    if render_backend is not None:
+        for exec_id in remote_executions_to_cancel:
+            try:
+                await asyncio.to_thread(render_backend.cancel, exec_id)
+            except Exception:
+                logger.warning("Failed to cancel remote render execution during account deletion")
+        for job_id in remote_jobs_to_cleanup:
+            try:
+                await asyncio.to_thread(render_backend.cleanup_staging, job_id)
+            except Exception:
+                logger.warning("Failed to clean up remote render staging during account deletion")
+
+    for obj_key in dict.fromkeys(keys_to_delete):
+        try:
+            await asyncio.to_thread(store.delete, obj_key)
+        except Exception:
+            logger.warning("Failed to delete object key %s during account cleanup", obj_key)
+
+    resp = Response(status_code=204)
+    resp.delete_cookie(
+        key=settings.session_cookie_name,
+        path="/",
+        httponly=True,
+        samesite="lax",
+        secure=settings.app_env == "production",
+    )
+    return resp

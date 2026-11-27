@@ -43,9 +43,11 @@ export function PrivacyPage() {
       <section className="space-y-2.5">
         <h2 className="text-base font-semibold text-ink">4. Third-Party Integrations</h2>
         <p className="text-sm leading-relaxed text-ink-muted">
-          Connecting Strava is optional. OAuth access and refresh tokens are encrypted at rest and
-          used strictly to import activities you request. Map tiles are requested from configured
-          public basemap providers (such as OpenFreeMap) to display routes.
+          Optional Google sign-in uses OpenID Connect to verify your email address, account subject
+          identifier, and display name. Connecting Strava is optional; OAuth access and refresh
+          tokens are encrypted at rest and used strictly to import activities you request. Map tiles
+          are requested from configured public basemap providers (such as OpenFreeMap) to display
+          routes.
         </p>
       </section>
 
@@ -54,8 +56,9 @@ export function PrivacyPage() {
         <p className="text-sm leading-relaxed text-ink-muted">
           Server-rendered MP4 outputs are retained temporarily (default 7 days) before automatic
           cleanup. Browser-based Local Exports stay on your device and are never uploaded to our
-          servers. You can delete individual projects, disconnect Strava, or contact the operator to
-          request removal of your account and associated stored data.
+          servers. You can delete individual projects, disconnect Strava, or permanently delete your
+          entire account and all associated projects, tracks, photos, renders, and OAuth tokens at
+          any time from your Account security page.
         </p>
       </section>
     </LegalPageShell>

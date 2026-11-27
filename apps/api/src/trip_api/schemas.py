@@ -94,6 +94,24 @@ class ChangePasswordResponse(BaseModel):
     revoked_sessions_count: int = 0
 
 
+class SetPasswordRequest(BaseModel):
+    new_password: str = Field(min_length=12, max_length=256)
+
+
+class DeleteAccountRequest(BaseModel):
+    current_password: str | None = Field(default=None, max_length=256)
+    confirmation: str | None = Field(default=None, max_length=64)
+
+
+class GoogleAuthStartOut(BaseModel):
+    authorize_url: str
+
+
+class GoogleAuthCallbackRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=2048)
+    state: str = Field(min_length=1, max_length=512)
+
+
 class AuthSessionOut(BaseModel):
     id: uuid.UUID
     created_at: datetime
@@ -111,6 +129,7 @@ class UserOut(BaseModel):
     email: str
     display_name: str
     strava_connected: bool = False
+    has_password: bool = True
 
 
 class SessionInfoOut(BaseModel):

@@ -10,6 +10,7 @@ import { RouteLoadingFallback } from "./components/layout/RouteLoadingFallback";
 import { AccountPage } from "./routes/AccountPage";
 import { DashboardPage } from "./routes/DashboardPage";
 import { ForgotPasswordPage } from "./routes/ForgotPasswordPage";
+import { GoogleCallbackPage } from "./routes/GoogleCallbackPage";
 import { LoginPage } from "./routes/LoginPage";
 import { NotFoundPage } from "./routes/NotFoundPage";
 import { PrivacyPage } from "./routes/PrivacyPage";
@@ -51,6 +52,12 @@ const stravaCallbackRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/strava/callback",
   component: StravaCallbackPage,
+});
+
+const googleCallbackRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/auth/google/callback",
+  component: GoogleCallbackPage,
 });
 
 const verifyEmailRoute = createRoute({
@@ -113,6 +120,7 @@ const routeTree = rootRoute.addChildren([
   dashboardRoute,
   loginRoute,
   stravaCallbackRoute,
+  googleCallbackRoute,
   verifyEmailRoute,
   forgotPasswordRoute,
   resetPasswordRoute,

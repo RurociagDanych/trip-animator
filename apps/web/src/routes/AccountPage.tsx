@@ -11,12 +11,13 @@ import {
   Lock,
   LogOut,
   ShieldCheck,
+  Trash2,
 } from "lucide-react";
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { AppHeader } from "../components/layout/AppHeader";
 import { ApiError } from "../lib/api/client";
 import { authApi } from "../lib/api/endpoints";
-import type { AuthSessionOut, SessionInfoOut } from "../lib/api/types";
+import type { AuthSessionOut, DeleteAccountRequest, SessionInfoOut } from "../lib/api/types";
 
 function formatSessionTimestamp(iso: string): string {
   const date = new Date(iso);
@@ -38,7 +39,13 @@ export function AccountPage() {
 
   const currentPasswordInputId = useId();
   const newPasswordInputId = useId();
+  const newPasswordHintId = useId();
   const confirmPasswordInputId = useId();
+  const confirmPasswordErrorId = useId();
+  const deleteDialogTitleId = useId();
+  const deleteConfirmInputId = useId();
+  const deleteDialogRef = useRef<HTMLDialogElement | null>(null);
+  const cancelDeleteButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -51,6 +58,11 @@ export function AccountPage() {
   const [sessionStatus, setSessionStatus] = useState<string | null>(null);
   const [revokingSessionId, setRevokingSessionId] = useState<string | null>(null);
   const [logoutAllPending, setLogoutAllPending] = useState(false);
+
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deletePassword, setDeletePassword] = useState("");
+  const [deleteConfirmation, setDeleteConfirmation] = useState("");
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const sessionQuery = useQuery<SessionInfoOut>({
     queryKey: ["auth", "me"],
@@ -98,6 +110,38 @@ export function AccountPage() {
     },
   });
 
+  const setPasswordMutation = useMutation({
+    mutationFn: (payload: { new_password: string }) => authApi.setPassword(payload),
+    onSuccess: (res) => {
+      setNewPassword("");
+      setConfirmPassword("");
+      setPasswordError(null);
+      setPasswordStatus(
+        res.revoked_sessions_count > 0
+          ? `Password set. Signed out ${res.revoked_sessions_count} other active session${res.revoked_sessions_count === 1 ? "" : "s"}.`
+          : "Password set. You can now sign in with email and password as well as Google.",
+      );
+      void queryClient.invalidateQueries({ queryKey: ["auth", "me"] });
+      void queryClient.invalidateQueries({ queryKey: ["auth", "sessions"] });
+    },
+    onError: (err) => {
+      setPasswordStatus(null);
+      setPasswordError(err instanceof ApiError ? err.message : "Failed to set password.");
+    },
+  });
+
+  const deleteAccountMutation = useMutation({
+    mutationFn: (payload: DeleteAccountRequest) => authApi.deleteAccount(payload),
+    onSuccess: async () => {
+      closeDeleteDialog();
+      queryClient.clear();
+      await navigate({ to: "/login" });
+    },
+    onError: (err) => {
+      setDeleteError(err instanceof ApiError ? err.message : "Failed to delete account.");
+    },
+  });
+
   const revokeSessionMutation = useMutation({
     mutationFn: (sessionId: string) => authApi.revokeSession(sessionId),
     onMutate: (sessionId) => {
@@ -116,6 +160,31 @@ export function AccountPage() {
       setRevokingSessionId(null);
     },
   });
+
+  useEffect(() => {
+    const dialog = deleteDialogRef.current;
+    if (!dialog) {
+      return;
+    }
+    if (deleteDialogOpen && !dialog.open) {
+      dialog.showModal();
+      cancelDeleteButtonRef.current?.focus();
+    } else if (!deleteDialogOpen && dialog.open) {
+      dialog.close();
+    }
+  }, [deleteDialogOpen]);
+
+  function openDeleteDialog() {
+    setDeletePassword("");
+    setDeleteConfirmation("");
+    setDeleteError(null);
+    setDeleteDialogOpen(true);
+  }
+
+  function closeDeleteDialog() {
+    setDeleteDialogOpen(false);
+    setDeleteError(null);
+  }
 
   async function handleLogout() {
     try {
@@ -149,12 +218,20 @@ export function AccountPage() {
     }
   }
 
-  function handleChangePasswordSubmit(event: React.FormEvent<HTMLFormElement>) {
+  const user = sessionQuery.data?.user ?? null;
+  const hasPassword = user?.has_password !== false;
+  const sessions = sessionsQuery.data ?? [];
+  const passwordMeetsLength = newPassword.length >= 12;
+  const passwordsMatch = confirmPassword.length > 0 && newPassword === confirmPassword;
+  const passwordsMismatch = confirmPassword.length > 0 && newPassword !== confirmPassword;
+  const passwordPending = changePasswordMutation.isPending || setPasswordMutation.isPending;
+
+  function handlePasswordSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setPasswordError(null);
     setPasswordStatus(null);
 
-    if (currentPassword.length === 0) {
+    if (hasPassword && currentPassword.length === 0) {
       setPasswordError("Current password is required.");
       return;
     }
@@ -166,22 +243,42 @@ export function AccountPage() {
       setPasswordError("Passwords do not match.");
       return;
     }
-    if (newPassword === currentPassword) {
+    if (hasPassword && newPassword === currentPassword) {
       setPasswordError("New password must be different from your current password.");
       return;
     }
 
-    changePasswordMutation.mutate({
-      current_password: currentPassword,
-      new_password: newPassword,
-    });
+    if (hasPassword) {
+      changePasswordMutation.mutate({
+        current_password: currentPassword,
+        new_password: newPassword,
+      });
+    } else {
+      setPasswordMutation.mutate({
+        new_password: newPassword,
+      });
+    }
   }
 
-  const user = sessionQuery.data?.user ?? null;
-  const sessions = sessionsQuery.data ?? [];
-  const passwordMeetsLength = newPassword.length >= 12;
-  const passwordsMatch = confirmPassword.length > 0 && newPassword === confirmPassword;
-  const passwordsMismatch = confirmPassword.length > 0 && newPassword !== confirmPassword;
+  function handleDeleteAccountSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setDeleteError(null);
+
+    if (hasPassword) {
+      if (!deletePassword) {
+        setDeleteError("Please enter your current password to confirm deletion.");
+        return;
+      }
+      deleteAccountMutation.mutate({ current_password: deletePassword });
+      return;
+    }
+
+    if (deleteConfirmation.trim() !== "DELETE") {
+      setDeleteError('Please type "DELETE" to confirm permanent account deletion.');
+      return;
+    }
+    deleteAccountMutation.mutate({ confirmation: deleteConfirmation.trim() });
+  }
 
   return (
     <div className="flex min-h-screen flex-col bg-canvas text-ink">
@@ -212,14 +309,18 @@ export function AccountPage() {
 
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
           <section className="space-y-4 rounded-xl border border-border bg-surface p-6 lg:col-span-6">
-            <div className="flex items-center gap-2.5">
-              <span className="flex h-8 w-8 items-center justify-center rounded-md border border-border bg-elevated text-sky-accent">
+            <div className="flex items-start gap-2.5">
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-elevated text-sky-accent">
                 <Lock className="h-4 w-4" aria-hidden="true" />
               </span>
               <div>
-                <h2 className="text-base font-semibold text-ink">Change password</h2>
+                <h2 className="text-base font-semibold text-ink">
+                  {hasPassword ? "Change password" : "Set a password"}
+                </h2>
                 <p className="text-xs text-ink-muted">
-                  Updating your password signs out all other active devices.
+                  {hasPassword
+                    ? "Updating your password signs out all other active devices."
+                    : "Add a password to also sign in with email. Setting a password signs out other active devices."}
                 </p>
               </div>
             </div>
@@ -250,26 +351,28 @@ export function AccountPage() {
               </div>
             ) : null}
 
-            <form onSubmit={handleChangePasswordSubmit} className="space-y-4">
-              <div className="space-y-1.5">
-                <label
-                  htmlFor={currentPasswordInputId}
-                  className="block text-xs font-medium text-ink-muted"
-                >
-                  Current password
-                </label>
-                <input
-                  id={currentPasswordInputId}
-                  type={showPasswords ? "text" : "password"}
-                  name="current_password"
-                  autoComplete="current-password"
-                  required
-                  value={currentPassword}
-                  onChange={(event) => setCurrentPassword(event.currentTarget.value)}
-                  placeholder="Enter your current password"
-                  className="w-full rounded-md border border-border bg-canvas px-3 py-2 text-sm text-ink placeholder:text-ink-muted/60 focus:border-sky-accent focus:outline-none"
-                />
-              </div>
+            <form onSubmit={handlePasswordSubmit} className="space-y-4">
+              {hasPassword ? (
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor={currentPasswordInputId}
+                    className="block text-xs font-medium text-ink-muted"
+                  >
+                    Current password
+                  </label>
+                  <input
+                    id={currentPasswordInputId}
+                    type={showPasswords ? "text" : "password"}
+                    name="current_password"
+                    autoComplete="current-password"
+                    required
+                    value={currentPassword}
+                    onChange={(event) => setCurrentPassword(event.currentTarget.value)}
+                    placeholder="Enter your current password"
+                    className="w-full rounded-md border border-border bg-canvas px-3 py-2 text-sm text-ink placeholder:text-ink-muted/60 focus:border-sky-accent focus:outline-none"
+                  />
+                </div>
+              ) : null}
 
               <div className="space-y-1.5">
                 <label
@@ -284,16 +387,18 @@ export function AccountPage() {
                     type={showPasswords ? "text" : "password"}
                     name="new_password"
                     autoComplete="new-password"
+                    aria-describedby={newPasswordHintId}
                     required
                     minLength={12}
                     value={newPassword}
                     onChange={(event) => setNewPassword(event.currentTarget.value)}
                     placeholder="Minimum 12 characters"
-                    className="w-full rounded-md border border-border bg-canvas py-2 pl-3 pr-10 text-sm text-ink placeholder:text-ink-muted/60 focus:border-sky-accent focus:outline-none"
+                    className="w-full rounded-md border border-border bg-canvas py-2 pl-3 pr-10 text-sm text-ink placeholder:text-ink-muted/60 focus:border-sky-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-accent/40"
                   />
                   <button
                     type="button"
                     aria-label={showPasswords ? "Hide" : "Show"}
+                    aria-pressed={showPasswords}
                     onClick={() => setShowPasswords((prev) => !prev)}
                     className="absolute inset-y-0 right-0 flex items-center px-3 text-ink-muted hover:text-ink transition-colors"
                   >
@@ -305,6 +410,7 @@ export function AccountPage() {
                   </button>
                 </div>
                 <p
+                  id={newPasswordHintId}
                   className={`flex items-center gap-1.5 text-xs ${
                     passwordMeetsLength ? "text-teal-accent" : "text-ink-muted"
                   }`}
@@ -329,14 +435,18 @@ export function AccountPage() {
                   type={showPasswords ? "text" : "password"}
                   name="confirm_new_password"
                   autoComplete="new-password"
+                  aria-invalid={passwordsMismatch ? "true" : undefined}
+                  aria-describedby={passwordsMismatch ? confirmPasswordErrorId : undefined}
                   required
                   value={confirmPassword}
                   onChange={(event) => setConfirmPassword(event.currentTarget.value)}
                   placeholder="Re-enter your new password"
-                  className="w-full rounded-md border border-border bg-canvas px-3 py-2 text-sm text-ink placeholder:text-ink-muted/60 focus:border-sky-accent focus:outline-none"
+                  className="w-full rounded-md border border-border bg-canvas px-3 py-2 text-sm text-ink placeholder:text-ink-muted/60 focus:border-sky-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-accent/40"
                 />
                 {passwordsMismatch ? (
-                  <p className="text-xs text-amber-accent">Passwords do not match</p>
+                  <p id={confirmPasswordErrorId} className="text-xs text-amber-accent">
+                    Passwords do not match
+                  </p>
                 ) : passwordsMatch ? (
                   <p className="text-xs text-teal-accent">Passwords match</p>
                 ) : null}
@@ -344,10 +454,16 @@ export function AccountPage() {
 
               <button
                 type="submit"
-                disabled={changePasswordMutation.isPending}
+                disabled={passwordPending}
                 className="inline-flex w-full items-center justify-center rounded-md bg-sky-accent px-4 py-2 text-sm font-medium text-canvas hover:bg-sky-accent/90 disabled:opacity-60 transition-colors"
               >
-                {changePasswordMutation.isPending ? "Updating password..." : "Update password"}
+                {hasPassword
+                  ? passwordPending
+                    ? "Updating password..."
+                    : "Update password"
+                  : passwordPending
+                    ? "Setting password..."
+                    : "Set password"}
               </button>
             </form>
           </section>
@@ -461,7 +577,139 @@ export function AccountPage() {
             </div>
           </section>
         </div>
+
+        <section className="rounded-xl border border-coral-accent/30 bg-surface p-6">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-coral-accent/40 bg-coral-accent/10 text-coral-accent">
+                <Trash2 className="h-4 w-4" aria-hidden="true" />
+              </span>
+              <div className="space-y-1">
+                <h2 className="text-base font-semibold text-ink">Danger zone</h2>
+                <p className="max-w-xl text-xs leading-relaxed text-ink-muted">
+                  Permanently delete your account, all projects, uploaded tracks, photos, server
+                  renders, Activity Library data, and connected OAuth tokens. This action cannot be
+                  undone.
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={openDeleteDialog}
+              className="inline-flex items-center gap-1.5 rounded-md border border-coral-accent/50 bg-coral-accent/15 px-3.5 py-2 text-xs font-medium text-coral-accent hover:bg-coral-accent/25 transition-colors"
+            >
+              <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Delete account</span>
+            </button>
+          </div>
+        </section>
       </main>
+
+      <dialog
+        ref={deleteDialogRef}
+        aria-labelledby={deleteDialogTitleId}
+        onCancel={(event) => {
+          event.preventDefault();
+          if (!deleteAccountMutation.isPending) {
+            closeDeleteDialog();
+          }
+        }}
+        onClose={() => {
+          setDeleteDialogOpen(false);
+          setDeleteError(null);
+        }}
+        className="m-auto w-[calc(100%-2rem)] max-w-md rounded-xl border border-border bg-surface p-0 text-ink shadow-2xl backdrop:bg-canvas/80 backdrop:backdrop-blur-xs"
+      >
+        {deleteDialogOpen ? (
+          <form onSubmit={handleDeleteAccountSubmit} className="space-y-4 p-6">
+            <div className="space-y-1.5">
+              <h2 id={deleteDialogTitleId} className="text-lg font-semibold text-ink">
+                Delete your account?
+              </h2>
+              <p className="text-xs leading-relaxed text-ink-muted">
+                This permanently removes your account, projects, tracks, photos, renders, and
+                disconnects Strava. None of your data can be recovered afterward.
+              </p>
+            </div>
+
+            {deleteError ? (
+              <div
+                role="alert"
+                className="flex items-start gap-2 rounded-md border border-amber-accent/40 bg-amber-accent/10 px-3 py-2.5 text-xs text-ink"
+              >
+                <AlertCircle
+                  className="mt-0.5 h-4 w-4 shrink-0 text-amber-accent"
+                  aria-hidden="true"
+                />
+                <span>{deleteError}</span>
+              </div>
+            ) : null}
+
+            {hasPassword ? (
+              <div className="space-y-1.5">
+                <label
+                  htmlFor={deleteConfirmInputId}
+                  className="block text-xs font-medium text-ink-muted"
+                >
+                  Confirm with current password
+                </label>
+                <input
+                  id={deleteConfirmInputId}
+                  type="password"
+                  name="delete_current_password"
+                  autoComplete="current-password"
+                  required
+                  value={deletePassword}
+                  onChange={(event) => setDeletePassword(event.currentTarget.value)}
+                  placeholder="Enter your current password"
+                  className="w-full rounded-md border border-border bg-canvas px-3 py-2 text-sm text-ink placeholder:text-ink-muted/60 focus:border-coral-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-coral-accent/40"
+                />
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                <label
+                  htmlFor={deleteConfirmInputId}
+                  className="block text-xs font-medium text-ink-muted"
+                >
+                  Type DELETE to confirm
+                </label>
+                <input
+                  id={deleteConfirmInputId}
+                  type="text"
+                  name="delete_confirmation"
+                  autoComplete="off"
+                  spellCheck={false}
+                  required
+                  value={deleteConfirmation}
+                  onChange={(event) => setDeleteConfirmation(event.currentTarget.value)}
+                  placeholder="DELETE"
+                  className="w-full rounded-md border border-border bg-canvas px-3 py-2 text-sm text-ink placeholder:text-ink-muted/60 focus:border-coral-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-coral-accent/40"
+                />
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2.5 pt-2">
+              <button
+                ref={cancelDeleteButtonRef}
+                type="button"
+                disabled={deleteAccountMutation.isPending}
+                onClick={closeDeleteDialog}
+                className="rounded-md border border-border bg-elevated px-3.5 py-2 text-xs font-medium text-ink hover:border-sky-accent/50 disabled:opacity-60 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={deleteAccountMutation.isPending}
+                className="inline-flex items-center gap-1.5 rounded-md bg-coral-accent px-3.5 py-2 text-xs font-semibold text-canvas hover:bg-coral-accent/90 disabled:opacity-60 transition-colors"
+              >
+                {deleteAccountMutation.isPending ? "Deleting..." : "Permanently delete account"}
+              </button>
+            </div>
+          </form>
+        ) : null}
+      </dialog>
     </div>
   );
 }
