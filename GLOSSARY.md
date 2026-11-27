@@ -68,3 +68,9 @@ _Avoid_: Invite code, promo token, coupon
 **Credit Ledger**:
 An append-only record of all Render Credit grants, debits, refunds, and manual adjustments from which a user's balance is derived.
 _Avoid_: Credit counter, wallet table, balance log
+
+## Map
+
+**Marked Trail**:
+A hiking, cycling or MTB trail that is signposted in the terrain and recorded in OpenStreetMap as a named or numbered route, shown on the map as context for a trip.
+_Avoid_: Outdoor Trail, route (reserved for the user's own track), path
