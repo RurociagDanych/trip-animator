@@ -23,6 +23,10 @@ infra/terraform/
 - **Private S3 access**: S3 Gateway VPC Endpoint routes bucket traffic privately at zero data-processing cost; both S3 buckets enforce `BucketOwnerEnforced`, `PublicAccessBlock`, TLS-only transport, and KMS encryption.
 - **Least-privilege IAM**: Dedicated task roles per workload (`api`, `worker`, `migrate`, `reap`, `dbt`) and scoped `iam:PassRole` / `ecs:RunTask` permissions for EventBridge Scheduler.
 
+## Standalone Remote Render Root
+
+`standalone-remote-render/` is a separate root, deployed in `us-east-1`, that holds the render Lambdas, the Step Functions state machine and the Marked Trails storage: a private S3 bucket, a CloudFront distribution with origin access control and a CORS response headers policy, and the IAM policy of the Airflow publisher. `marked_trails_app_origins` has no default and must be set in its tfvars. See [Marked Trails on AWS](../../docs/OPERATIONS.md#marked-trails-on-aws) for the apply steps and for adding the CloudFront host to `map_tile_allowlist` and `CADDY_TILE_CSP_ORIGINS`.
+
 ## Quick Validation
 
 ```bash
@@ -32,6 +36,9 @@ cd infra/terraform/environments/dev
 terraform init -backend=false && terraform validate
 
 cd ../prod
+terraform init -backend=false && terraform validate
+
+cd ../../standalone-remote-render
 terraform init -backend=false && terraform validate
 ```
 

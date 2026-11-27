@@ -22,3 +22,23 @@ output "dispatcher_policy_arn" {
   value       = aws_iam_policy.dispatcher.arn
   description = "Least-privilege IAM policy ARN to attach to the VPS dispatcher user or role."
 }
+
+output "marked_trails_bucket_name" {
+  value       = aws_s3_bucket.marked_trails.bucket
+  description = "Marked Trails bucket name for MARKED_TRAILS_S3_BUCKET."
+}
+
+output "marked_trails_base_url" {
+  value       = "https://${aws_cloudfront_distribution.marked_trails.domain_name}/${local.marked_trails_prefix}"
+  description = "Marked Trails base URL for MARKED_TRAILS_BASE_URL; it serves current.json."
+}
+
+output "marked_trails_cloudfront_origin" {
+  value       = "https://${aws_cloudfront_distribution.marked_trails.domain_name}"
+  description = "Origin to add to MAP_TILE_ALLOWLIST and CADDY_TILE_CSP_ORIGINS."
+}
+
+output "marked_trails_publisher_policy_arn" {
+  value       = aws_iam_policy.marked_trails_publisher.arn
+  description = "IAM policy ARN to attach to the Airflow Marked Trails publisher user or role."
+}

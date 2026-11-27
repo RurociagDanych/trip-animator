@@ -8,3 +8,5 @@ sfn_max_concurrency            = 8
 staging_retention_days = 3
 map_tile_allowlist     = "https://tiles.openfreemap.org"
 render_callback_secret = ""
+marked_trails_app_origins = ["https://trips.example.com"]
+marked_trails_prefix      = "marked-trails"
