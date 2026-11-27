@@ -80,14 +80,14 @@ class FakeS3Client:
         self.put_calls.append(kwargs)
 
     def get_object(self, **kwargs: Any) -> dict[str, Any]:
-        key = str(kwargs["Key"])
-        if key == "missing-nokey.mp4":
+        name = str(kwargs["Key"])
+        if name == "missing-nokey.mp4":
             raise client_error("NoSuchKey")
-        if key == "missing-404.mp4":
+        if name == "missing-404.mp4":
             raise client_error("SomethingElse", http_status=404)
-        if key == "boom-500.mp4":
+        if name == "boom-500.mp4":
             raise client_error("InternalError", http_status=500)
-        if key == "invalid-range.mp4" and "Range" in kwargs:
+        if name == "invalid-range.mp4" and "Range" in kwargs:
             raise client_error("InvalidRange", http_status=416)
         data = b"0123456789ABCDEF"
         if "Range" in kwargs:
@@ -100,10 +100,10 @@ class FakeS3Client:
         self.put_calls.append(kwargs)
 
     def head_object(self, **kwargs: Any) -> dict[str, Any]:
-        key = str(kwargs["Key"])
-        if key == "missing-nokey.mp4":
+        name = str(kwargs["Key"])
+        if name == "missing-nokey.mp4":
             raise client_error("404", op="HeadObject")
-        if key == "boom-head.mp4":
+        if name == "boom-head.mp4":
             raise client_error("InternalError", http_status=500, op="HeadObject")
         return {"ContentLength": 16}
 
