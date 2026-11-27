@@ -390,6 +390,7 @@ def create_app(
             "turnstile_site_key": (
                 cfg.turnstile_site_key.strip() if cfg.turnstile_enabled else None
             ),
+            "google_auth_enabled": cfg.google_auth_enabled,
             "strava_configured": bool(cfg.strava_client_id),
             "google_photos_configured": bool(cfg.google_client_id and cfg.google_client_secret),
         }

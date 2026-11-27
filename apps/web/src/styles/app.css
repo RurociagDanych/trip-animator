@@ -40,6 +40,15 @@
   textarea {
     outline-color: var(--color-sky-accent);
   }
+
+  dialog:modal {
+    overscroll-behavior: contain;
+  }
+
+  dialog::backdrop {
+    overflow: hidden;
+    overscroll-behavior: contain;
+  }
 }
 
 .tabular-telemetry {

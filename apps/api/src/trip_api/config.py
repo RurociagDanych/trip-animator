@@ -81,6 +81,10 @@ class Settings(BaseSettings):
     strava_webhook_subscription_id: int | None = Field(default=None, ge=1)
     strava_api_base_url: str = "https://www.strava.com"
 
+    google_auth_client_id: str = ""
+    google_auth_client_secret: str = ""
+    google_auth_redirect_uri: str = "http://localhost:5173/auth/google/callback"
+
     google_client_id: str = ""
     google_client_secret: str = ""
     google_redirect_uri: str = "http://localhost:5173/google-photos/callback"
@@ -119,6 +123,8 @@ class Settings(BaseSettings):
     rate_limit_forgot_password_window_s: int = 60
     rate_limit_reset_password_max: int = 10
     rate_limit_reset_password_window_s: int = 60
+    rate_limit_google_auth_max: int = 20
+    rate_limit_google_auth_window_s: int = 60
     rate_limit_gpx_max: int = 20
     rate_limit_gpx_window_s: int = 60
     rate_limit_photo_max: int = 60
@@ -143,6 +149,14 @@ class Settings(BaseSettings):
         default="https://tiles.openfreemap.org",
         alias="MAP_TILE_ALLOWLIST",
     )
+
+    @property
+    def google_auth_enabled(self) -> bool:
+        return bool(self.google_auth_client_id.strip() and self.google_auth_client_secret.strip())
+
+    @property
+    def google_auth_allowed_hosts(self) -> frozenset[str]:
+        return frozenset({"oauth2.googleapis.com", "www.googleapis.com"})
 
     @property
     def turnstile_enabled(self) -> bool:
@@ -201,6 +215,16 @@ class Settings(BaseSettings):
                 "TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY must both be set or both omitted"
             )
 
+        has_google_auth_id = bool(self.google_auth_client_id.strip())
+        has_google_auth_secret = bool(self.google_auth_client_secret.strip())
+        if has_google_auth_id != has_google_auth_secret:
+            raise ValueError(
+                "GOOGLE_AUTH_CLIENT_ID and GOOGLE_AUTH_CLIENT_SECRET must both be set "
+                "or both omitted"
+            )
+        if has_google_auth_id and not self.google_auth_redirect_uri.strip():
+            raise ValueError("GOOGLE_AUTH_REDIRECT_URI is required when Google sign-in is enabled")
+
         if self.app_env == "production":
             if self.dev_auth_enabled:
                 raise ValueError("DEV_AUTH_ENABLED must be false in production")
@@ -208,6 +232,10 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "SMTP_HOST is required in production when REGISTRATION_ENABLED is true"
                 )
+            if self.google_auth_enabled and not self.google_auth_redirect_uri.strip().startswith(
+                "https://"
+            ):
+                raise ValueError("GOOGLE_AUTH_REDIRECT_URI must use https:// in production")
             if self.session_secret.startswith("dev-only-"):
                 raise ValueError("Default development SESSION_SECRET is forbidden in production")
             if self.token_encryption_key == _PLACEHOLDER_TOKEN_KEY:

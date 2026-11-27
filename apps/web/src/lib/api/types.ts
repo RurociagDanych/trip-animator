@@ -133,6 +133,7 @@ export interface PublicConfigOut {
   dev_auth_enabled: boolean;
   registration_enabled?: boolean;
   turnstile_site_key?: string | null;
+  google_auth_enabled?: boolean;
   strava_configured: boolean;
   google_photos_configured?: boolean;
 }
@@ -180,6 +181,24 @@ export interface ChangePasswordResponse {
   revoked_sessions_count: number;
 }
 
+export interface SetPasswordRequest {
+  new_password: string;
+}
+
+export interface DeleteAccountRequest {
+  current_password?: string;
+  confirmation?: string;
+}
+
+export interface GoogleAuthStartOut {
+  authorize_url: string;
+}
+
+export interface GoogleAuthCallbackRequest {
+  code: string;
+  state: string;
+}
+
 export interface AuthSessionOut {
   id: string;
   created_at: string;
@@ -197,6 +216,7 @@ export interface UserOut {
   email: string;
   display_name: string;
   strava_connected: boolean;
+  has_password?: boolean;
 }
 
 export interface SessionInfoOut {

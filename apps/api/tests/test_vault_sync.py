@@ -1,5 +1,3 @@
-"""Verify activity catalog synchronization, provenance and lifecycle behavior."""
-
 from __future__ import annotations
 
 import hashlib
@@ -160,9 +158,10 @@ def test_alembic_vault_sqlite_upgrade_downgrade_roundtrip(
         assert {"render_backend", "external_execution_id", "remote_dispatched_at"} <= {
             c["name"] for c in insp.get_columns("render_jobs")
         }
+        assert "user_identities" in set(insp.get_table_names())
         with engine.connect() as conn:
             ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-            assert ver == "0013_render_job_remote_backend"
+            assert ver == "0014_user_identities_nullable_password"
     finally:
         engine.dispose()
 
@@ -286,7 +285,6 @@ def test_full_backfill_resumable_cursor_live_progress_and_incremental_sync(
 
     h.app.state.sync_http_client_factory = sync_factory
 
-    # HTTP only durably enqueues; the shared processor performs provider I/O.
     resp = client.post(
         "/api/v1/vault/sync/strava",
         json={"mode": "full_backfill", "inline_first_page": True},
@@ -357,8 +355,6 @@ def test_full_backfill_resumable_cursor_live_progress_and_incremental_sync(
             == []
         )
 
-    # Exercise the actual provider ingestion -> catalog query boundary, not
-    # only fixtures that prepopulate the catalog's measurement provenance.
     catalog = client.get("/api/v1/vault/activities", params={"min_distance_m": 1, "limit": 1})
     assert catalog.status_code == 200, catalog.text
     catalog_body = catalog.json()
@@ -848,7 +844,6 @@ def test_webhook_decision_1a_vault_upsert_hydrated_stage_update_and_delete(
         assert va_8002.id == canonical_before_refresh.id
         assert va_8002.elev_high_m == 1120.0
 
-        # Because 8001 (earlier) already visited those exact tiles, 8002 should have 0 new tiles
         assert va_8002.new_tiles_z14_count == 0
 
     with h.session_factory() as db:
@@ -949,8 +944,6 @@ def test_stage_upload_split_mirroring_and_backfill_stages(
         assert st_p2.vault_activity_id == original_va_id
         st_p1.name = "Edited Project Segment"
         st_p1.distance_m = 123.0
-        # A Strava identifier alone does not make project-derived geometry
-        # trusted provider data; replay/mirroring must preserve the canonical.
         st_p1.strava_activity_id = 123456
         project = db.get(Project, uuid.UUID(proj_id))
         assert project is not None
@@ -985,8 +978,6 @@ def test_stage_upload_split_mirroring_and_backfill_stages(
     assert bf1_data["skipped_stages"] == 2
     assert bf1_data["failed_stages"] == 0
 
-    # Replay rewrites project-stage metadata, but must retain split exclusion
-    # provenance so a later backfill cannot promote either segment.
     with h.session_factory() as db:
         split_stages = list(
             db.scalars(select(Stage).where(Stage.project_id == uuid.UUID(proj_id))).all()
@@ -1027,8 +1018,6 @@ def test_stage_upload_split_mirroring_and_backfill_stages(
     assert bob_client.get("/api/v1/vault/sync/status").json()["total_activities"] == 0
     assert alice_client.get("/api/v1/vault/sync/status").json()["total_activities"] == 1
 
-    # If a legacy split loses its canonical row/link, backfill must not
-    # reinterpret either project segment as an independent source activity.
     with h.session_factory() as db:
         db.get(Stage, stage1_id).vault_activity_id = None
         db.get(Stage, part2_id).vault_activity_id = None
@@ -1208,7 +1197,6 @@ def test_catalog_first_mirror_attaches_only_eligible_local_strava_source(
             catalog.tile_count_z14,
         ) == canonical_snapshot
 
-        # Never replace an existing reusable source pointer.
         preserved_source_id = local_stage.id
         other_catalog = upsert_strava_activity_to_vault(
             db,
@@ -1244,7 +1232,6 @@ def test_catalog_first_mirror_attaches_only_eligible_local_strava_source(
         mirror_stage_to_vault(db, user_id=user.id, stage=second_stage)
         assert other_catalog.source_stage_id == preserved_source_id
 
-        # A disconnected catalog row remains suppressed and is not attached.
         disconnected = upsert_strava_activity_to_vault(
             db,
             user_id=user.id,
@@ -1423,8 +1410,6 @@ def test_vault_sync_cli_worker_and_security_ssrf_csrf(
     c_ssrf, csrf_ssrf = h_ssrf.login_client("ssrf-vault@example.com")
 
     assert c_ssrf.post("/api/v1/vault/sync/strava", json={"mode": "incremental"}).status_code == 403
-    # Enqueue performs no provider request, so outbound URL validation is deferred
-    # to the worker and this request remains a durable queue operation.
     ssrf_resp = c_ssrf.post(
         "/api/v1/vault/sync/strava",
         json={"mode": "incremental"},

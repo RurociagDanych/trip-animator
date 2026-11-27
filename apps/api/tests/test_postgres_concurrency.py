@@ -1,5 +1,3 @@
-"""Exercise migrations and transactional boundaries against isolated PostgreSQL databases."""
-
 from __future__ import annotations
 
 import base64
@@ -290,9 +288,10 @@ def test_postgres_alembic_upgrade_downgrade_upgrade_roundtrip(pg_temp_db_url: st
         assert {"render_backend", "external_execution_id", "remote_dispatched_at"} <= {
             c["name"] for c in insp_reup.get_columns("render_jobs")
         }
+        assert "user_identities" in set(insp_reup.get_table_names())
         with engine_reup.connect() as conn:
             ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-            assert ver == "0013_render_job_remote_backend"
+            assert ver == "0014_user_identities_nullable_password"
     finally:
         engine_reup.dispose()
 
@@ -522,7 +521,6 @@ def test_postgres_concurrent_render_idempotency_and_project_delete_audit_set_nul
         assert db.scalar(select(func.count()).select_from(RenderJob)) == 0
         audits = db.scalars(select(AuditEvent)).all()
         assert any(a.event_type == "project.deleted" and a.project_id is None for a in audits)
-        # Prior project events had FK ON DELETE SET NULL triggered by PostgreSQL
         assert any(a.event_type == "project.created" and a.project_id is None for a in audits)
 
 
@@ -598,7 +596,6 @@ def test_postgres_concurrent_photo_upload_quota_for_update(
         )
         assert total_photos == MAX_PHOTOS_PER_PROJECT
 
-    # Rejected uploads rolled back their stored blobs; only the single winner's 2 WebP files remain
     uploaded_webp_files = list(Path(store.root_dir).rglob("*.webp"))
     assert len(uploaded_webp_files) == 2
 

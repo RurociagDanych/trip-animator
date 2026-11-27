@@ -1,5 +1,3 @@
-"""SQLAlchemy 2.0 OLTP database models and engine configuration."""
-
 from __future__ import annotations
 
 import uuid
@@ -40,7 +38,7 @@ JSONVariant = JSON().with_variant(JSONB(), "postgresql")
 
 
 class Base(DeclarativeBase):
-    """Declarative metadata base for Alembic migrations and OLTP models."""
+    pass
 
 
 class User(Base):
@@ -49,11 +47,31 @@ class User(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False, index=True)
     display_name: Mapped[str] = mapped_column(String(120), default="", nullable=False)
-    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     email_verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class UserIdentity(Base):
+    __tablename__ = "user_identities"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "provider_subject",
+            name="uq_user_identities_provider_subject",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider_subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -236,8 +254,6 @@ class Stage(Base):
 
 
 class ProjectPhoto(Base):
-    """Store project-scoped images and their deduplication fingerprints."""
-
     __tablename__ = "project_photos"
     __table_args__ = (
         Index("ix_project_photos_project_id_content_hash", "project_id", "content_hash"),

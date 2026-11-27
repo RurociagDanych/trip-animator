@@ -1,5 +1,5 @@
 import type { ActivityType } from "../../components/icons";
-import { apiClient, clearCsrfToken, generateIdempotencyKey } from "./client";
+import { apiClient, apiRequest, clearCsrfToken, generateIdempotencyKey } from "./client";
 import type {
   AnalyticsHeatmapOut,
   AuditEventOut,
@@ -7,7 +7,10 @@ import type {
   CareerAnalyticsOut,
   ChangePasswordRequest,
   ChangePasswordResponse,
+  DeleteAccountRequest,
   ForgotPasswordResponse,
+  GoogleAuthCallbackRequest,
+  GoogleAuthStartOut,
   HealthResponse,
   LodLevel,
   LogoutAllResponse,
@@ -33,6 +36,7 @@ import type {
   ResetPasswordRequest,
   ResetPasswordResponse,
   SessionInfoOut,
+  SetPasswordRequest,
   StageAutoOrganizeOut,
   StageAutoOrganizeRequest,
   StageOut,
@@ -143,6 +147,19 @@ export const authApi = {
   },
   changePassword(payload: ChangePasswordRequest): Promise<ChangePasswordResponse> {
     return apiClient.post<ChangePasswordResponse>("/api/v1/auth/change-password", payload);
+  },
+  setPassword(payload: SetPasswordRequest): Promise<ChangePasswordResponse> {
+    return apiClient.post<ChangePasswordResponse>("/api/v1/auth/set-password", payload);
+  },
+  googleStart(): Promise<GoogleAuthStartOut> {
+    return apiClient.get<GoogleAuthStartOut>("/api/v1/auth/google/start");
+  },
+  googleCallback(payload: GoogleAuthCallbackRequest): Promise<SessionInfoOut> {
+    return apiClient.post<SessionInfoOut>("/api/v1/auth/google/callback", payload);
+  },
+  async deleteAccount(payload: DeleteAccountRequest): Promise<void> {
+    await apiRequest<void>("/api/v1/auth/me", { method: "DELETE", body: payload });
+    clearCsrfToken();
   },
   listSessions(signal?: AbortSignal): Promise<AuthSessionOut[]> {
     return apiClient.get<AuthSessionOut[]>("/api/v1/auth/sessions", signal);

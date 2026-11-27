@@ -55,6 +55,7 @@ export function LoginPage() {
   const devAuthEnabled = publicConfigQuery.data?.dev_auth_enabled === true;
   const registrationEnabled = publicConfigQuery.data?.registration_enabled === true;
   const turnstileSiteKey = publicConfigQuery.data?.turnstile_site_key ?? null;
+  const googleAuthEnabled = publicConfigQuery.data?.google_auth_enabled === true;
   const activeMode: AuthMode = registrationEnabled ? mode : "signin";
   const passwordMeetsLength = password.length >= 12;
   const passwordsMatch = confirmPassword.length > 0 && password === confirmPassword;
@@ -169,6 +170,23 @@ export function LoginPage() {
         setErrorMessage("Unable to reach authentication service.");
       }
     } finally {
+      setPending(false);
+    }
+  }
+
+  async function handleGoogleSignIn() {
+    setPending(true);
+    setErrorMessage(null);
+
+    try {
+      const { authorize_url } = await authApi.googleStart();
+      window.location.assign(authorize_url);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        setErrorMessage(error.message);
+      } else {
+        setErrorMessage("Google sign-in is currently unavailable.");
+      }
       setPending(false);
     }
   }
@@ -374,6 +392,44 @@ export function LoginPage() {
                     aria-hidden="true"
                   />
                   <span>{resendFeedback}</span>
+                </div>
+              ) : null}
+
+              {googleAuthEnabled ? (
+                <div className="space-y-4">
+                  <button
+                    type="button"
+                    disabled={pending}
+                    onClick={() => void handleGoogleSignIn()}
+                    className="inline-flex w-full items-center justify-center gap-2.5 rounded-md border border-border bg-surface px-4 py-2 text-sm font-medium text-ink hover:border-sky-accent/50 hover:bg-elevated disabled:opacity-60 transition-colors"
+                  >
+                    <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0" aria-hidden="true">
+                      <path
+                        fill="#4285F4"
+                        d="M23.49 12.27c0-.79-.07-1.55-.2-2.27H12v4.3h6.44a5.5 5.5 0 0 1-2.39 3.61v3h3.87c2.26-2.08 3.57-5.15 3.57-8.64Z"
+                      />
+                      <path
+                        fill="#34A853"
+                        d="M12 24c3.24 0 5.95-1.07 7.93-2.91l-3.87-3c-1.07.72-2.45 1.15-4.06 1.15-3.12 0-5.77-2.11-6.72-4.95H1.28v3.1A12 12 0 0 0 12 24Z"
+                      />
+                      <path
+                        fill="#FBBC05"
+                        d="M5.28 14.29a7.21 7.21 0 0 1 0-4.58v-3.1H1.28a12 12 0 0 0 0 10.78l4-3.1Z"
+                      />
+                      <path
+                        fill="#EA4335"
+                        d="M12 4.76c1.76 0 3.34.61 4.58 1.8l3.44-3.44C17.94 1.19 15.24 0 12 0A12 12 0 0 0 1.28 6.61l4 3.1c.95-2.84 3.6-4.95 6.72-4.95Z"
+                      />
+                    </svg>
+                    <span>Continue with Google</span>
+                  </button>
+
+                  <div className="relative flex items-center justify-center">
+                    <div className="w-full border-t border-border" />
+                    <span className="absolute bg-canvas px-2.5 text-[11px] uppercase tracking-wider text-ink-muted">
+                      or
+                    </span>
+                  </div>
                 </div>
               ) : null}
 
