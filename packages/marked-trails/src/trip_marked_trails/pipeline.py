@@ -210,7 +210,7 @@ def run_build(
     deleted after filtering. A given `extract_path` is read in place and never deleted.
     The filter must not omit referenced objects, so osmium reads the input from disk. After a
     failure only the files of the caller remain: no PMTiles output, count file or temporary
-    file is left in `work_dir`.
+    file is left in `work_dir`. Files of a killed earlier run are removed at the start.
     """
     validate_region(region)
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -218,6 +218,10 @@ def run_build(
     filtered = work_dir / "marked-trails-filtered.osm.pbf"
     owns_extract = extract_path is None
     extract = extract_path or work_dir / "extract.osm.pbf"
+    if owns_extract:
+        extract.unlink(missing_ok=True)
+    filtered.unlink(missing_ok=True)
+    remove_build_scratch(work_dir, keep_outputs=False)
     succeeded = False
     try:
         if owns_extract:
@@ -313,14 +317,6 @@ def _read_marked_trail_count(count_file: Path) -> int:
 
 def _osm_data_date(tools: BuildTools, extract: Path, runner: ToolRunner) -> str | None:
     return _header_option(tools, extract, runner, "osmosis_replication_timestamp")
-
-
-def read_replication_sequence(extract: Path, tools: BuildTools, runner: ToolRunner) -> str | None:
-    """Return the replication sequence number in the header of `extract`, if it has one.
-
-    Two extracts with the same number hold the same snapshot of OpenStreetMap.
-    """
-    return _header_option(tools, extract, runner, "osmosis_replication_sequence_number")
 
 
 def _header_option(tools: BuildTools, extract: Path, runner: ToolRunner, option: str) -> str | None:

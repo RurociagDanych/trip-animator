@@ -29,5 +29,11 @@ def test_airflow_image_installs_the_tools_from_debian_and_checks_them() -> None:
     assert install
     for token in ("osmium-tool", "openjdk-25-jre-headless"):
         assert token in install.group(0)
-    for check in ("osmium --version", "java -version", "prlimit --version"):
+    for check in (
+        "osmium --version",
+        "java -version",
+        "prlimit --version",
+        "setpriv --version",
+        "taskset --version",
+    ):
         assert f"&& {check}" in install.group(0)

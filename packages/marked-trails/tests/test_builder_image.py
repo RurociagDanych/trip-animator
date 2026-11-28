@@ -274,24 +274,23 @@ RELATION = (
 )
 
 
-def make_pbf(name, nodes, ways, relation_version, sequence):
+def make_pbf(name, nodes, ways, relation_version, sequence, day):
     body = "".join(NODE.format(n) for n in nodes) + "".join(WAY.format(*w) for w in ways)
     xml = HEADER + body + RELATION.format(relation_version) + "</osm>"
     Path(f"/tmp/{name}.osm").write_text(xml)
     subprocess.run(
         ["osmium", "cat", "--overwrite", f"/tmp/{name}.osm", "-o", f"/tmp/{name}.osm.pbf",
          f"--output-header=osmosis_replication_sequence_number={sequence}",
-         "--output-header=osmosis_replication_timestamp=2026-01-0%dT00:00:00Z" % (sequence - 4)],
+         "--output-header=osmosis_replication_timestamp=2026-01-0%dT00:00:00Z" % day],
         check=True,
     )
 
 
 FIRST_HALF = ([1, 2, 3], [(10, 1, 2), (11, 2, 3)])
 SECOND_HALF = ([2, 3, 4], [(11, 2, 3), (12, 3, 4)])
-make_pbf("one-5-v3", *FIRST_HALF, 3, 5)
-make_pbf("two-5-v3", *SECOND_HALF, 3, 5)
-make_pbf("one-6-v4", *FIRST_HALF, 4, 6)
-make_pbf("two-6-v4", *SECOND_HALF, 4, 6)
+make_pbf("one-5-v3", *FIRST_HALF, 3, 5, 1)
+make_pbf("two-6-v3", *SECOND_HALF, 3, 6, 1)
+make_pbf("two-6-v4", *SECOND_HALF, 4, 6, 2)
 
 
 class CapturingRunner(SubprocessToolRunner):
@@ -299,7 +298,7 @@ class CapturingRunner(SubprocessToolRunner):
 
     def run(self, args):
         super().run(args)
-        if args[1] == "merge":
+        if args[1] == "time-filter":
             out = args[args.index("-o") + 1]
             opl = subprocess.run(["osmium", "cat", "-f", "opl", "-o", "-", out],
                                  capture_output=True, text=True, check=True).stdout
@@ -336,16 +335,17 @@ def scenario(name, serves):
 
 
 print(json.dumps({
-    "same": scenario("same", {"europe/one": ["one-5-v3"], "europe/two": ["two-5-v3"]}),
-    "refreshed": scenario(
-        "refreshed", {"europe/one": ["one-5-v3", "one-6-v4"], "europe/two": ["two-6-v4"]}
+    "same_timestamp": scenario(
+        "same_timestamp", {"europe/one": ["one-5-v3"], "europe/two": ["two-6-v3"]}
     ),
-    "stuck": scenario("stuck", {"europe/one": ["one-5-v3"], "europe/two": ["two-6-v4"]}),
+    "newer_relation": scenario(
+        "newer_relation", {"europe/one": ["one-5-v3"], "europe/two": ["two-6-v4"]}
+    ),
 }))
 """
 
 
-def test_builder_image_merges_split_relations_of_one_snapshot_and_rejects_mixed_snapshots(
+def test_builder_image_keeps_the_newest_relation_across_different_sequence_numbers(
     tmp_path: Path, builder_image: str
 ) -> None:
     work = tmp_path / "work"
@@ -380,22 +380,17 @@ def test_builder_image_merges_split_relations_of_one_snapshot_and_rejects_mixed_
     assert result.returncode == 0, result.stderr[-4000:]
 
     summary = json.loads(result.stdout.strip().splitlines()[-1])
-    same = summary["same"]
+    same = summary["same_timestamp"]
     assert same["ok"], same
     assert same["downloads"] == {"europe/one": 1, "europe/two": 1}
     assert same["merged"] == ["w10 v1", "w11 v1", "w12 v1", "r100 v3"]
     assert same["count"] == 1
     assert same["files"] == ["marked-trails.pmtiles"]
 
-    refreshed = summary["refreshed"]
-    assert refreshed["ok"], refreshed
-    assert refreshed["downloads"] == {"europe/one": 2, "europe/two": 1}
-    assert refreshed["merged"] == ["w10 v1", "w11 v1", "w12 v1", "r100 v4"]
-    assert refreshed["count"] == 1
-    assert refreshed["date"] == "2026-01-02T00:00:00Z"
-
-    stuck = summary["stuck"]
-    assert not stuck["ok"]
-    assert "replication sequence" in stuck["error"]
-    assert stuck["downloads"] == {"europe/one": 2, "europe/two": 1}
-    assert stuck["files"] == []
+    newer = summary["newer_relation"]
+    assert newer["ok"], newer
+    assert newer["downloads"] == {"europe/one": 1, "europe/two": 1}
+    assert newer["merged"] == ["w10 v1", "w11 v1", "w12 v1", "r100 v4"]
+    assert newer["count"] == 1
+    assert newer["date"] == "2026-01-01T00:00:00Z"
+    assert newer["files"] == ["marked-trails.pmtiles"]

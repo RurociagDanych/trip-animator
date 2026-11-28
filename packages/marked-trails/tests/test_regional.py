@@ -215,7 +215,6 @@ class Recorder:
         fail_filter_for: str | None = None,
         fail_download_for: str | None = None,
         fail_planetiler: bool = False,
-        sequences: dict[str, list[str]] | None = None,
     ) -> None:
         self.work_dir = work_dir
         self.events: list[tuple[str, ...]] = []
@@ -228,15 +227,8 @@ class Recorder:
             "europe/germany": "2026-11-25T20:00:00Z",
             "europe/poland": "2026-11-27T01:00:00Z",
         }
-        self.sequence_plan = {
-            "europe/andorra": ["500"],
-            "europe/germany": ["500"],
-            "europe/poland": ["500"],
-            **(sequences or {}),
-        }
         self.download_counts: dict[str, int] = {}
         self._by_extract: dict[str, str] = {}
-        self._sequence_of_extract: dict[str, str | None] = {}
 
     def download(self, region: str, dest: Path) -> None:
         for earlier in self.extracts:
@@ -249,15 +241,11 @@ class Recorder:
         self._by_extract[str(dest)] = region
         count = self.download_counts.get(region, 0)
         self.download_counts[region] = count + 1
-        plan = self.sequence_plan[region]
-        self._sequence_of_extract[str(dest)] = plan[min(count, len(plan) - 1)]
         self.events.append(("download", region))
 
     def capture(self, args: Sequence[str]) -> str:
         assert args[1] == "fileinfo"
         extract = args[-1]
-        if args[3] == "header.option.osmosis_replication_sequence_number":
-            return (self._sequence_of_extract[extract] or "") + "\n"
         assert args[3] == "header.option.osmosis_replication_timestamp"
         return self.dates[self._by_extract[extract]] + "\n"
 
@@ -278,7 +266,14 @@ class Recorder:
             assert inputs and all(path.is_file() for path in inputs)
             assert not any(path.exists() for path in self.extracts)
             output.write_bytes(b"".join(path.read_bytes() for path in inputs))
+            assert "--with-history" in args
+            assert output.name.endswith(".osh.pbf")
             self.events.append(("merge", *(path.read_bytes().decode() for path in inputs)))
+        elif command == "time-filter":
+            output, history = Path(args[args.index("-o") + 1]), Path(args[-1])
+            assert history.is_file() and history.name.endswith(".osh.pbf")
+            output.write_bytes(history.read_bytes())
+            self.events.append(("time-filter",))
         else:
             options = dict(a[2:].split("=", 1) for a in args if a.startswith("--") and "=" in a)
             merged = Path(options["osm_path"])
@@ -330,6 +325,7 @@ def test_filtered_files_are_merged_then_built_in_one_planetiler_run(tmp_path: Pa
     )
     assert recorder.events[6:] == [
         ("merge", *merged),
+        ("time-filter",),
         ("planetiler", "".join(merged)),
     ]
     assert artifact.pmtiles_path.read_bytes() == b"PMTiles-fake"
@@ -353,7 +349,7 @@ def test_only_the_final_build_file_is_left_in_the_work_directory(tmp_path: Path)
     assert leftovers == [artifact.pmtiles_path.name]
 
 
-def test_children_with_the_same_replication_sequence_are_built_without_a_second_download(
+def test_extracts_with_different_replication_sequence_numbers_are_built_without_a_second_download(
     tmp_path: Path,
 ) -> None:
     recorder = Recorder(tmp_path / "work")
@@ -367,48 +363,64 @@ def test_children_with_the_same_replication_sequence_are_built_without_a_second_
     }
 
 
-def test_children_older_than_the_newest_are_downloaded_again_once_and_then_built(
-    tmp_path: Path,
+def test_a_date_spread_over_two_days_only_logs_a_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    recorder = Recorder(
-        tmp_path / "work",
-        sequences={"europe/andorra": ["498", "500"], "europe/germany": ["499", "500"]},
-    )
+    recorder = Recorder(tmp_path / "work")
+    recorder.dates["europe/poland"] = "2026-12-01T00:00:00Z"
+
+    with caplog.at_level("INFO", logger="trip_marked_trails.regional"):
+        artifact = regional_build(tmp_path, recorder)
+
+    assert artifact.osm_data_date == "2026-11-25T20:00:00Z"
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "2026-11-25T20:00:00Z" in caplog.text
+    assert "2026-12-01T00:00:00Z" in caplog.text
+
+
+def test_a_date_spread_within_two_days_logs_no_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    recorder = Recorder(tmp_path / "work")
+
+    with caplog.at_level("INFO", logger="trip_marked_trails.regional"):
+        regional_build(tmp_path, recorder)
+
+    assert [r for r in caplog.records if r.levelname == "WARNING"] == []
+    assert "spread" in caplog.text
+
+
+def test_a_child_without_a_date_does_not_fail_the_run(tmp_path: Path) -> None:
+    recorder = Recorder(tmp_path / "work")
+    recorder.dates["europe/germany"] = ""
 
     artifact = regional_build(tmp_path, recorder)
 
-    assert recorder.download_counts == {
-        "europe/andorra": 2,
-        "europe/germany": 2,
-        "europe/poland": 1,
-    }
-    assert [event[0] for event in recorder.events].count("planetiler") == 1
-    assert artifact.pmtiles_path.read_bytes() == b"PMTiles-fake"
-    assert not any(path.exists() for path in recorder.extracts)
+    assert artifact.osm_data_date == "2026-11-26T21:21:01Z"
 
 
-def test_the_run_fails_when_the_sequences_still_differ_after_the_second_download(
-    tmp_path: Path,
-) -> None:
-    recorder = Recorder(tmp_path / "work", sequences={"europe/andorra": ["498"]})
+def test_stale_files_of_a_killed_leaf_run_are_removed_at_the_start(tmp_path: Path) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    stale = [
+        work / "extract.osm.pbf",
+        work / "marked-trails-filtered.osm.pbf",
+        work / "tmp" / "chunk",
+    ]
+    for path in stale:
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(b"x")
 
-    with pytest.raises(BuildToolError, match="replication sequence"):
-        regional_build(tmp_path, recorder)
+    class Failing(Recorder):
+        def download(self, region: str, dest: Path) -> None:
+            assert not any(path.exists() for path in stale)
+            raise BuildToolError("stop")
 
-    assert recorder.download_counts["europe/andorra"] == 2
-    assert recorder.download_counts["europe/poland"] == 1
-    assert all(event[0] not in ("merge", "planetiler") for event in recorder.events)
-    assert list((tmp_path / "work").iterdir()) == []
+    with pytest.raises(BuildToolError, match="stop"):
+        regional_build(tmp_path, Failing(work), region="europe/andorra")
 
-
-def test_a_child_without_a_replication_sequence_fails_the_run(tmp_path: Path) -> None:
-    recorder = Recorder(tmp_path / "work")
-    recorder.sequence_plan["europe/germany"] = [""]
-
-    with pytest.raises(BuildToolError, match="replication sequence"):
-        regional_build(tmp_path, recorder)
-
-    assert list((tmp_path / "work").iterdir()) == []
+    assert list(work.iterdir()) == []
 
 
 def test_failing_leaf_filter_leaves_no_files_in_the_work_directory(tmp_path: Path) -> None:
