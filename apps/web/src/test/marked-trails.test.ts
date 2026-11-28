@@ -1,5 +1,8 @@
 import type { StyleSpecification } from "maplibre-gl";
-import { describe, expect, it } from "vitest";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { renderHook, waitFor } from "@testing-library/react";
+import { createElement, type ReactNode } from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type MapStylePreset,
   type MarkedTrailType,
@@ -18,8 +21,11 @@ import {
 } from "../lib/geo/map-config";
 import {
   buildMarkedTrailsBuild,
+  fetchMarkedTrailsBuild,
+  markedTrailsDataDate,
   parseMarkedTrailsPointer,
   toggleMarkedTrailType,
+  useMarkedTrailsBuildState,
 } from "../lib/geo/marked-trails";
 
 const PRESETS: MapStylePreset[] = [
@@ -453,5 +459,183 @@ describe("Marked Trails render settings", () => {
       marked_trail_types: ["hiking", "skiing"] as unknown as MarkedTrailType[],
     });
     expect(normalized.marked_trail_types).toEqual(["hiking"]);
+  });
+});
+
+describe("Marked Trails style without a published build", () => {
+  it.each(PRESETS)("builds the plain basemap with all three types enabled for %s", (preset) => {
+    const withoutBuild = sanitizeMapStyle(
+      basemapStyle(),
+      preset,
+      resolveMarkedTrailsOverlay(["hiking", "cycling", "mtb"], null),
+    );
+
+    expect(withoutBuild).toEqual(sanitizeMapStyle(basemapStyle(), preset));
+    expect(withoutBuild.layers.some((layer) => layer.id.startsWith("trip-marked-trails"))).toBe(
+      false,
+    );
+    expect(withoutBuild.sources[MARKED_TRAILS_SOURCE_ID]).toBeUndefined();
+  });
+});
+
+describe("Marked Trails data date", () => {
+  const build = (buildId: string, dataDate: string | null) =>
+    buildMarkedTrailsBuild("/t", {
+      current_build_id: buildId,
+      pmtiles_key: `builds/${buildId}/marked-trails.pmtiles`,
+      osm_data_date: dataDate,
+    });
+
+  it("uses the day of osm_data_date", () => {
+    expect(markedTrailsDataDate(build("2026-11-27", "2026-11-26T21:21:00Z"))).toBe("2026-11-26");
+  });
+
+  it("falls back to the build date, ignoring a same-day suffix", () => {
+    expect(markedTrailsDataDate(build("2026-11-27-2", null))).toBe("2026-11-27");
+  });
+
+  it("is null without a build or a usable date", () => {
+    expect(markedTrailsDataDate(null)).toBeNull();
+    expect(markedTrailsDataDate(build("manual", "not a date"))).toBeNull();
+  });
+});
+
+describe("Marked Trails build lookup", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function stubPointerResponse(response: Response) {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
+  }
+
+  it.each([403, 404])("reports no build for status %i", async (status) => {
+    stubPointerResponse(new Response("{}", { status }));
+    await expect(fetchMarkedTrailsBuild("/t")).resolves.toBeNull();
+  });
+
+  it("reports no build for an invalid or unreadable pointer", async () => {
+    stubPointerResponse(new Response('{"current_build_id":"x"}', { status: 200 }));
+    await expect(fetchMarkedTrailsBuild("/t")).resolves.toBeNull();
+    stubPointerResponse(new Response("<html>", { status: 200 }));
+    await expect(fetchMarkedTrailsBuild("/t")).resolves.toBeNull();
+  });
+
+  it("returns the build for a valid pointer", async () => {
+    stubPointerResponse(
+      new Response(
+        JSON.stringify({
+          current_build_id: "2026-11-27",
+          pmtiles_key: "builds/2026-11-27/marked-trails.pmtiles",
+          osm_data_date: "2026-11-26T21:21:00Z",
+        }),
+        { status: 200 },
+      ),
+    );
+    await expect(fetchMarkedTrailsBuild("/t")).resolves.toMatchObject({ buildId: "2026-11-27" });
+  });
+});
+
+describe("Marked Trails build state", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function renderState(baseUrl: string | undefined) {
+    const queryClient = new QueryClient();
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: queryClient }, children);
+    return renderHook(() => useMarkedTrailsBuildState(baseUrl), { wrapper });
+  }
+
+  it("is not configured and sends no request without a base URL", () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    for (const baseUrl of [undefined, ""]) {
+      const { result } = renderState(baseUrl);
+      expect(result.current).toEqual({
+        availability: "not-configured",
+        build: null,
+      });
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("is loading until the pointer answers", async () => {
+    vi.spyOn(globalThis, "fetch").mockReturnValue(
+      new Promise<Response>(() => {}),
+    );
+    const { result } = renderState("/t");
+    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalled());
+    expect(result.current).toEqual({ availability: "loading", build: null });
+  });
+
+  it("is unavailable without a retry when the pointer is missing", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => new Response("{}", { status: 404 }));
+    const { result } = renderState("/t");
+    await waitFor(() =>
+      expect(result.current.availability).toBe("unavailable"),
+    );
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [
+      "a rejected request",
+      () => Promise.reject(new TypeError("Failed to fetch")),
+    ],
+    ["a 500 answer", async () => new Response("{}", { status: 500 })],
+  ])(
+    "is an error after two retries for %s",
+    async (_name, respond) => {
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(respond);
+      const { result } = renderState("/t");
+      await waitFor(() => expect(result.current.availability).toBe("error"), {
+        timeout: 9000,
+      });
+      expect(result.current.build).toBeNull();
+      expect(fetchSpy).toHaveBeenCalledTimes(3);
+    },
+    15000,
+  );
+});
+
+describe("Marked Trails pointer request limits", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function hangUntilAborted() {
+    return vi.spyOn(globalThis, "fetch").mockImplementation(
+      (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(init.signal?.reason),
+          );
+        }),
+    );
+  }
+
+  it("gives up when the ten second timeout fires", async () => {
+    hangUntilAborted();
+    const timeout = new AbortController();
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeout.signal);
+    const outcome = fetchMarkedTrailsBuild("/t").catch((error: unknown) => error);
+    expect(timeoutSpy).toHaveBeenCalledWith(10_000);
+    timeout.abort(new Error("timed out"));
+    expect(await outcome).toEqual(new Error("timed out"));
+  });
+
+  it("stops when the query signal aborts", async () => {
+    hangUntilAborted();
+    const controller = new AbortController();
+    const outcome = fetchMarkedTrailsBuild("/t", controller.signal).catch(
+      (error: unknown) => error,
+    );
+    controller.abort(new Error("cancelled"));
+    expect(await outcome).toEqual(new Error("cancelled"));
   });
 });

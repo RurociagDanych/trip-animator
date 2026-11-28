@@ -66,6 +66,7 @@ import {
 import {
   MARKED_TRAILS_PMTILES_PROTOCOL,
   type MarkedTrailsBuild,
+  markedTrailsDataDate,
 } from "../../lib/geo/marked-trails";
 import {
   computeJourneyDurationS,
@@ -2502,7 +2503,12 @@ export function TripStageCanvas({
           <span>{spec.map_style}</span>
         </div>
       ) : null}
-      <MapAttribution styleId={spec.map_style} />
+      <MapAttribution
+        styleId={spec.map_style}
+        markedTrailsDataDate={
+          markedTrailsOverlay.pmtilesUrl ? markedTrailsDataDate(markedTrailsBuild) : null
+        }
+      />
     </div>
   );
 }
