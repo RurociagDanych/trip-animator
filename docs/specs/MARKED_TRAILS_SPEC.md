@@ -70,9 +70,12 @@ Trip Animator builds its own vector tileset of Marked Trails in Europe from Open
 ### Build pipeline
 
 - A new Python package provides a build-and-publish CLI. Its inputs are a region (a Geofabrik region path, default Europe) and a trail store.
-- Geofabrik extracts are processed one country at a time: download, filter with osmium `tags-filter` (without omitting referenced objects, so the input must be on disk), delete the extract, then merge the filtered files and run Planetiler with a custom profile. Peak disk is the largest country plus the outputs, about 10 GB.
-- osmium and Planetiler come from a dedicated builder image. The Airflow image copies the tools from it with a multi-stage copy, and the DAG runs the CLI in process. Airflow does not get the Docker socket.
-- Tool processes are capped at one CPU and 3 GB of memory.
+- Geofabrik extracts are processed one country at a time: download, filter with osmium `tags-filter` (without omitting referenced objects, so the input must be on disk), delete the extract, then merge the filtered files and run Planetiler with a custom profile. Peak disk is the largest country (France, 5.1 GB) plus the outputs, about 10 GB; a build does not start with less than 12 GiB free.
+- Coverage of `europe`: the children listed in the Geofabrik index except the `special_regions` of `europe` (extracts that overlap their neighbours, read from the index), plus the federal districts of European Russia, which Geofabrik files under `russia` (`EXTRA_CHILDREN` in `regional.py`; Kaliningrad is inside the northwestern district). Asian Russia is out of scope.
+- All children must come from one OpenStreetMap snapshot: their `osmosis_replication_sequence_number` values must be equal. Older children are downloaded once more; if the numbers still differ the run fails and publishes nothing.
+- osmium and Planetiler come from a dedicated builder image for the local make target and AWS. The Airflow image builds the same Planetiler profile from the same pinned Planetiler image in a build stage and installs osmium and a Java runtime from Debian, and the DAG runs the CLI in process. Airflow does not get the Docker socket.
+- Tool processes are capped at one CPU and 3 GB of memory and are killed with the task that started them.
+- The publisher AWS keys are `MARKED_TRAILS_AWS_*` variables loaded only by the Airflow service from `.env.marked-trails` and used only by the trail store client.
 - The Airflow DAG has no schedule, `max_active_runs=1`, a region parameter and its own pool with one slot.
 - A make target runs the same CLI locally against a small region and the local trail store.
 

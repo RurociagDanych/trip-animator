@@ -245,7 +245,10 @@ from pathlib import Path
 import httpx
 from trip_marked_trails.pipeline import BuildToolError, BuildTools, ResourceLimits
 from trip_marked_trails.pipeline import SubprocessToolRunner
+from trip_marked_trails import regional
 from trip_marked_trails.regional import run_regional_build
+
+regional.EXTRA_CHILDREN = {}
 
 BASE = "https://download.geofabrik.de"
 index = {"features": [
@@ -304,6 +307,10 @@ class CapturingRunner(SubprocessToolRunner):
                            if line[0] in "wr"]
 
 
+def listing(work):
+    return sorted(p.name for p in work.iterdir()) if work.exists() else []
+
+
 def scenario(name, serves):
     work = Path("/work") / name
     downloads = {}
@@ -322,9 +329,9 @@ def scenario(name, serves):
             "europe", work, tools, runner=runner, downloader=download, index_client=client
         )
         result.update(ok=True, count=artifact.marked_trail_count, merged=runner.merged,
-                      date=artifact.osm_data_date, files=sorted(p.name for p in work.iterdir()))
+                      date=artifact.osm_data_date, files=listing(work))
     except BuildToolError as exc:
-        result.update(ok=False, error=str(exc), files=sorted(p.name for p in work.iterdir()))
+        result.update(ok=False, error=str(exc), files=listing(work))
     return result
 
 
