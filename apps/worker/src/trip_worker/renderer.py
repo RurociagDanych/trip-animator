@@ -67,6 +67,34 @@ class AsyncRouteHandler(Protocol):
     async def __call__(self, route: Route) -> None: ...
 
 
+# Headers the pinned proxy copies from the page request: PMTiles reads the file with
+# conditional range requests. Everything else (cookies, auth, origin) is deliberately dropped.
+_FORWARDED_REQUEST_HEADERS = ("range", "if-range", "if-match", "if-none-match")
+# Response headers the page needs for ranged reads. Playwright adds Allow-Origin when it
+# fulfills a route but not Expose-Headers, so without the explicit value the cross-origin
+# page cannot read Content-Range or ETag.
+_FORWARDED_RESPONSE_HEADERS = ("content-range", "accept-ranges", "etag", "cache-control")
+_EXPOSED_RESPONSE_HEADERS = "Content-Range, ETag, Accept-Ranges"
+
+
+def _forwarded_request_headers(page_headers: Mapping[str, str]) -> dict[str, str]:
+    lowered = {name.lower(): value for name, value in page_headers.items()}
+    return {name: lowered[name] for name in _FORWARDED_REQUEST_HEADERS if name in lowered}
+
+
+def _external_response_headers(resp: httpx.Response, *, method: str) -> dict[str, str]:
+    headers = {
+        name: resp.headers[name] for name in _FORWARDED_RESPONSE_HEADERS if name in resp.headers
+    }
+    # httpx decodes Content-Encoding, so the upstream length only fits a body-less HEAD answer.
+    if method == "HEAD" and "content-length" in resp.headers:
+        headers["content-length"] = resp.headers["content-length"]
+    elif method != "HEAD":
+        headers["content-length"] = str(len(resp.content))
+    headers["access-control-expose-headers"] = _EXPOSED_RESPONSE_HEADERS
+    return headers
+
+
 def _detect_image_content_type(data: bytes) -> str:
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
@@ -293,6 +321,7 @@ def make_ssrf_route_handler(
         *,
         method: str,
         target: ResolvedExternalTarget,
+        extra_headers: Mapping[str, str],
     ) -> httpx.Response:
         nonlocal owned_client
         client = http_client
@@ -301,6 +330,7 @@ def make_ssrf_route_handler(
                 owned_client = build_pinned_external_http_client(resolve_dns=resolve_dns)
             client = owned_client
         req_kwargs = build_external_request_kwargs(target)
+        req_kwargs["headers"] = {**extra_headers, **req_kwargs["headers"]}
         with pin_external_target(target):
             return await client.request(method, url, follow_redirects=False, **req_kwargs)
 
@@ -358,7 +388,20 @@ def make_ssrf_route_handler(
             await route.abort("blockedbyclient")
             return
 
-        if tile_cache is not None and method == "GET":
+        try:
+            forwarded_headers = _forwarded_request_headers(await route.request.all_headers())
+        except Exception:
+            # Without the page headers a ranged read would get the whole file, so give up.
+            logger.warning("Could not read request headers host=%s", parsed.hostname)
+            try:
+                await route.abort("failed")
+            except Exception:
+                logger.debug("Ignoring error aborting Playwright route", exc_info=True)
+            return
+        # The cache is keyed by URL alone, so a partial body must never be stored or served.
+        cacheable = tile_cache is not None and method == "GET" and "range" not in forwarded_headers
+
+        if tile_cache is not None and cacheable:
             cached = await asyncio.to_thread(tile_cache.get, url)
             if cached is not None:
                 body, content_type = cached
@@ -366,7 +409,9 @@ def make_ssrf_route_handler(
                 return
 
         try:
-            resp = await _fetch_external(url, method=method, target=decision.target)
+            resp = await _fetch_external(
+                url, method=method, target=decision.target, extra_headers=forwarded_headers
+            )
         except Exception as exc:
             # Every route must end in fulfill or abort, so any failure of the external
             # fetch aborts here instead of propagating out of the callback.
@@ -383,7 +428,7 @@ def make_ssrf_route_handler(
                 logger.debug("Ignoring error aborting Playwright route", exc_info=True)
             return
 
-        if 300 <= resp.status_code < 400:
+        if 300 <= resp.status_code < 400 and resp.status_code != 304:
             logger.warning(
                 "Blocked redirect response status=%d for host=%s",
                 resp.status_code,
@@ -394,11 +439,12 @@ def make_ssrf_route_handler(
 
         raw_ct = resp.headers.get("content-type", "application/octet-stream")
         content_type = raw_ct.split(";")[0].strip() or "application/octet-stream"
-        if tile_cache is not None and method == "GET" and resp.status_code == 200:
+        if tile_cache is not None and cacheable and resp.status_code == 200:
             await asyncio.to_thread(tile_cache.put, url, resp.content, content_type)
         await route.fulfill(
             status=resp.status_code,
             content_type=content_type,
+            headers=_external_response_headers(resp, method=method),
             body=b"" if method == "HEAD" else resp.content,
         )
 
