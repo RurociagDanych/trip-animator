@@ -59,7 +59,7 @@ output "marked_trails_fargate_task_definition" {
 }
 
 output "marked_trails_fargate_subnet_ids" {
-  value       = try(join(",", aws_subnet.marked_trails_builder[*].id), null)
+  value       = length(aws_subnet.marked_trails_builder) > 0 ? join(",", aws_subnet.marked_trails_builder[*].id) : null
   description = "Comma-separated public subnet IDs, one per zone, for MARKED_TRAILS_FARGATE_SUBNETS."
 }
 

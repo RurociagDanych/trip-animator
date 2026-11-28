@@ -21,8 +21,9 @@ locals {
   }
   marked_trails_memory_rule = local.marked_trails_fargate_memory_rules[tostring(var.marked_trails_builder_cpu)]
 
-  # Heap needed next to the in-heap node map: Planetiler's feature sort buffers, the profile and
-  # G1 regions that cannot be filled completely around one multi-GiB array.
+  # Heap needed next to the in-heap node map: Planetiler's feature sort buffers and the profile,
+  # plus slack that is probably lost to G1 regions left partly empty around one multi-GiB array
+  # (a hypothesis, not measured).
   marked_trails_builder_heap_working_mib = 4096
 
   marked_trails_builder_task_arn_pattern = "arn:aws:ecs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:task/${local.marked_trails_builder_name}/*"
@@ -389,7 +390,8 @@ data "aws_iam_policy_document" "marked_trails_launcher" {
     resources = [local.marked_trails_builder_task_arn_pattern]
   }
 
-  # ListTasks has no resource level permissions, so the cluster condition is the scope.
+  # ListTasks has no resource level permissions, so the ecs:cluster condition is the scope; the
+  # container-instance filter that ECS offers for EC2 does not apply to Fargate tasks.
   statement {
     sid       = "ListBuilderTasks"
     effect    = "Allow"

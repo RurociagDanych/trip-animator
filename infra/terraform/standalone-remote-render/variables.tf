@@ -186,11 +186,11 @@ variable "marked_trails_builder_jvm_overhead_mib" {
 variable "marked_trails_builder_nodemap_storage" {
   type        = string
   default     = "ram"
-  description = "Planetiler node location map storage on Fargate: ram keeps it in the heap so it needs no page cache next to the application, mmap and direct are the alternatives."
+  description = "Planetiler node location map storage on Fargate: ram keeps it in the heap so it needs no page cache next to the application, mmap is the alternative."
 
   validation {
-    condition     = contains(["ram", "mmap", "direct"], var.marked_trails_builder_nodemap_storage)
-    error_message = "marked_trails_builder_nodemap_storage must be ram, mmap or direct."
+    condition     = contains(["ram", "mmap"], var.marked_trails_builder_nodemap_storage)
+    error_message = "marked_trails_builder_nodemap_storage must be ram or mmap."
   }
 }
 
