@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import socket
 from pathlib import Path
 from typing import Any
@@ -286,6 +287,8 @@ async def test_page_javascript_reads_206_content_range_and_etag_in_real_chromium
             try:
                 browser = await playwright.chromium.launch(headless=True)
             except PlaywrightError as exc:
+                if os.environ.get("CI"):
+                    raise
                 pytest.skip(f"Chromium cannot start in this environment: {exc}".splitlines()[0])
             try:
                 page = await browser.new_page()

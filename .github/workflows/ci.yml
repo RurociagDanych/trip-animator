@@ -86,6 +86,8 @@ jobs:
           enable-cache: true
       - name: Install Python workspace
         run: uv sync --all-packages --frozen
+      - name: Install Chromium headless shell
+        run: uv run --frozen playwright install --with-deps --only-shell chromium
       - name: Pytest suite (non-Postgres)
         run: >-
           uv run pytest --strict-markers -ra -m "not postgres and not docker"
