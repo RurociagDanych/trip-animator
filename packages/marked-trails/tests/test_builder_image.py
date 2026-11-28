@@ -237,3 +237,253 @@ def test_builder_image_publishes_fixture_pmtiles_and_pointer(
     assert all("name" not in f and "ref" not in f for z in range(5, 13) for f in by_zoom[z])
     assert any("name" in feature for feature in by_zoom[13])
     assert {feature["type"] for feature in by_zoom[13]} == {"hiking", "cycling", "mtb"}
+
+
+REGIONAL_SCRIPT = """
+import json, shutil, subprocess
+from pathlib import Path
+import httpx
+from trip_marked_trails.pipeline import BuildToolError, BuildTools, ResourceLimits
+from trip_marked_trails.pipeline import SubprocessToolRunner
+from trip_marked_trails.regional import run_regional_build
+
+BASE = "https://download.geofabrik.de"
+index = {"features": [
+    {"properties": {"id": "europe", "urls": {"pbf": f"{BASE}/europe/europe-latest.osm.pbf"}}},
+    {"properties": {"id": "one", "parent": "europe",
+                    "urls": {"pbf": f"{BASE}/europe/one/one-latest.osm.pbf"}}},
+    {"properties": {"id": "two", "parent": "europe",
+                    "urls": {"pbf": f"{BASE}/europe/two/two-latest.osm.pbf"}}},
+]}
+client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=index)))
+
+HEADER = '<?xml version="1.0" encoding="UTF-8"?><osm version="0.6" generator="test">'
+NODE = '<node id="{0}" version="1" timestamp="2026-01-01T00:00:00Z" lat="46.0" lon="7.{0}"/>'
+WAY = (
+    '<way id="{0}" version="1" timestamp="2026-01-01T00:00:00Z">'
+    '<nd ref="{1}"/><nd ref="{2}"/><tag k="highway" v="path"/></way>'
+)
+RELATION = (
+    '<relation id="100" version="{0}" timestamp="2026-01-01T00:00:00Z">'
+    '<member type="way" ref="10" role=""/><member type="way" ref="11" role=""/>'
+    '<member type="way" ref="12" role=""/><tag k="type" v="route"/><tag k="route" v="hiking"/>'
+    '</relation>'
+)
+
+
+def make_pbf(name, nodes, ways, relation_version, sequence, day):
+    body = "".join(NODE.format(n) for n in nodes) + "".join(WAY.format(*w) for w in ways)
+    xml = HEADER + body + RELATION.format(relation_version) + "</osm>"
+    Path(f"/tmp/{name}.osm").write_text(xml)
+    subprocess.run(
+        ["osmium", "cat", "--overwrite", f"/tmp/{name}.osm", "-o", f"/tmp/{name}.osm.pbf",
+         f"--output-header=osmosis_replication_sequence_number={sequence}",
+         "--output-header=osmosis_replication_timestamp=2026-01-0%dT00:00:00Z" % day],
+        check=True,
+    )
+
+
+FIRST_HALF = ([1, 2, 3], [(10, 1, 2), (11, 2, 3)])
+SECOND_HALF = ([2, 3, 4], [(11, 2, 3), (12, 3, 4)])
+make_pbf("one-5-v3", *FIRST_HALF, 3, 5, 1)
+make_pbf("two-6-v3", *SECOND_HALF, 3, 6, 1)
+make_pbf("two-6-v4", *SECOND_HALF, 4, 6, 2)
+
+
+class CapturingRunner(SubprocessToolRunner):
+    merged = []
+
+    def run(self, args):
+        super().run(args)
+        if args[1] == "time-filter":
+            out = args[args.index("-o") + 1]
+            opl = subprocess.run(["osmium", "cat", "-f", "opl", "-o", "-", out],
+                                 capture_output=True, text=True, check=True).stdout
+            self.merged = [line.split()[0] + " " + line.split()[1] for line in opl.splitlines()
+                           if line[0] in "wr"]
+
+
+def listing(work):
+    return sorted(p.name for p in work.iterdir()) if work.exists() else []
+
+
+def scenario(name, serves):
+    work = Path("/work") / name
+    downloads = {}
+
+    def download(region, dest):
+        files = serves[region]
+        count = downloads.get(region, 0)
+        downloads[region] = count + 1
+        shutil.copyfile(f"/tmp/{files[min(count, len(files) - 1)]}.osm.pbf", dest)
+
+    tools = BuildTools(limits=ResourceLimits(memory_bytes=3 * 1024**3))
+    runner = CapturingRunner(tools)
+    result = {"downloads": downloads}
+    try:
+        artifact = run_regional_build(
+            "europe", work, tools, runner=runner, downloader=download, index_client=client
+        )
+        result.update(ok=True, count=artifact.marked_trail_count, merged=runner.merged,
+                      date=artifact.osm_data_date, files=listing(work))
+    except BuildToolError as exc:
+        result.update(ok=False, error=str(exc), files=listing(work))
+    return result
+
+
+print(json.dumps({
+    "same_timestamp": scenario(
+        "same_timestamp", {"europe/one": ["one-5-v3"], "europe/two": ["two-6-v3"]}
+    ),
+    "newer_relation": scenario(
+        "newer_relation", {"europe/one": ["one-5-v3"], "europe/two": ["two-6-v4"]}
+    ),
+}))
+"""
+
+
+def test_builder_image_keeps_the_newest_relation_across_different_sequence_numbers(
+    tmp_path: Path, builder_image: str
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+
+    result = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--cpus",
+            "1",
+            "--memory",
+            "3g",
+            "--user",
+            f"{os.getuid()}:{os.getgid()}",
+            "-v",
+            f"{work}:/work",
+            "--entrypoint",
+            "python",
+            builder_image,
+            "-c",
+            REGIONAL_SCRIPT,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=1800,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr[-4000:]
+
+    summary = json.loads(result.stdout.strip().splitlines()[-1])
+    same = summary["same_timestamp"]
+    assert same["ok"], same
+    assert same["downloads"] == {"europe/one": 1, "europe/two": 1}
+    assert same["merged"] == ["w10 v1", "w11 v1", "w12 v1", "r100 v3"]
+    assert same["count"] == 1
+    assert same["files"] == ["marked-trails.pmtiles"]
+
+    newer = summary["newer_relation"]
+    assert newer["ok"], newer
+    assert newer["downloads"] == {"europe/one": 1, "europe/two": 1}
+    assert newer["merged"] == ["w10 v1", "w11 v1", "w12 v1", "r100 v4"]
+    assert newer["count"] == 1
+    assert newer["date"] == "2026-01-01T00:00:00Z"
+    assert newer["files"] == ["marked-trails.pmtiles"]
+
+
+MANY_CHILDREN_SCRIPT = """
+import json, shutil
+from pathlib import Path
+import httpx
+from trip_marked_trails import regional
+from trip_marked_trails.pipeline import BuildTools, ResourceLimits, SubprocessToolRunner
+from trip_marked_trails.regional import run_regional_build
+
+BASE = "https://download.geofabrik.de"
+names = [f"child-{number:03d}" for number in range(%(count)d)]
+features = [
+    {"properties": {"id": "europe", "urls": {"pbf": f"{BASE}/europe/europe-latest.osm.pbf"}}}
+]
+features += [
+    {"properties": {"id": name, "parent": "europe",
+                    "urls": {"pbf": f"{BASE}/europe/{name}/{name}-latest.osm.pbf"}}}
+    for name in names
+]
+client = httpx.Client(
+    transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"features": features}))
+)
+
+
+class CountingRunner(SubprocessToolRunner):
+    merges = []
+    time_filters = 0
+
+    def run(self, args):
+        if args[1] == "merge":
+            self.merges.append(len(args) - args.index("-o") - 2)
+        if args[1] == "time-filter":
+            type(self).time_filters += 1
+        super().run(args)
+
+
+tools = BuildTools(limits=ResourceLimits(memory_bytes=3 * 1024**3))
+artifact = run_regional_build(
+    "europe", Path("/work"), tools, runner=CountingRunner(tools),
+    downloader=lambda region, dest: shutil.copyfile("/fixtures/%(fixture)s", dest),
+    index_client=client,
+)
+print(json.dumps({
+    "merges": CountingRunner.merges, "time_filters": CountingRunner.time_filters,
+    "count": artifact.marked_trail_count, "files": sorted(p.name for p in Path("/work").iterdir()),
+}))
+"""
+
+
+@pytest.mark.parametrize(
+    ("children", "merges"),
+    [(49, [8] * 6 + [1, 7]), (60, [8] * 7 + [4, 8])],
+)
+def test_builder_image_merges_many_children_under_the_memory_cap(
+    tmp_path: Path, builder_image: str, children: int, merges: list[int]
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    script = MANY_CHILDREN_SCRIPT % {"count": children, "fixture": FIXTURE_NAME}
+
+    result = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--cpus",
+            "1",
+            "--memory",
+            "3g",
+            "--user",
+            f"{os.getuid()}:{os.getgid()}",
+            "-v",
+            f"{work}:/work",
+            "-v",
+            f"{FIXTURES_DIR}:/fixtures:ro",
+            "--entrypoint",
+            "python",
+            builder_image,
+            "-c",
+            script,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=1800,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr[-4000:]
+
+    summary = json.loads(result.stdout.strip().splitlines()[-1])
+    assert summary["merges"] == merges
+    assert summary["time_filters"] == 1
+    assert summary["count"] == FIXTURE_ROUTE_RELATIONS
+    assert summary["files"] == ["marked-trails.pmtiles"]

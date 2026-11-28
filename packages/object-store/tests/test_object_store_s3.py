@@ -156,6 +156,22 @@ def test_constructor_normalizes_empty_values_to_none(monkeypatch: pytest.MonkeyP
     }
 
 
+def test_session_token_is_passed_to_the_client_only_when_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_boto_client(*_args: Any, **kwargs: Any) -> object:
+        calls.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(boto3, "client", fake_boto_client)
+    S3ObjectStore(bucket="b", access_key_id="k", secret_access_key="s", session_token="t")
+    S3ObjectStore(bucket="b", access_key_id="k", secret_access_key="s", session_token=" ")
+    assert calls[0]["aws_session_token"] == "t"
+    assert "aws_session_token" not in calls[1]
+
+
 def test_botocore_config_is_passed_to_the_client(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, Any]] = []
 
@@ -175,6 +191,7 @@ def test_botocore_config_is_passed_to_the_client(monkeypatch: pytest.MonkeyPatch
         {"endpoint_url": "http://minio:9000"},
         {"access_key_id": "k"},
         {"secret_access_key": "s"},
+        {"session_token": "t"},
         {"region": "eu-west-1"},
         {"botocore_config": Config()},
     ],

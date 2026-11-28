@@ -2,7 +2,7 @@
 
 > Purpose: Record why Marked Trail tiles are built by Trip Animator and published to S3 instead of using a hosted tile provider.
 > Audience: contributors, reviewers
-> Last reviewed: 2026-11-27
+> Last reviewed: 2026-11-28
 
 Sections:
 
@@ -20,7 +20,7 @@ Builds are published to a private S3 bucket in us-east-1 and read through CloudF
 
 Each build is written once under its own version prefix, and a small `current.json` pointer selects the active version. Switching versions overwrites only the pointer, because S3 has no atomic rename. The current and previous builds are kept for rollback. The previous build is deleted when a new build starts, so the bucket never holds more than two builds. A render job stores the build id when it is enqueued, so a new build cannot change a film that was already previewed. If the pinned build was deleted meanwhile, the render uses the current build instead of failing. The tile base URL comes from runtime configuration.
 
-The build is a standalone CLI using osmium and Planetiler from a dedicated builder image. The Airflow image copies those tools from it and runs the CLI in process, and on AWS the same image can run as a Fargate task. Lambda does not fit, because its 15 minute and 10 GB limits are too small for the Europe extract.
+The build is a standalone CLI using osmium and Planetiler from a dedicated builder image. The Airflow image builds the same profile from the same pinned Planetiler image, installs osmium and Java from Debian, and runs the CLI in process. On AWS the builder image can run as a Fargate task. Lambda does not fit, because its 15 minute and 10 GB limits are too small for the Europe extract.
 
 ## Considered options
 
@@ -45,4 +45,4 @@ The build is a standalone CLI using osmium and Planetiler from a dedicated build
 - Map attribution "(c) OpenStreetMap contributors" (ODbL) is always shown in the editor and in exported films, together with the trail data date while the overlay is on. It also covers the OpenFreeMap basemap, which needed it already.
 - Projects store the enabled Marked Trail types in one list field; an empty list means the overlay is off, which is the default.
 - Without a published build the trail toggles are disabled and renders still succeed.
-- Coverage outside Europe needs a rebuild with a larger extract.
+- Coverage outside Europe needs a rebuild with a larger extract. Europe means the children of the Geofabrik `europe` extract without its overlapping special regions; Russia and Kaliningrad are not covered.

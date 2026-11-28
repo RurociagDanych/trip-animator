@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -31,9 +31,10 @@ class ListingS3ObjectStore(S3ObjectStore):
 class TrailStoreSettings:
     """Where the trail store lives.
 
-    The S3 backend takes credentials from the default AWS chain, never from settings, so no
-    secret reaches the command line. `s3_prefix` must match the prefix the Airflow publisher
-    policy allows.
+    Credentials are never command line arguments. Without `s3_access_key_id` the S3 backend
+    uses the default AWS chain; with it, the keys (and the optional session token) go only to
+    this store's client, so they are not visible to other AWS clients in the process.
+    `s3_prefix` must match the prefix the Airflow publisher policy allows.
     """
 
     backend: str = "local"
@@ -41,6 +42,9 @@ class TrailStoreSettings:
     s3_bucket: str = ""
     s3_prefix: str = DEFAULT_S3_PREFIX
     s3_region: str | None = None
+    s3_access_key_id: str = field(default="", repr=False)
+    s3_secret_access_key: str = field(default="", repr=False)
+    s3_session_token: str = field(default="", repr=False)
 
 
 def build_trail_store(settings: TrailStoreSettings, *, s3_client: Any | None = None) -> ObjectStore:
@@ -59,7 +63,19 @@ def build_trail_store(settings: TrailStoreSettings, *, s3_client: Any | None = N
             return ListingS3ObjectStore(
                 bucket=settings.s3_bucket, key_prefix=settings.s3_prefix, client=s3_client
             )
+        has_keys = bool(settings.s3_access_key_id.strip() or settings.s3_secret_access_key.strip())
+        if has_keys and not (
+            settings.s3_access_key_id.strip() and settings.s3_secret_access_key.strip()
+        ):
+            raise ValueError("s3_access_key_id and s3_secret_access_key must be set together")
+        if settings.s3_session_token.strip() and not has_keys:
+            raise ValueError("s3_session_token needs s3_access_key_id and s3_secret_access_key")
         return ListingS3ObjectStore(
-            bucket=settings.s3_bucket, key_prefix=settings.s3_prefix, region=settings.s3_region
+            bucket=settings.s3_bucket,
+            key_prefix=settings.s3_prefix,
+            region=settings.s3_region,
+            access_key_id=settings.s3_access_key_id,
+            secret_access_key=settings.s3_secret_access_key,
+            session_token=settings.s3_session_token,
         )
     raise ValueError(f"Unknown trail store backend: {settings.backend!r}")
