@@ -61,7 +61,7 @@ variable "log_retention_days" {
 variable "map_tile_allowlist" {
   type        = string
   default     = "https://tiles.openfreemap.org"
-  description = "Comma-separated allowlist of map tile origins for Playwright SSRF guard."
+  description = "Comma-separated allowlist of map tile origins for Playwright SSRF guard. The Lambda renders only reach these hosts, so add the Marked Trails CloudFront origin (output marked_trails_cloudfront_origin) next to the basemap host."
 }
 
 variable "render_callback_secret" {

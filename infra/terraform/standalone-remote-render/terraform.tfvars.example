@@ -6,6 +6,8 @@ lambda_timeout_seconds         = 900
 reserved_concurrent_executions = 24
 sfn_max_concurrency            = 8
 staging_retention_days = 3
+# Add the Marked Trails CloudFront origin (output marked_trails_cloudfront_origin), for example
+# "https://tiles.openfreemap.org,https://<id>.cloudfront.net"; Lambda renders reach only these hosts.
 map_tile_allowlist     = "https://tiles.openfreemap.org"
 render_callback_secret = ""
 marked_trails_app_origins = ["https://trips.example.com"]
