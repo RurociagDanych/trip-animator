@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import logging
+import re
 import tempfile
 import time
 import uuid
@@ -12,8 +13,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from trip_telemetry.analytics import bin_track_color_segments, extract_stage_highlights
 from trip_telemetry.pipeline import LOD_TOLERANCES_DEG, simplify_track_points
@@ -165,17 +167,63 @@ class ManifestPhoto(BaseModel):
 MARKED_TRAILS_PIN_KEY = "marked_trails_pin"
 
 
+# Same build id layout as the publisher: date plus an optional same-day suffix from 2.
+MARKED_TRAILS_BUILD_ID_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}(-[2-9]|-[1-9]\d+)?")
+MARKED_TRAILS_DATA_DATE_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}([T ][0-9:.+\-Zz]*)?")
+MARKED_TRAILS_DATA_DATE_MAX_LENGTH = 40
+
+
+def marked_trails_pmtiles_key(build_id: str) -> str:
+    """Object key of a build's PMTiles file in the trail store."""
+    return f"builds/{build_id}/marked-trails.pmtiles"
+
+
 class MarkedTrailsPin(BaseModel):
     """Marked Trails build chosen when a render was enqueued.
 
-    `base_url` is absolute, so the render page needs no other configuration to read the
-    pinned PMTiles file or, when it is gone, `current.json`.
+    `base_url` is the store base as configured: an http(s) URL, or a root-relative path that
+    the render page resolves against its own origin. The build id, the key and the data date
+    are checked because the page builds a request URL from them.
     """
 
     build_id: str
     pmtiles_key: str
     osm_data_date: str | None = None
     base_url: str
+
+    @field_validator("build_id")
+    @classmethod
+    def _check_build_id(cls, value: str) -> str:
+        if not MARKED_TRAILS_BUILD_ID_PATTERN.fullmatch(value):
+            raise ValueError("build_id is not a Marked Trails build id")
+        return value
+
+    @field_validator("osm_data_date")
+    @classmethod
+    def _check_data_date(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if len(value) > MARKED_TRAILS_DATA_DATE_MAX_LENGTH or not (
+            MARKED_TRAILS_DATA_DATE_PATTERN.fullmatch(value)
+        ):
+            raise ValueError("osm_data_date must be an ISO date or timestamp")
+        return value
+
+    @field_validator("base_url")
+    @classmethod
+    def _check_base_url(cls, value: str) -> str:
+        if value.startswith("/") and not value.startswith("//") and "\\" not in value:
+            return value
+        parsed = urlsplit(value)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise ValueError("base_url must be an http(s) URL or a root-relative path")
+        return value
+
+    @model_validator(mode="after")
+    def _check_key(self) -> MarkedTrailsPin:
+        if self.pmtiles_key != marked_trails_pmtiles_key(self.build_id):
+            raise ValueError("pmtiles_key does not match build_id")
+        return self
 
 
 def marked_trails_pin_from_spec_json(

@@ -123,3 +123,42 @@ def test_malformed_pin_is_dropped_instead_of_failing_the_render(
         {"marked_trail_types": ["hiking"], MARKED_TRAILS_PIN_KEY: {"build_id": 5}},
     )
     assert manifest.marked_trails is None
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {
+            "build_id": "2026-11-27/../x",
+            "pmtiles_key": "builds/2026-11-27/../x/marked-trails.pmtiles",
+        },
+        {"build_id": "2026-11-27-1", "pmtiles_key": "builds/2026-11-27-1/marked-trails.pmtiles"},
+        {"pmtiles_key": "builds/2026-11-26/marked-trails.pmtiles"},
+        {"osm_data_date": "not a date"},
+        {"osm_data_date": "2026-11-20T00:00:00Z" + "0" * 40},
+        {"base_url": "ftp://trails.example.test"},
+        {"base_url": "//evil.example.test/x"},
+        {"base_url": "https://"},
+    ],
+)
+def test_pin_model_rejects_unsafe_values(override: dict[str, str]) -> None:
+    with pytest.raises(ValueError):
+        MarkedTrailsPin(**{**_PIN, **override})
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    ["http://localhost:5173/tiles", "https://trails.example.test/pointer", "/tiles/marked-trails"],
+)
+def test_pin_model_accepts_http_https_and_root_relative_bases(base_url: str) -> None:
+    assert MarkedTrailsPin(**{**_PIN, "base_url": base_url}).base_url == base_url
+
+
+def test_pin_model_accepts_a_same_day_build_suffix_and_a_missing_date() -> None:
+    pin = MarkedTrailsPin(
+        build_id="2026-11-27-2",
+        pmtiles_key="builds/2026-11-27-2/marked-trails.pmtiles",
+        osm_data_date=None,
+        base_url="https://trails.example.test",
+    )
+    assert pin.osm_data_date is None
