@@ -75,7 +75,7 @@ Trip Animator builds its own vector tileset of Marked Trails in Europe from Open
 - Children are merged with `osmium merge --with-history` followed by `osmium time-filter`, which keeps only the newest version of each object, so extracts taken at different times yield one version of each relation. The `osmosis_replication_sequence_number` is per region and is not compared. `osm_data_date` is the oldest child `osmosis_replication_timestamp`; the spread is logged and a spread over 2 days only warns. An object deleted between two snapshots can survive from the older extract.
 - osmium and Planetiler come from a dedicated builder image for the local make target and AWS. The Airflow image builds the same Planetiler profile from the same pinned Planetiler image in a build stage and installs osmium and a Java runtime from Debian, and the DAG runs the CLI in process. Airflow does not get the Docker socket.
 - Tool processes are capped at one CPU and 3 GB of memory and are killed with the task that started them.
-- The publisher AWS keys are `MARKED_TRAILS_AWS_*` variables loaded only by the Airflow service from `.env.marked-trails` and used only by the trail store client.
+- The publisher AWS keys are `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` from the single `.env`, the same IAM user as the render backend, and are used only by the trail store client. Both empty means the default AWS chain; exactly one set is an error.
 - The Airflow DAG has no schedule, `max_active_runs=1`, a region parameter and its own pool with one slot.
 - A make target runs the same CLI locally against a small region and the local trail store.
 

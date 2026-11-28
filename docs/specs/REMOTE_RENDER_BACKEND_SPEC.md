@@ -151,11 +151,11 @@ All new variables are optional and default to preserving current local behavior:
 | Variable | Default | Purpose |
 | :--- | :--- | :--- |
 | `RENDER_BACKEND` | `local` | Active Render Backend (`local` or `aws_sfn_lambda`). |
-| `RENDER_AWS_REGION` | `eu-central-1` | AWS region for Step Functions and staging S3. |
+| `AWS_REGION` | `us-east-1` | AWS region for Step Functions and staging S3. |
 | `RENDER_AWS_STATE_MACHINE_ARN` | `` | ARN of the Step Functions state machine (required when `RENDER_BACKEND=aws_sfn_lambda`). |
 | `RENDER_AWS_STAGING_BUCKET` | `` | S3 bucket name for Render Bundles and outputs (required when `RENDER_BACKEND=aws_sfn_lambda`). |
-| `RENDER_AWS_ACCESS_KEY_ID` | `` | Optional AWS access key for remote dispatch (omit when using IAM role). |
-| `RENDER_AWS_SECRET_ACCESS_KEY` | `` | Optional AWS secret key for remote dispatch (omit when using IAM role). |
+| `AWS_ACCESS_KEY_ID` | `` | Optional AWS access key for remote dispatch (omit when using IAM role). |
+| `AWS_SECRET_ACCESS_KEY` | `` | Optional AWS secret key for remote dispatch (omit when using IAM role). |
 | `RENDER_AWS_ENDPOINT_URL` | `` | Optional custom endpoint URL for local testing (e.g., LocalStack/Moto). |
 | `RENDER_CALLBACK_BASE_URL` | `` | Optional public HTTPS base URL for signed Lambda callbacks; omit on `localhost` to rely on polling reconciliation. |
 | `RENDER_CALLBACK_SECRET` | `` | Shared HMAC-SHA256 secret (>= 32 chars in production when `RENDER_CALLBACK_BASE_URL` is set). |

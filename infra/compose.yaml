@@ -428,8 +428,6 @@ services:
     env_file:
       - path: ../.env
         required: false
-      - path: ../.env.marked-trails
-        required: false
     environment:
       <<: *app-env
       HOME: /tmp

@@ -7,7 +7,6 @@ import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CREDENTIAL_FILE = "../.env.marked-trails"
 
 
 @pytest.fixture(scope="module")
@@ -33,31 +32,34 @@ def test_airflow_runs_three_tasks_at_once(services: dict[str, dict[str, Any]]) -
     assert services["airflow"]["environment"]["AIRFLOW__CORE__PARALLELISM"] == "3"
 
 
-def test_only_the_airflow_service_loads_the_marked_trails_credential_file(
+def test_only_the_root_env_file_is_loaded_by_the_airflow_service(
     services: dict[str, dict[str, Any]],
 ) -> None:
-    loaders = [name for name, service in services.items() if CREDENTIAL_FILE in env_files(service)]
-
-    assert loaders == ["airflow"]
+    assert env_files(services["airflow"]) == ["../.env"]
 
 
-def test_no_service_maps_the_marked_trails_credentials_in_its_environment(
-    services: dict[str, dict[str, Any]],
-) -> None:
-    mapped = [
-        name
-        for name, service in services.items()
-        if any("MARKED_TRAILS_AWS" in key for key in service.get("environment", {}))
-    ]
-
-    assert mapped == []
-
-
-def test_credential_file_is_optional_and_has_a_tracked_example() -> None:
+def test_no_separate_marked_trails_credential_file_remains() -> None:
     compose = (REPO_ROOT / "infra" / "compose.yaml").read_text(encoding="utf-8")
 
-    assert "path: ../.env.marked-trails\n        required: false" in compose
-    example = (REPO_ROOT / "marked-trails.env.example").read_text(encoding="utf-8")
-    assert "MARKED_TRAILS_AWS_ACCESS_KEY_ID=\n" in example
-    assert "MARKED_TRAILS_AWS_SECRET_ACCESS_KEY=\n" in example
-    assert "MARKED_TRAILS_AWS_SESSION_TOKEN=\n" in example
+    assert ".env.marked-trails" not in compose
+    assert not (REPO_ROOT / "marked-trails.env.example").exists()
+
+
+def test_every_service_with_s3_settings_gets_explicit_object_store_keys(
+    services: dict[str, dict[str, Any]],
+) -> None:
+    compose = yaml.safe_load((REPO_ROOT / "infra" / "compose.yaml").read_text(encoding="utf-8"))
+    app_env = compose["x-app-env"]
+
+    assert app_env["S3_ACCESS_KEY_ID"].startswith("${S3_ACCESS_KEY_ID")
+    assert app_env["S3_SECRET_ACCESS_KEY"].startswith("${S3_SECRET_ACCESS_KEY")
+    assert not any(key.startswith("AWS_") for key in app_env)
+
+
+def test_object_store_region_is_explicit_and_not_the_aws_region() -> None:
+    compose = yaml.safe_load((REPO_ROOT / "infra" / "compose.yaml").read_text(encoding="utf-8"))
+    app_env = compose["x-app-env"]
+
+    assert app_env["S3_REGION"].startswith("${S3_REGION")
+    assert "AWS_REGION" not in app_env
+    assert "S3_ENDPOINT_URL" in app_env
