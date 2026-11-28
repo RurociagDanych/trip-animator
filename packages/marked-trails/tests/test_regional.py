@@ -1,11 +1,14 @@
 import json
 import shutil
+import subprocess
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
 import httpx
 import pytest
+from trip_marked_trails import regional
 from trip_marked_trails.cli import main
 from trip_marked_trails.pipeline import (
     BuildArtifact,
@@ -18,12 +21,20 @@ from trip_marked_trails.pipeline import (
 from trip_marked_trails.regional import list_child_regions, run_regional_build
 
 GIB = 1024**3
+REAL_EXTRA_CHILDREN = regional.EXTRA_CHILDREN
 
 
-def feature(region_id: str, parent: str | None, url_path: str | None) -> dict[str, object]:
+def feature(
+    region_id: str,
+    parent: str | None,
+    url_path: str | None,
+    special_regions: list[str] | None = None,
+) -> dict[str, object]:
     properties: dict[str, object] = {"id": region_id, "name": region_id}
     if parent is not None:
         properties["parent"] = parent
+    if special_regions is not None:
+        properties["special_regions"] = special_regions
     urls: dict[str, str] = {}
     if url_path is not None:
         urls["pbf"] = f"https://download.geofabrik.de/{url_path}-latest.osm.pbf"
@@ -34,7 +45,12 @@ def feature(region_id: str, parent: str | None, url_path: str | None) -> dict[st
 INDEX = {
     "type": "FeatureCollection",
     "features": [
-        feature("europe", None, "europe/europe"),
+        feature(
+            "europe",
+            None,
+            "europe/europe",
+            special_regions=["britain-and-ireland", "great-britain", "alps", "dach"],
+        ),
         feature("poland", "europe", "europe/poland/poland"),
         feature("andorra", "europe", "europe/andorra/andorra"),
         feature("germany", "europe", "europe/germany/germany"),
@@ -44,8 +60,30 @@ INDEX = {
         feature("britain-and-ireland", "europe", "europe/britain-and-ireland/britain-and-ireland"),
         feature("great-britain", "europe", "europe/great-britain/great-britain"),
         feature("no-extract", "europe", None),
+        feature("russia", None, "russia/russia", special_regions=["kaliningrad"]),
+        feature(
+            "central-fed-district", "russia", "russia/central-fed-district/central-fed-district"
+        ),
+        feature(
+            "northwestern-fed-district",
+            "russia",
+            "russia/northwestern-fed-district/northwestern-fed-district",
+        ),
+        feature("south-fed-district", "russia", "russia/south-fed-district/south-fed-district"),
+        feature(
+            "north-caucasus-fed-district",
+            "russia",
+            "russia/north-caucasus-fed-district/north-caucasus-fed-district",
+        ),
+        feature("volga-fed-district", "russia", "russia/volga-fed-district/volga-fed-district"),
+        feature("ural-fed-district", "russia", "russia/ural-fed-district/ural-fed-district"),
     ],
 }
+
+
+@pytest.fixture(autouse=True)
+def no_extra_children(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(regional, "EXTRA_CHILDREN", {})
 
 
 def index_client() -> httpx.Client:
@@ -64,7 +102,7 @@ def test_children_of_a_parent_region_come_from_the_geofabrik_index() -> None:
     assert children == ["europe/andorra", "europe/germany", "europe/poland"]
 
 
-def test_children_skip_aggregate_extracts_that_overlap_countries() -> None:
+def test_children_skip_special_regions_that_overlap_countries() -> None:
     with index_client() as client:
         children = list_child_regions("europe", client=client)
 
@@ -75,6 +113,86 @@ def test_children_skip_aggregate_extracts_that_overlap_countries() -> None:
 def test_nested_parent_lists_its_own_children() -> None:
     with index_client() as client:
         assert list_child_regions("europe/germany", client=client) == ["europe/germany/bayern"]
+
+
+def test_special_regions_come_from_the_index_properties_of_the_parent() -> None:
+    index = {
+        "features": [
+            feature("europe", None, "europe/europe", special_regions=["alps"]),
+            feature("alps", "europe", "europe/alps/alps"),
+            feature("dach", "europe", "europe/dach/dach"),
+            feature("poland", "europe", "europe/poland/poland"),
+        ]
+    }
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=index))
+
+    with httpx.Client(transport=transport) as client:
+        children = list_child_regions("europe", client=client)
+
+    assert children == ["europe/dach", "europe/poland"]
+
+
+def test_parent_without_special_regions_keeps_all_children() -> None:
+    index = {
+        "features": [
+            feature("europe", None, "europe/europe"),
+            feature("dach", "europe", "europe/dach/dach"),
+        ]
+    }
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=index))
+
+    with httpx.Client(transport=transport) as client:
+        assert list_child_regions("europe", client=client) == ["europe/dach"]
+
+
+def test_europe_gets_the_european_russia_federal_districts_as_extra_children(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(regional, "EXTRA_CHILDREN", REAL_EXTRA_CHILDREN)
+
+    with index_client() as client:
+        children = list_child_regions("europe", client=client)
+
+    assert children == [
+        "europe/andorra",
+        "europe/germany",
+        "europe/poland",
+        "russia/central-fed-district",
+        "russia/north-caucasus-fed-district",
+        "russia/northwestern-fed-district",
+        "russia/south-fed-district",
+        "russia/volga-fed-district",
+    ]
+
+
+def test_extra_children_are_a_fixed_list_for_europe_only() -> None:
+    assert REAL_EXTRA_CHILDREN == {
+        "europe": (
+            "russia/central-fed-district",
+            "russia/northwestern-fed-district",
+            "russia/south-fed-district",
+            "russia/north-caucasus-fed-district",
+            "russia/volga-fed-district",
+        )
+    }
+
+
+def test_extra_child_missing_from_the_index_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(regional, "EXTRA_CHILDREN", {"europe": ("russia/atlantis-fed-district",)})
+
+    with index_client() as client, pytest.raises(BuildToolError, match="atlantis"):
+        list_child_regions("europe", client=client)
+
+
+def test_extra_child_already_listed_is_not_duplicated(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(regional, "EXTRA_CHILDREN", {"europe": ("europe/poland",)})
+
+    with index_client() as client:
+        children = list_child_regions("europe", client=client)
+
+    assert children == ["europe/andorra", "europe/germany", "europe/poland"]
 
 
 def test_leaf_region_has_no_children() -> None:
@@ -97,6 +215,7 @@ class Recorder:
         fail_filter_for: str | None = None,
         fail_download_for: str | None = None,
         fail_planetiler: bool = False,
+        sequences: dict[str, list[str]] | None = None,
     ) -> None:
         self.work_dir = work_dir
         self.events: list[tuple[str, ...]] = []
@@ -109,7 +228,15 @@ class Recorder:
             "europe/germany": "2026-11-25T20:00:00Z",
             "europe/poland": "2026-11-27T01:00:00Z",
         }
+        self.sequence_plan = {
+            "europe/andorra": ["500"],
+            "europe/germany": ["500"],
+            "europe/poland": ["500"],
+            **(sequences or {}),
+        }
+        self.download_counts: dict[str, int] = {}
         self._by_extract: dict[str, str] = {}
+        self._sequence_of_extract: dict[str, str | None] = {}
 
     def download(self, region: str, dest: Path) -> None:
         for earlier in self.extracts:
@@ -120,11 +247,19 @@ class Recorder:
         dest.write_bytes(region.encode())
         self.extracts.append(dest)
         self._by_extract[str(dest)] = region
+        count = self.download_counts.get(region, 0)
+        self.download_counts[region] = count + 1
+        plan = self.sequence_plan[region]
+        self._sequence_of_extract[str(dest)] = plan[min(count, len(plan) - 1)]
         self.events.append(("download", region))
 
     def capture(self, args: Sequence[str]) -> str:
         assert args[1] == "fileinfo"
-        return self.dates[self._by_extract[args[-1]]] + "\n"
+        extract = args[-1]
+        if args[3] == "header.option.osmosis_replication_sequence_number":
+            return (self._sequence_of_extract[extract] or "") + "\n"
+        assert args[3] == "header.option.osmosis_replication_timestamp"
+        return self.dates[self._by_extract[extract]] + "\n"
 
     def run(self, args: Sequence[str]) -> None:
         command = args[1] if args[0] == "osmium" else "planetiler"
@@ -216,6 +351,82 @@ def test_only_the_final_build_file_is_left_in_the_work_directory(tmp_path: Path)
 
     leftovers = sorted(p.name for p in (tmp_path / "work").iterdir())
     assert leftovers == [artifact.pmtiles_path.name]
+
+
+def test_children_with_the_same_replication_sequence_are_built_without_a_second_download(
+    tmp_path: Path,
+) -> None:
+    recorder = Recorder(tmp_path / "work")
+
+    regional_build(tmp_path, recorder)
+
+    assert recorder.download_counts == {
+        "europe/andorra": 1,
+        "europe/germany": 1,
+        "europe/poland": 1,
+    }
+
+
+def test_children_older_than_the_newest_are_downloaded_again_once_and_then_built(
+    tmp_path: Path,
+) -> None:
+    recorder = Recorder(
+        tmp_path / "work",
+        sequences={"europe/andorra": ["498", "500"], "europe/germany": ["499", "500"]},
+    )
+
+    artifact = regional_build(tmp_path, recorder)
+
+    assert recorder.download_counts == {
+        "europe/andorra": 2,
+        "europe/germany": 2,
+        "europe/poland": 1,
+    }
+    assert [event[0] for event in recorder.events].count("planetiler") == 1
+    assert artifact.pmtiles_path.read_bytes() == b"PMTiles-fake"
+    assert not any(path.exists() for path in recorder.extracts)
+
+
+def test_the_run_fails_when_the_sequences_still_differ_after_the_second_download(
+    tmp_path: Path,
+) -> None:
+    recorder = Recorder(tmp_path / "work", sequences={"europe/andorra": ["498"]})
+
+    with pytest.raises(BuildToolError, match="replication sequence"):
+        regional_build(tmp_path, recorder)
+
+    assert recorder.download_counts["europe/andorra"] == 2
+    assert recorder.download_counts["europe/poland"] == 1
+    assert all(event[0] not in ("merge", "planetiler") for event in recorder.events)
+    assert list((tmp_path / "work").iterdir()) == []
+
+
+def test_a_child_without_a_replication_sequence_fails_the_run(tmp_path: Path) -> None:
+    recorder = Recorder(tmp_path / "work")
+    recorder.sequence_plan["europe/germany"] = [""]
+
+    with pytest.raises(BuildToolError, match="replication sequence"):
+        regional_build(tmp_path, recorder)
+
+    assert list((tmp_path / "work").iterdir()) == []
+
+
+def test_failing_leaf_filter_leaves_no_files_in_the_work_directory(tmp_path: Path) -> None:
+    recorder = Recorder(tmp_path / "work", fail_filter_for="europe/andorra")
+
+    with pytest.raises(BuildToolError, match="europe/andorra"):
+        regional_build(tmp_path, recorder, region="europe/andorra")
+
+    assert list((tmp_path / "work").iterdir()) == []
+
+
+def test_failing_leaf_planetiler_leaves_no_files_in_the_work_directory(tmp_path: Path) -> None:
+    recorder = Recorder(tmp_path / "work", fail_planetiler=True)
+
+    with pytest.raises(BuildToolError, match="java"):
+        regional_build(tmp_path, recorder, region="europe/andorra")
+
+    assert list((tmp_path / "work").iterdir()) == []
 
 
 def test_leaf_region_skips_the_per_country_loop(tmp_path: Path) -> None:
@@ -317,7 +528,7 @@ def test_failing_country_fails_the_run_and_publishes_nothing(tmp_path: Path) -> 
     assert not store.exists() or list(store.rglob("*")) == []
 
 
-def test_limited_command_wraps_the_tool_in_nice_prlimit_and_taskset() -> None:
+def test_limited_command_wraps_the_tool_in_nice_prlimit_taskset_and_setpriv() -> None:
     limits = ResourceLimits(memory_bytes=3 * GIB, nice=10, cpu=2)
 
     assert limited_command(["osmium", "fileinfo", "x.pbf"], limits) == [
@@ -329,6 +540,9 @@ def test_limited_command_wraps_the_tool_in_nice_prlimit_and_taskset() -> None:
         "taskset",
         "-c",
         "2",
+        "setpriv",
+        "--pdeathsig",
+        "KILL",
         "osmium",
         "fileinfo",
         "x.pbf",
@@ -340,8 +554,8 @@ def test_command_without_limits_is_unchanged() -> None:
 
 
 needs_limit_tools = pytest.mark.skipif(
-    not all(shutil.which(tool) for tool in ("nice", "prlimit", "taskset")),
-    reason="needs nice, prlimit and taskset from util-linux",
+    not all(shutil.which(tool) for tool in ("nice", "prlimit", "taskset", "setpriv")),
+    reason="needs nice, prlimit, taskset and setpriv from util-linux",
 )
 
 
@@ -365,3 +579,40 @@ def test_tool_under_the_cap_runs_and_its_output_is_captured() -> None:
     )
 
     assert runner.capture([sys.executable, "-c", "print('ok')"]).strip() == "ok"
+
+
+PARENT_SCRIPT = """
+import os, subprocess, sys, time
+from pathlib import Path
+from trip_marked_trails.pipeline import ResourceLimits, limited_command
+
+pid_file = Path(sys.argv[1])
+tool = "import os, sys, time; open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(60)"
+command = limited_command(
+    [sys.executable, "-c", tool, str(pid_file)], ResourceLimits(memory_bytes=2 * 1024**3)
+)
+subprocess.Popen(command)
+while not pid_file.exists() or not pid_file.read_text():
+    time.sleep(0.05)
+os._exit(0)
+"""
+
+
+@needs_limit_tools
+def test_tool_is_killed_when_the_process_that_started_it_dies(tmp_path: Path) -> None:
+    pid_file = tmp_path / "tool.pid"
+    subprocess.run([sys.executable, "-c", PARENT_SCRIPT, str(pid_file)], check=True, timeout=60)  # noqa: S603
+
+    pid = int(pid_file.read_text())
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and _is_running(pid):
+        time.sleep(0.1)
+    assert not _is_running(pid), "the tool outlived the process that started it"
+
+
+def _is_running(pid: int) -> bool:
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except FileNotFoundError:
+        return False
+    return state != "Z"

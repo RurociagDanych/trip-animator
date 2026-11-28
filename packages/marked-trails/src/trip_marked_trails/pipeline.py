@@ -21,6 +21,9 @@ GEOFABRIK_BASE_URL = "https://download.geofabrik.de"
 FILTER_EXPRESSION = "r/route=hiking,foot,bicycle,mtb"
 PLANETILER_MAIN_CLASS = "com.tripanimator.markedtrails.MarkedTrailsMain"
 PLANETILER_HEAP_OPTION = "-Xmx2g"
+# Direct buffers count as data memory for prlimit but not for -Xmx; without a cap they could
+# push the JVM past the 3 GB limit on top of the 2 GB heap.
+PLANETILER_DIRECT_MEMORY_OPTION = "-XX:MaxDirectMemorySize=512m"
 DEFAULT_PLANETILER_CLASSPATH = "/opt/marked-trails/classes:/app/libs/*"
 DOWNLOAD_TIMEOUT_SECONDS = 3600.0
 # Europe is estimated at 2 to 4 hours of Planetiler; the cap stops a hung tool, not a slow one.
@@ -101,6 +104,10 @@ def limited_command(args: Sequence[str], limits: ResourceLimits | None) -> list[
     Planetiler JVM use, so a tool that needs more fails with an allocation error instead of
     taking the host's memory. RLIMIT_AS would also count the JVM's reserved address space and
     RLIMIT_RSS is not enforced by Linux. The JVM heap is capped separately by -Xmx.
+
+    `setpriv --pdeathsig KILL` makes the kernel kill the tool when the process that started it
+    dies, so a task killed by Airflow does not leave a multi-hour tool running. Every wrapper
+    execs the next one, so the signal is armed on the tool process itself.
     """
     if limits is None:
         return list(args)
@@ -114,6 +121,9 @@ def limited_command(args: Sequence[str], limits: ResourceLimits | None) -> list[
         "taskset",
         "-c",
         str(cpu),
+        "setpriv",
+        "--pdeathsig",
+        "KILL",
         *args,
     ]
 
@@ -194,26 +204,43 @@ def run_build(
     runner: ToolRunner | None = None,
     downloader: Downloader | None = None,
 ) -> BuildArtifact:
-    """Filter and render one region; intermediate files are deleted on success.
+    """Filter and render one region; intermediate files are deleted on success and on failure.
 
     Without `extract_path` the latest Geofabrik extract is downloaded into `work_dir` and
     deleted after filtering. A given `extract_path` is read in place and never deleted.
-    The filter must not omit referenced objects, so osmium reads the input from disk.
+    The filter must not omit referenced objects, so osmium reads the input from disk. After a
+    failure only the files of the caller remain: no PMTiles output, count file or temporary
+    file is left in `work_dir`.
     """
     validate_region(region)
     work_dir.mkdir(parents=True, exist_ok=True)
     runner = runner or SubprocessToolRunner(tools)
     filtered = work_dir / "marked-trails-filtered.osm.pbf"
+    owns_extract = extract_path is None
+    extract = extract_path or work_dir / "extract.osm.pbf"
+    succeeded = False
+    try:
+        if owns_extract:
+            (downloader or download_extract)(region, extract)
+        osm_data_date = filter_extract(extract, filtered, tools, runner)
+        if owns_extract:
+            extract.unlink()
+        artifact = build_tiles(filtered, work_dir, osm_data_date, tools, runner)
+        succeeded = True
+        return artifact
+    finally:
+        if owns_extract:
+            extract.unlink(missing_ok=True)
+        filtered.unlink(missing_ok=True)
+        remove_build_scratch(work_dir, keep_outputs=succeeded)
 
-    if extract_path is None:
-        extract = work_dir / "extract.osm.pbf"
-        (downloader or download_extract)(region, extract)
-    else:
-        extract = extract_path
-    osm_data_date = filter_extract(extract, filtered, tools, runner)
-    if extract_path is None:
-        extract.unlink()
-    return build_tiles(filtered, work_dir, osm_data_date, tools, runner)
+
+def remove_build_scratch(work_dir: Path, *, keep_outputs: bool) -> None:
+    """Delete Planetiler's temporary files in `work_dir`, and its outputs unless `keep_outputs`."""
+    shutil.rmtree(work_dir / PLANETILER_TMP_NAME, ignore_errors=True)
+    if not keep_outputs:
+        (work_dir / PMTILES_NAME).unlink(missing_ok=True)
+        (work_dir / MARKED_TRAIL_COUNT_NAME).unlink(missing_ok=True)
 
 
 def filter_extract(
@@ -251,6 +278,7 @@ def build_tiles(
         [
             tools.java,
             PLANETILER_HEAP_OPTION,
+            PLANETILER_DIRECT_MEMORY_OPTION,
             "-cp",
             tools.planetiler_classpath,
             PLANETILER_MAIN_CLASS,
@@ -284,14 +312,20 @@ def _read_marked_trail_count(count_file: Path) -> int:
 
 
 def _osm_data_date(tools: BuildTools, extract: Path, runner: ToolRunner) -> str | None:
+    return _header_option(tools, extract, runner, "osmosis_replication_timestamp")
+
+
+def read_replication_sequence(extract: Path, tools: BuildTools, runner: ToolRunner) -> str | None:
+    """Return the replication sequence number in the header of `extract`, if it has one.
+
+    Two extracts with the same number hold the same snapshot of OpenStreetMap.
+    """
+    return _header_option(tools, extract, runner, "osmosis_replication_sequence_number")
+
+
+def _header_option(tools: BuildTools, extract: Path, runner: ToolRunner, option: str) -> str | None:
     value = runner.capture(
-        [
-            tools.osmium,
-            "fileinfo",
-            "-g",
-            "header.option.osmosis_replication_timestamp",
-            str(extract),
-        ]
+        [tools.osmium, "fileinfo", "-g", f"header.option.{option}", str(extract)]
     ).strip()
     return value or None
 
