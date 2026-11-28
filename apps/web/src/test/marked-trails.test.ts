@@ -440,6 +440,8 @@ describe("Marked Trails build pointer", () => {
       "builds/2026-11-27/marked-trails.pmtiles?x=1",
       "builds/latest/marked-trails.pmtiles",
       "builds/2026-11-27/other.pmtiles",
+      "builds/2026-11-27-0/marked-trails.pmtiles",
+      "builds/2026-11-27-1/marked-trails.pmtiles",
     ]) {
       expect(parseMarkedTrailsPointer({ current_build_id: "x", pmtiles_key: key }), key).toBeNull();
     }

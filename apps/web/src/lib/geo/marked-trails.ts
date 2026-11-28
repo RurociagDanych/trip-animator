@@ -10,9 +10,9 @@ const MARKED_TRAILS_POINTER_TIMEOUT_MS = 10_000;
 // signal: the HEAD request and the current.json fallback share it.
 const MARKED_TRAILS_RESOLVE_DEADLINE_MS = 5_000;
 const MARKED_TRAILS_POINTER_RETRIES = 2;
-// Matches the publisher's layout: build date, optional same-day suffix, fixed file name.
+// Matches the publisher's layout: build date, optional same-day suffix from 2, fixed file name.
 const MARKED_TRAILS_PMTILES_KEY_PATTERN =
-  /^builds\/\d{4}-\d{2}-\d{2}(-\d+)?\/marked-trails\.pmtiles$/;
+  /^builds\/\d{4}-\d{2}-\d{2}(-[2-9]|-[1-9]\d+)?\/marked-trails\.pmtiles$/;
 
 export interface MarkedTrailsPointer {
   current_build_id: string;
