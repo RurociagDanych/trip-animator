@@ -16,3 +16,7 @@ marked_trails_prefix      = "marked-trails"
 # and the tag that make marked-trails-ecr-push pushed (the tag has no default).
 marked_trails_builder_enabled   = false
 marked_trails_builder_image_tag = ""
+
+# IAM user whose keys the VPS uses; Terraform attaches the dispatcher, publisher and launcher
+# policies to it. Empty attaches nothing.
+vps_iam_user_name = ""
