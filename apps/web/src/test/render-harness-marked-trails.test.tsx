@@ -43,7 +43,8 @@ function manifest(overrides: Partial<RenderManifest> = {}, types: string[] = ["h
 function mockStore(options: { pinnedStatus?: number; pointerStatus?: number }) {
   const calls: { method: string; url: string }[] = [];
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-    const url = typeof input === "string" ? input : input instanceof Request ? input.url : String(input);
+    const url =
+      typeof input === "string" ? input : input instanceof Request ? input.url : String(input);
     calls.push({ method: init?.method ?? "GET", url });
     if (url === PINNED_URL) {
       return new Response(null, { status: options.pinnedStatus ?? 200 });
@@ -84,13 +85,16 @@ describe("render route Marked Trails build", () => {
     expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual([`HEAD ${PINNED_URL}`]);
   });
 
-  it.each([404, 403])("falls back to the current build when the pinned file answers %i", async (status) => {
-    const calls = mockStore({ pinnedStatus: status });
-    const attribution = await renderHarness(manifest());
+  it.each([404, 403])(
+    "falls back to the current build when the pinned file answers %i",
+    async (status) => {
+      const calls = mockStore({ pinnedStatus: status });
+      const attribution = await renderHarness(manifest());
 
-    expect(attribution).toHaveTextContent("Marked Trails data: 2026-11-26");
-    expect(calls.map((c) => c.url)).toEqual([PINNED_URL, `${BASE}/current.json`]);
-  });
+      expect(attribution).toHaveTextContent("Marked Trails data: 2026-11-26");
+      expect(calls.map((c) => c.url)).toEqual([PINNED_URL, `${BASE}/current.json`]);
+    },
+  );
 
   it("renders without trails and still becomes ready when the pinned file and current.json are gone", async () => {
     mockStore({ pinnedStatus: 404, pointerStatus: 404 });
@@ -113,6 +117,23 @@ describe("render route Marked Trails build", () => {
     const attribution = await renderHarness(manifest());
 
     expect(attribution).toHaveTextContent("Marked Trails data: 2026-11-19");
+  });
+
+  it("resolves a root-relative pinned base against the page origin", async () => {
+    const calls = mockStore({});
+    const relative = `${window.location.origin}/tiles/marked-trails`;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      calls.push({ method: init?.method ?? "GET", url: String(input) });
+      return new Response(null, { status: 200 });
+    });
+    const base = manifest();
+    const attribution = await renderHarness({
+      ...base,
+      marked_trails: { ...base.marked_trails!, base_url: "/tiles/marked-trails" },
+    });
+
+    expect(attribution).toHaveTextContent("Marked Trails data: 2026-11-19");
+    expect(calls.map((c) => c.url)).toContain(`${relative}/${PINNED_KEY}`);
   });
 
   it("does not contact the trail store without a pin", async () => {
@@ -142,7 +163,10 @@ describe("render route Marked Trails build", () => {
   it("does not report ready before the pinned build is resolved", async () => {
     let releaseHead: (response: Response) => void = () => {};
     vi.spyOn(globalThis, "fetch").mockImplementation(
-      () => new Promise<Response>((resolve) => { releaseHead = resolve; }),
+      () =>
+        new Promise<Response>((resolve) => {
+          releaseHead = resolve;
+        }),
     );
     window.__TRIP_RENDER_MANIFEST__ = manifest();
     const router = createAppRouter(createMemoryHistory({ initialEntries: ["/render/job-trails"] }));
@@ -150,13 +174,17 @@ describe("render route Marked Trails build", () => {
     await waitFor(() => expect(window.__TRIP_RENDERER__).toBeDefined());
 
     let ready = false;
-    void window.__TRIP_RENDERER__?.ready.then(() => { ready = true; });
+    void window.__TRIP_RENDERER__?.ready.then(() => {
+      ready = true;
+    });
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(ready).toBe(false);
     expect(screen.queryByTestId("map-attribution")).toBeNull();
 
     releaseHead(new Response(null, { status: 200 }));
     await waitFor(() => expect(ready).toBe(true));
-    expect(screen.getByTestId("map-attribution")).toHaveTextContent("Marked Trails data: 2026-11-19");
+    expect(screen.getByTestId("map-attribution")).toHaveTextContent(
+      "Marked Trails data: 2026-11-19",
+    );
   });
 });

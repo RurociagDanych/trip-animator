@@ -312,7 +312,7 @@ export function RenderHarnessPage() {
           projectTitle={manifest.project_title}
           totalStats={totalStats}
           markedTrailsBuild={markedTrailsBuild}
-          />
+        />
       ) : null}
     </main>
   );

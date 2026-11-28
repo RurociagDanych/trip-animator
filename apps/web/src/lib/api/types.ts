@@ -982,6 +982,7 @@ export interface RenderManifestMarkedTrails {
   build_id: string;
   pmtiles_key: string;
   osm_data_date: string | null;
+  /** Store base as configured: an http(s) URL or a root-relative path (local development). */
   base_url: string;
 }
 

@@ -1,13 +1,18 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import type { RenderManifestMarkedTrails } from "../api/types";
+import { MARKED_TRAILS_SOURCE_ID } from "./map-config";
 
 export const MARKED_TRAILS_PMTILES_PROTOCOL = "pmtiles";
 export const MARKED_TRAILS_POINTER_FILE = "current.json";
-// Matches the publisher's layout: build date, optional same-day suffix, fixed file name.
 const MARKED_TRAILS_POINTER_TIMEOUT_MS = 10_000;
+// One budget for the whole pinned-build check on the render route, which holds back the ready
+// signal: the HEAD request and the current.json fallback share it.
+const MARKED_TRAILS_RESOLVE_DEADLINE_MS = 5_000;
 const MARKED_TRAILS_POINTER_RETRIES = 2;
-const MARKED_TRAILS_PMTILES_KEY_PATTERN = /^builds\/\d{4}-\d{2}-\d{2}(-\d+)?\/marked-trails\.pmtiles$/;
+// Matches the publisher's layout: build date, optional same-day suffix, fixed file name.
+const MARKED_TRAILS_PMTILES_KEY_PATTERN =
+  /^builds\/\d{4}-\d{2}-\d{2}(-\d+)?\/marked-trails\.pmtiles$/;
 
 export interface MarkedTrailsPointer {
   current_build_id: string;
@@ -67,12 +72,21 @@ export async function fetchMarkedTrailsBuild(
   baseUrl: string,
   signal?: AbortSignal,
 ): Promise<MarkedTrailsBuild | null> {
+  const timeout = AbortSignal.timeout(MARKED_TRAILS_POINTER_TIMEOUT_MS);
+  return fetchMarkedTrailsPointerBuild(
+    baseUrl,
+    signal ? AbortSignal.any([signal, timeout]) : timeout,
+  );
+}
+
+async function fetchMarkedTrailsPointerBuild(
+  baseUrl: string,
+  signal: AbortSignal,
+): Promise<MarkedTrailsBuild | null> {
   const root = stripTrailingSlashes(baseUrl);
   const response = await fetch(`${root}/${MARKED_TRAILS_POINTER_FILE}`, {
     cache: "no-cache",
-    signal: signal
-      ? AbortSignal.any([signal, AbortSignal.timeout(MARKED_TRAILS_POINTER_TIMEOUT_MS)])
-      : AbortSignal.timeout(MARKED_TRAILS_POINTER_TIMEOUT_MS),
+    signal,
   });
   if (response.status === 404 || response.status === 403) {
     return null;
@@ -91,39 +105,54 @@ export async function fetchMarkedTrailsBuild(
 }
 
 /**
+ * Resolves a store base as configured: a root-relative path (local development) is read from
+ * the origin of the page, an absolute URL is used as it is. Trailing slashes are dropped.
+ */
+export function resolveMarkedTrailsBase(base: string): string {
+  const stripped = stripTrailingSlashes(base);
+  return stripped.startsWith("/") && !stripped.startsWith("//")
+    ? `${window.location.origin}${stripped}`
+    : stripped;
+}
+
+/** True for a map error event raised by the Marked Trails source, e.g. a failed PMTiles read. */
+export function isMarkedTrailsSourceError(event: object): boolean {
+  return (event as { sourceId?: unknown }).sourceId === MARKED_TRAILS_SOURCE_ID;
+}
+
+/**
  * Resolves the build a render draws. The pinned build is kept unless its PMTiles file answers
  * 404 or 403 to a HEAD request, which means a later publication deleted it. Then the current
  * build of the same store is used, and when there is none either (or its pointer cannot be
  * read) the result is null and the render goes on without trails. Any other failure of the
- * availability check keeps the pinned build, because it does not prove the file is gone.
+ * availability check keeps the pinned build, because it does not prove the file is gone. The
+ * check and the fallback share one five second deadline.
  */
 export async function resolvePinnedMarkedTrailsBuild(
   pin: RenderManifestMarkedTrails,
 ): Promise<MarkedTrailsBuild | null> {
-  const root = stripTrailingSlashes(pin.base_url);
+  const root = resolveMarkedTrailsBase(pin.base_url);
+  const deadline = AbortSignal.timeout(MARKED_TRAILS_RESOLVE_DEADLINE_MS);
   if (MARKED_TRAILS_PMTILES_KEY_PATTERN.test(pin.pmtiles_key)) {
     const pinned: MarkedTrailsBuild = {
       buildId: pin.build_id,
       dataDate: pin.osm_data_date,
       pmtilesUrl: `${root}/${pin.pmtiles_key}`,
     };
-    if (!(await markedTrailsFileIsGone(pinned.pmtilesUrl))) {
+    if (!(await markedTrailsFileIsGone(pinned.pmtilesUrl, deadline))) {
       return pinned;
     }
   }
   try {
-    return await fetchMarkedTrailsBuild(root);
+    return await fetchMarkedTrailsPointerBuild(root, deadline);
   } catch {
     return null;
   }
 }
 
-async function markedTrailsFileIsGone(url: string): Promise<boolean> {
+async function markedTrailsFileIsGone(url: string, signal: AbortSignal): Promise<boolean> {
   try {
-    const response = await fetch(url, {
-      method: "HEAD",
-      signal: AbortSignal.timeout(MARKED_TRAILS_POINTER_TIMEOUT_MS),
-    });
+    const response = await fetch(url, { method: "HEAD", signal });
     return response.status === 404 || response.status === 403;
   } catch {
     return false;
@@ -176,11 +205,7 @@ export function usePinnedMarkedTrailsBuild(
 }
 
 export type MarkedTrailsAvailability =
-  | "not-configured"
-  | "loading"
-  | "available"
-  | "unavailable"
-  | "error";
+  "not-configured" | "loading" | "available" | "unavailable" | "error";
 
 export interface MarkedTrailsBuildState {
   availability: MarkedTrailsAvailability;
