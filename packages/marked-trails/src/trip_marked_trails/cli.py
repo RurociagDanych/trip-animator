@@ -366,7 +366,7 @@ def _default_build_step(
 ) -> BuildStep:
     def step(region: str, work_dir: Path) -> BuildArtifact:
         work_dir.mkdir(parents=True, exist_ok=True)
-        # A killed run leaves tens of GB of scratch that would fail the check below.
+        # A killed run can leave up to about 25 GB of scratch that would fail the check below.
         _remove_stale_scratch(work_dir, remove_extract=extract_path is None)
         check_free_space(work_dir, min_free_bytes)
         log_disk_usage(work_dir, "start")
