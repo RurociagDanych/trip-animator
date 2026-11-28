@@ -218,3 +218,41 @@ def test_min_free_bytes_defaults_to_24_gib(monkeypatch: pytest.MonkeyPatch) -> N
     args = cli.build_parser().parse_args(["build-publish", "--region", "europe", "--work-dir", "w"])
 
     assert args.min_free_bytes == 24 * GIB
+
+
+def test_stale_scratch_of_a_killed_run_is_removed_before_the_free_space_check(
+    tmp_path: Path, calls: Calls, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    work = tmp_path / "work"
+    stale = [
+        work / "regional" / "001-extract.osm.pbf",
+        work / "tmp" / "nodes.bin",
+        work / "marked-trails-filtered.osm.pbf",
+        work / "extract.osm.pbf",
+        work / "marked-trails.pmtiles",
+    ]
+    for path in stale:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
+    seen: list[bool] = []
+
+    def check(work_dir: Path, minimum: int) -> None:
+        seen.append(any(path.exists() for path in stale))
+
+    monkeypatch.setattr(cli, "check_free_space", check)
+
+    assert run_cli(tmp_path) == 0
+
+    assert seen == [False]
+
+
+def test_a_given_extract_inside_the_work_dir_is_not_removed_as_stale_scratch(
+    tmp_path: Path, calls: Calls
+) -> None:
+    extract = tmp_path / "work" / "extract.osm.pbf"
+    extract.parent.mkdir()
+    extract.write_bytes(b"x")
+
+    assert run_cli(tmp_path, "--extract", str(extract)) == 0
+
+    assert extract.exists()

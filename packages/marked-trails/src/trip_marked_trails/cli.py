@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import shutil
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -12,6 +13,8 @@ from typing import Any
 
 from trip_marked_trails.pipeline import (
     DEFAULT_PLANETILER_CLASSPATH,
+    EXTRACT_NAME,
+    FILTERED_NAME,
     NODEMAP_STORAGE_CHOICES,
     NODEMAP_TYPE_CHOICES,
     PLANETILER_DIRECT_MEMORY_OPTION,
@@ -21,6 +24,7 @@ from trip_marked_trails.pipeline import (
     ResourceLimits,
     check_free_space,
     log_disk_usage,
+    remove_build_scratch,
     run_build,
     validate_region,
 )
@@ -31,7 +35,7 @@ from trip_marked_trails.publish import (
     publish_build,
     read_pointer,
 )
-from trip_marked_trails.regional import run_regional_build
+from trip_marked_trails.regional import SCRATCH_DIR_NAME, run_regional_build
 from trip_marked_trails.trail_store import (
     DEFAULT_S3_PREFIX,
     TrailStoreSettings,
@@ -48,8 +52,9 @@ BuildStep = Callable[[str, Path], BuildArtifact]
 TOOL_MEMORY_LIMIT_BYTES = 3 * 1024**3
 TOOL_CPU_COUNT = 1
 # Estimated peak of a Europe build is 17 to 19 GB (the largest extract, the merged and filtered
-# files, Planetiler's temporary files and the output) and the worst case about 25 GB; the
-# threshold sits just below the worst case so a volume that cannot hold a typical run fails first.
+# files, Planetiler's temporary files and the output) and the worst case about 25 GB. 24 GiB is
+# about 25.8 GB, so the threshold sits above the worst case estimate with about 3% margin; it is
+# an estimate and not a measurement, and a smaller volume is refused before any download.
 MIN_FREE_BYTES = 24 * 1024**3
 _JVM_SIZE_UNITS = {"k": 1024, "m": 1024**2, "g": 1024**3}
 
@@ -348,11 +353,21 @@ def _build_tools(args: argparse.Namespace) -> BuildTools:
     )
 
 
+def _remove_stale_scratch(work_dir: Path, *, remove_extract: bool) -> None:
+    shutil.rmtree(work_dir / SCRATCH_DIR_NAME, ignore_errors=True)
+    remove_build_scratch(work_dir, keep_outputs=False)
+    (work_dir / FILTERED_NAME).unlink(missing_ok=True)
+    if remove_extract:
+        (work_dir / EXTRACT_NAME).unlink(missing_ok=True)
+
+
 def _default_build_step(
     tools: BuildTools, extract_path: Path | None, min_free_bytes: int
 ) -> BuildStep:
     def step(region: str, work_dir: Path) -> BuildArtifact:
         work_dir.mkdir(parents=True, exist_ok=True)
+        # A killed run leaves tens of GB of scratch that would fail the check below.
+        _remove_stale_scratch(work_dir, remove_extract=extract_path is None)
         check_free_space(work_dir, min_free_bytes)
         log_disk_usage(work_dir, "start")
         if extract_path is not None:

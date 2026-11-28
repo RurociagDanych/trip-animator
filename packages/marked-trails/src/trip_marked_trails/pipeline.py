@@ -35,6 +35,8 @@ TOOL_TIMEOUT_SECONDS = 6 * 3600.0
 PMTILES_NAME = "marked-trails.pmtiles"
 MARKED_TRAIL_COUNT_NAME = "marked-trail-count.txt"
 PLANETILER_TMP_NAME = "tmp"
+FILTERED_NAME = "marked-trails-filtered.osm.pbf"
+EXTRACT_NAME = "extract.osm.pbf"
 # osmium reads ahead into queues whose default size makes `merge` grow by 48 to 90 MiB per input
 # file, so a merge of dozens of inputs ran out of the memory cap; small queues lower the peak.
 OSMIUM_QUEUE_ENVIRONMENT = (
@@ -277,9 +279,9 @@ def run_build(
     validate_region(region)
     work_dir.mkdir(parents=True, exist_ok=True)
     runner = runner or SubprocessToolRunner(tools)
-    filtered = work_dir / "marked-trails-filtered.osm.pbf"
+    filtered = work_dir / FILTERED_NAME
     owns_extract = extract_path is None
-    extract = extract_path or work_dir / "extract.osm.pbf"
+    extract = extract_path or work_dir / EXTRACT_NAME
     if owns_extract:
         extract.unlink(missing_ok=True)
     filtered.unlink(missing_ok=True)
