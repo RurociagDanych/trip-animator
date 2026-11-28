@@ -81,11 +81,13 @@ def _parse_pointer(raw: Any, base_url: str) -> MarkedTrailsPin | None:
         return None
     osm_data_date = raw.get("osm_data_date")
     try:
-        return MarkedTrailsPin(
-            build_id=raw.get("current_build_id"),
-            pmtiles_key=raw.get("pmtiles_key"),
-            osm_data_date=osm_data_date if isinstance(osm_data_date, str) else None,
-            base_url=base_url,
+        return MarkedTrailsPin.model_validate(
+            {
+                "build_id": raw.get("current_build_id"),
+                "pmtiles_key": raw.get("pmtiles_key"),
+                "osm_data_date": osm_data_date if isinstance(osm_data_date, str) else None,
+                "base_url": base_url,
+            }
         )
     except ValidationError:
         logger.warning("Marked Trails pointer fails the pin constraints")
