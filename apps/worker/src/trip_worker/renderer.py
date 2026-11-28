@@ -89,7 +89,8 @@ def _external_response_headers(resp: httpx.Response, *, method: str) -> dict[str
     # httpx decodes Content-Encoding, so the upstream length only fits a body-less HEAD answer.
     if method == "HEAD" and "content-length" in resp.headers:
         headers["content-length"] = resp.headers["content-length"]
-    elif method != "HEAD":
+    elif method != "HEAD" and resp.status_code != 304:
+        # A 304 has no body, so a length of 0 would misdescribe the cached entity.
         headers["content-length"] = str(len(resp.content))
     headers["access-control-expose-headers"] = _EXPOSED_RESPONSE_HEADERS
     return headers
