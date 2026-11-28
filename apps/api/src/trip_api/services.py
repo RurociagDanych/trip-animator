@@ -23,6 +23,7 @@ from trip_object_store import InvalidRangeError, ObjectStore, materialize
 from trip_telemetry import (
     CURRENT_ETL_VERSION,
     DEFAULT_ACTIVITY_TYPE,
+    MARKED_TRAILS_PIN_KEY,
     ActivityType,
     LodLevel,
     ParsedTrack,
@@ -354,7 +355,8 @@ def render_job_to_out(job: RenderJob) -> RenderJobOut:
         progress_pct=job.progress_pct,
         attempt_count=job.attempt_count,
         credits_charged=int(getattr(job, "credits_charged", 0) or 0),
-        spec=dict(job.spec_json),
+        # The pin is internal render data, not part of what the client asked for.
+        spec={k: v for k, v in job.spec_json.items() if k != MARKED_TRAILS_PIN_KEY},
         idempotency_key=job.idempotency_key,
         output_object_key=job.output_object_key,
         thumbnail_key=job.thumbnail_key,

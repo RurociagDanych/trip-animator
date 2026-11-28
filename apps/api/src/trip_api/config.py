@@ -78,6 +78,7 @@ class Settings(BaseSettings):
     s3_region: str = "us-east-1"
 
     marked_trails_base_url: str = ""
+    render_base_url: str = "http://localhost:5173"
 
     strava_client_id: str = ""
     strava_client_secret: str = ""

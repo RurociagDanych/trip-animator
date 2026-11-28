@@ -103,10 +103,15 @@ def test_manifest_init_uses_same_origin_for_virtual_photos_only() -> None:
 
 class FakeRoute:
     def __init__(self, url: str, *, method: str = "GET") -> None:
-        self.request = type("Req", (), {"url": url, "method": method})()
+        self.request = type(
+            "Req", (), {"url": url, "method": method, "all_headers": self._headers}
+        )()
         self.continued = False
         self.aborted_reason: str | None = None
         self.fulfilled: dict[str, Any] | None = None
+
+    async def _headers(self) -> dict[str, str]:
+        return {}
 
     async def continue_(self) -> None:
         self.continued = True

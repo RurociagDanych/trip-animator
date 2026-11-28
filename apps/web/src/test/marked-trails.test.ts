@@ -23,7 +23,10 @@ import {
   buildMarkedTrailsBuild,
   fetchMarkedTrailsBuild,
   markedTrailsDataDate,
+  isMarkedTrailsSourceError,
   parseMarkedTrailsPointer,
+  resolveMarkedTrailsBase,
+  resolvePinnedMarkedTrailsBuild,
   toggleMarkedTrailType,
   useMarkedTrailsBuildState,
 } from "../lib/geo/marked-trails";
@@ -437,6 +440,8 @@ describe("Marked Trails build pointer", () => {
       "builds/2026-11-27/marked-trails.pmtiles?x=1",
       "builds/latest/marked-trails.pmtiles",
       "builds/2026-11-27/other.pmtiles",
+      "builds/2026-11-27-0/marked-trails.pmtiles",
+      "builds/2026-11-27-1/marked-trails.pmtiles",
     ]) {
       expect(parseMarkedTrailsPointer({ current_build_id: "x", pmtiles_key: key }), key).toBeNull();
     }
@@ -637,5 +642,73 @@ describe("Marked Trails pointer request limits", () => {
     );
     controller.abort(new Error("cancelled"));
     expect(await outcome).toEqual(new Error("cancelled"));
+  });
+});
+
+describe("pinned build resolution", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const pin = {
+    build_id: "2026-11-20",
+    pmtiles_key: "builds/2026-11-20/marked-trails.pmtiles",
+    osm_data_date: null,
+    base_url: "https://trails.example.test/pointer",
+  };
+
+  it("resolves a root-relative base against the page origin and leaves an absolute one", () => {
+    expect(resolveMarkedTrailsBase("/tiles/marked-trails/")).toBe(
+      `${window.location.origin}/tiles/marked-trails`,
+    );
+    expect(resolveMarkedTrailsBase("https://trails.example.test/pointer/")).toBe(
+      "https://trails.example.test/pointer",
+    );
+  });
+
+  it("requests a root-relative pinned base from the page origin", async () => {
+    const urls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      urls.push(String(input));
+      return new Response(null, { status: 200 });
+    });
+
+    const build = await resolvePinnedMarkedTrailsBuild({ ...pin, base_url: "/tiles/marked-trails" });
+
+    const expected = `${window.location.origin}/tiles/marked-trails/${pin.pmtiles_key}`;
+    expect(urls).toEqual([expected]);
+    expect(build?.pmtilesUrl).toBe(expected);
+  });
+
+  it("shares one five second deadline between the HEAD check and the current.json fallback", async () => {
+    const signals: (AbortSignal | null | undefined)[] = [];
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      signals.push(init?.signal);
+      return String(input).endsWith("current.json")
+        ? new Response(
+            JSON.stringify({
+              current_build_id: "2026-11-27",
+              pmtiles_key: "builds/2026-11-27/marked-trails.pmtiles",
+              osm_data_date: null,
+            }),
+            { status: 200 },
+          )
+        : new Response(null, { status: 404 });
+    });
+
+    const build = await resolvePinnedMarkedTrailsBuild(pin);
+
+    expect(build?.buildId).toBe("2026-11-27");
+    expect(signals).toHaveLength(2);
+    expect(signals[0]).toBeDefined();
+    expect(signals[1]).toBe(signals[0]);
+    expect(timeoutSpy.mock.calls).toEqual([[5_000]]);
+  });
+
+  it("recognizes a map error of the trail source only", () => {
+    expect(isMarkedTrailsSourceError({ sourceId: MARKED_TRAILS_SOURCE_ID })).toBe(true);
+    expect(isMarkedTrailsSourceError({ sourceId: "openmaptiles" })).toBe(false);
+    expect(isMarkedTrailsSourceError({})).toBe(false);
   });
 });

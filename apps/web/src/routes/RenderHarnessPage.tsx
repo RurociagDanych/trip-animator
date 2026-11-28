@@ -8,6 +8,7 @@ import {
   type RenderManifest,
 } from "../lib/api/types";
 import { parseResolutionPreset } from "../lib/geo/format";
+import { usePinnedMarkedTrailsBuild } from "../lib/geo/marked-trails";
 import {
   computeJourneyDurationS,
   computePhotoStopTotalDurationS,
@@ -134,6 +135,25 @@ export function RenderHarnessPage() {
     return createFallbackManifest(jobId);
   }, [jobId]);
 
+  const markedTrailsEnabled =
+    (manifest.spec.marked_trail_types?.length ?? 0) > 0 && !window.__TRIP_RENDER_FRAME_COUNT_ONLY__;
+  const { settled: markedTrailsSettled, build: markedTrailsBuild } = usePinnedMarkedTrailsBuild(
+    manifest.marked_trails,
+    markedTrailsEnabled,
+  );
+  const [markedTrailsGate] = useState(() => {
+    let open: () => void = () => {};
+    const opened = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    return { opened, open };
+  });
+  useEffect(() => {
+    if (markedTrailsSettled) {
+      markedTrailsGate.open();
+    }
+  }, [markedTrailsSettled, markedTrailsGate]);
+
   const timelineStages = useMemo(() => buildTimelineFromManifest(manifest), [manifest]);
   const matchedPhotos = useMemo(
     () => matchPhotosToTimeline(manifest.photos ?? [], timelineStages, manifest.spec),
@@ -204,6 +224,7 @@ export function RenderHarnessPage() {
   // Register deterministic window.__TRIP_RENDERER__ contract
   useEffect(() => {
     const readyPromise = (async () => {
+      await markedTrailsGate.opened;
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
       await Promise.all([
         canvasControllerRef.current?.waitForReady(),
@@ -250,6 +271,7 @@ export function RenderHarnessPage() {
     manifest.spec.camera_preset,
     manifest.spec.camera_keyframes?.length,
     hasStageCameraOverrides,
+    markedTrailsGate.opened,
   ]);
 
   const totalStats = useMemo(
@@ -271,24 +293,27 @@ export function RenderHarnessPage() {
       data-total-frames={totalFrames}
       className="fixed inset-0 flex items-center justify-center overflow-hidden bg-black p-0 m-0"
     >
-      <TripStageCanvas
-        stages={timelineStages}
-        spec={manifest.spec}
-        progressRatio={schedule.progressRatio}
-        durationS={durationS}
-        travelDurationS={schedule.travelDurationS}
-        isPreview={manifest.is_preview}
-        renderMode="deterministic"
-        exactSize={{ width: manifest.width, height: manifest.height }}
-        jobId={jobId}
-        controllerRef={canvasControllerRef}
-        matchedPhotos={matchedPhotos}
-        activePhoto={schedule.activePhoto}
-        cinematicMapZoom={schedule.cinematicMapZoom}
-        climbs={manifest.climbs}
-        projectTitle={manifest.project_title}
-        totalStats={totalStats}
-      />
+      {markedTrailsSettled ? (
+        <TripStageCanvas
+          stages={timelineStages}
+          spec={manifest.spec}
+          progressRatio={schedule.progressRatio}
+          durationS={durationS}
+          travelDurationS={schedule.travelDurationS}
+          isPreview={manifest.is_preview}
+          renderMode="deterministic"
+          exactSize={{ width: manifest.width, height: manifest.height }}
+          jobId={jobId}
+          controllerRef={canvasControllerRef}
+          matchedPhotos={matchedPhotos}
+          activePhoto={schedule.activePhoto}
+          cinematicMapZoom={schedule.cinematicMapZoom}
+          climbs={manifest.climbs}
+          projectTitle={manifest.project_title}
+          totalStats={totalStats}
+          markedTrailsBuild={markedTrailsBuild}
+        />
+      ) : null}
     </main>
   );
 }

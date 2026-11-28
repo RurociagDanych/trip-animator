@@ -16,7 +16,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from trip_object_store import ObjectStore
-from trip_telemetry import calculate_render_credit_quote
+from trip_telemetry import MarkedTrailsPin, calculate_render_credit_quote
 from trip_telemetry.schemas import RenderSpecV2
 
 from trip_api.credits import (
@@ -35,6 +35,7 @@ from trip_api.deps import (
     authenticate_request,
     ensure_utc,
 )
+from trip_api.marked_trails import configured_base, get_marked_trails_pin, spec_json_with_pin
 from trip_api.rate_limit import check_rate_limit
 from trip_api.remote_renders import RenderCallbackPayload, handle_render_callback
 from trip_api.render_backends import (
@@ -81,6 +82,8 @@ def _compute_content_hash(
     spec: RenderSpecV2,
     stages: list[Stage],
     photos: list[ProjectPhoto],
+    pin: MarkedTrailsPin | None = None,
+    trails_base_url: str = "",
 ) -> str:
     stage_payload = [
         {
@@ -108,12 +111,21 @@ def _compute_content_hash(
         }
         for p in sorted(photos, key=lambda ph: str(ph.id))
     ]
+    payload: dict[str, object] = {
+        "spec": spec.model_dump(mode="json"),
+        "stages": stage_payload,
+        "photos": photo_payload,
+    }
+    if spec.marked_trail_types:
+        # The film shows the pinned build from the configured base, so a render of another build
+        # or of another store must not be reused.
+        # Specs without trails keep their hash.
+        payload["marked_trails"] = (
+            {"build_id": pin.build_id, "pmtiles_key": pin.pmtiles_key} if pin is not None else None
+        )
+        payload["marked_trails_base_url"] = trails_base_url
     canonical = json.dumps(
-        {
-            "spec": spec.model_dump(mode="json"),
-            "stages": stage_payload,
-            "photos": photo_payload,
-        },
+        payload,
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -203,7 +215,8 @@ def quote_render_job(
     _enforce_server_render_caps(spec, settings)
 
     photos = get_project_photos(db, project.id, only_enabled=True)
-    content_hash = _compute_content_hash(spec, stages, photos)
+    pin = get_marked_trails_pin(settings) if spec.marked_trail_types else None
+    content_hash = _compute_content_hash(spec, stages, photos, pin, configured_base(settings))
     now = datetime.now(UTC)
     cached_hit = db.scalar(
         select(RenderJob.id)
@@ -296,7 +309,10 @@ def create_render_job(
     _enforce_server_render_caps(spec, settings)
 
     photos = get_project_photos(db, project.id, only_enabled=True)
-    content_hash = _compute_content_hash(spec, stages, photos)
+    # Network read before the content hash and before any row lock (see AGENTS.md code
+    # invariants). The hash includes the pinned build, so the reuse lookup needs it first.
+    pin = get_marked_trails_pin(settings) if spec.marked_trail_types else None
+    content_hash = _compute_content_hash(spec, stages, photos, pin, configured_base(settings))
     now = datetime.now(UTC)
 
     cached_hit = db.scalar(
@@ -326,7 +342,7 @@ def create_render_job(
             idempotency_key=clean_key,
             idempotency_hash=payload_hash,
             content_hash=content_hash,
-            spec_json=spec.model_dump(mode="json"),
+            spec_json=spec_json_with_pin(spec.model_dump(mode="json"), pin),
             status="succeeded",
             progress_pct=100,
             attempt_count=0,
@@ -395,7 +411,7 @@ def create_render_job(
             idempotency_key=clean_key,
             idempotency_hash=payload_hash,
             content_hash=content_hash,
-            spec_json=spec.model_dump(mode="json"),
+            spec_json=spec_json_with_pin(spec.model_dump(mode="json"), pin),
             status="queued",
             progress_pct=0,
             attempt_count=0,

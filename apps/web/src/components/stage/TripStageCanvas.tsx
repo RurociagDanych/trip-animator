@@ -66,6 +66,7 @@ import {
 import {
   MARKED_TRAILS_PMTILES_PROTOCOL,
   type MarkedTrailsBuild,
+  isMarkedTrailsSourceError,
   markedTrailsDataDate,
 } from "../../lib/geo/marked-trails";
 import {
@@ -1411,6 +1412,9 @@ export function TripStageCanvas({
     [markedTrailTypesKey, markedTrailsPmtilesUrl],
   );
   const markedTrailsOverlayRef = useRef(markedTrailsOverlay);
+  // The build whose PMTiles file could not be read. The trails are not drawn then, so the
+  // credit line must not claim their data date.
+  const [failedMarkedTrailsUrl, setFailedMarkedTrailsUrl] = useState<string | null>(null);
   useEffect(() => {
     markedTrailsOverlayRef.current = markedTrailsOverlay;
   }, [markedTrailsOverlay]);
@@ -1465,6 +1469,11 @@ export function TripStageCanvas({
       });
     };
     map.on("move", handleManualMove);
+    map.on("error", (event) => {
+      if (isMarkedTrailsSourceError(event)) {
+        setFailedMarkedTrailsUrl(markedTrailsOverlayRef.current.pmtilesUrl);
+      }
+    });
 
     map.on("style.load", () => {
       sync3dBuildingsAndSky(map, is3dActive, spec.terrain_exaggeration, spec.map_style);
@@ -2506,7 +2515,9 @@ export function TripStageCanvas({
       <MapAttribution
         styleId={spec.map_style}
         markedTrailsDataDate={
-          markedTrailsOverlay.pmtilesUrl ? markedTrailsDataDate(markedTrailsBuild) : null
+          markedTrailsOverlay.pmtilesUrl && markedTrailsOverlay.pmtilesUrl !== failedMarkedTrailsUrl
+            ? markedTrailsDataDate(markedTrailsBuild)
+            : null
         }
       />
     </div>
