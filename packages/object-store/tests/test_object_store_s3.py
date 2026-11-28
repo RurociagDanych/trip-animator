@@ -773,3 +773,56 @@ def test_open_stream_uses_the_prefixed_key() -> None:
     stream = store.open_stream("video.mp4")
     assert b"".join(stream.chunks) == b"0123456789ABCDEF"
     assert client.keys == ["p/video.mp4"]
+
+
+def test_explicit_credentials_win_over_the_aws_environment_variables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAFROMENV")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret-from-env")
+
+    store = S3ObjectStore(
+        bucket="local",
+        endpoint_url="http://rustfs:9000",
+        access_key_id="minioadmin",
+        secret_access_key="miniosecret",
+        region="us-east-1",
+    )
+
+    credentials = store.client._request_signer._credentials
+    assert credentials.access_key == "minioadmin"
+    assert credentials.secret_key == "miniosecret"
+
+
+def test_explicit_region_and_endpoint_win_over_the_aws_region_variable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AWS_REGION", "eu-west-9")
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+
+    store = S3ObjectStore(
+        bucket="local",
+        endpoint_url="http://rustfs:9000",
+        access_key_id="minioadmin",
+        secret_access_key="miniosecret",
+        region="us-east-1",
+    )
+
+    assert store.client.meta.region_name == "us-east-1"
+    assert store.client.meta.endpoint_url == "http://rustfs:9000"
+
+
+def test_aws_region_variable_alone_does_not_set_the_client_region(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AWS_REGION", "eu-west-9")
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+
+    store = S3ObjectStore(
+        bucket="local",
+        endpoint_url="http://rustfs:9000",
+        access_key_id="minioadmin",
+        secret_access_key="miniosecret",
+    )
+
+    assert store.client.meta.region_name != "eu-west-9"

@@ -96,11 +96,14 @@ class Settings(BaseSettings):
 
     render_retention_days: int = Field(default=7, ge=1, le=3650)
     render_backend: Literal["local", "aws_sfn_lambda"] = "local"
-    render_aws_region: str = "eu-central-1"
+    aws_region: str = "us-east-1"
+    render_aws_region: str = Field(default="", repr=False, exclude=True)
     render_aws_state_machine_arn: str = ""
     render_aws_staging_bucket: str = ""
-    render_aws_access_key_id: str = ""
-    render_aws_secret_access_key: str = ""
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+    render_aws_access_key_id: str = Field(default="", repr=False, exclude=True)
+    render_aws_secret_access_key: str = Field(default="", repr=False, exclude=True)
     render_aws_endpoint_url: str = ""
     render_callback_base_url: str = ""
     render_callback_secret: str = ""
@@ -234,6 +237,21 @@ class Settings(BaseSettings):
         return raw
 
     @model_validator(mode="after")
+    def _reject_renamed_render_aws_keys(self) -> Settings:
+        for old, new, value in (
+            ("RENDER_AWS_REGION", "AWS_REGION", self.render_aws_region),
+            ("RENDER_AWS_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID", self.render_aws_access_key_id),
+            (
+                "RENDER_AWS_SECRET_ACCESS_KEY",
+                "AWS_SECRET_ACCESS_KEY",
+                self.render_aws_secret_access_key,
+            ),
+        ):
+            if value.strip():
+                raise ValueError(f"{old} was renamed to {new}; rename it in .env")
+        return self
+
+    @model_validator(mode="after")
     def enforce_security_invariants(self) -> Settings:
         if self.app_env != "production":
             if not self.session_secret:
@@ -317,11 +335,11 @@ class Settings(BaseSettings):
                         "RENDER_AWS_STAGING_BUCKET is required in production when "
                         "RENDER_BACKEND=aws_sfn_lambda"
                     )
-                has_render_key = bool(self.render_aws_access_key_id.strip())
-                has_render_secret = bool(self.render_aws_secret_access_key.strip())
-                if has_render_key != has_render_secret:
+                has_aws_key = bool(self.aws_access_key_id.strip())
+                has_aws_secret = bool(self.aws_secret_access_key.strip())
+                if has_aws_key != has_aws_secret:
                     raise ValueError(
-                        "RENDER_AWS_ACCESS_KEY_ID and RENDER_AWS_SECRET_ACCESS_KEY must both be "
+                        "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must both be "
                         "set or both omitted for IAM role credentials"
                     )
         return self

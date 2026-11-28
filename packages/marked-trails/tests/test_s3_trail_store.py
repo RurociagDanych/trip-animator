@@ -1,5 +1,4 @@
 import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -359,11 +358,10 @@ def capture_boto_client(
 
 def s3_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (
-        "MARKED_TRAILS_AWS_ACCESS_KEY_ID",
-        "MARKED_TRAILS_AWS_SECRET_ACCESS_KEY",
-        "MARKED_TRAILS_AWS_SESSION_TOKEN",
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
+        "AWS_REGION",
+        "MARKED_TRAILS_S3_REGION",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("MARKED_TRAILS_STORE", "s3")
@@ -385,13 +383,12 @@ def publish_without_injected_client(tmp_path: Path) -> int:
     )
 
 
-def test_dedicated_credentials_go_only_to_the_trail_store_client(
+def test_aws_credentials_go_only_to_the_trail_store_client(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     s3_environment(monkeypatch)
-    monkeypatch.setenv("MARKED_TRAILS_AWS_ACCESS_KEY_ID", "AKIATRAILS")
-    monkeypatch.setenv("MARKED_TRAILS_AWS_SECRET_ACCESS_KEY", "trail-secret")
-    monkeypatch.setenv("MARKED_TRAILS_AWS_SESSION_TOKEN", "trail-token")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATRAILS")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "trail-secret")
     client = FakeS3Client()
     calls = capture_boto_client(monkeypatch, client)
 
@@ -400,12 +397,11 @@ def test_dedicated_credentials_go_only_to_the_trail_store_client(
     assert len(calls) == 1
     assert calls[0]["aws_access_key_id"] == "AKIATRAILS"
     assert calls[0]["aws_secret_access_key"] == "trail-secret"
-    assert calls[0]["aws_session_token"] == "trail-token"
+    assert "aws_session_token" not in calls[0]
     assert "marked-trails/current.json" in client.objects
-    assert "AWS_ACCESS_KEY_ID" not in os.environ
 
 
-def test_without_dedicated_credentials_the_default_aws_chain_is_used(
+def test_without_aws_credentials_the_default_aws_chain_is_used(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     s3_environment(monkeypatch)
@@ -421,12 +417,11 @@ def test_without_dedicated_credentials_the_default_aws_chain_is_used(
 @pytest.mark.parametrize(
     "present",
     [
-        {"MARKED_TRAILS_AWS_ACCESS_KEY_ID": "AKIATRAILS"},
-        {"MARKED_TRAILS_AWS_SECRET_ACCESS_KEY": "trail-secret"},
-        {"MARKED_TRAILS_AWS_SESSION_TOKEN": "trail-token"},
+        {"AWS_ACCESS_KEY_ID": "AKIATRAILS"},
+        {"AWS_SECRET_ACCESS_KEY": "trail-secret"},
     ],
 )
-def test_incomplete_dedicated_credentials_are_rejected(
+def test_incomplete_aws_credentials_are_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, present: dict[str, str]
 ) -> None:
     s3_environment(monkeypatch)
@@ -438,6 +433,33 @@ def test_incomplete_dedicated_credentials_are_rejected(
         publish_without_injected_client(tmp_path)
 
     assert exc.value.code == 2
+    assert calls == []
+
+
+def test_publisher_region_comes_from_aws_region(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s3_environment(monkeypatch)
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    calls = capture_boto_client(monkeypatch, FakeS3Client())
+
+    assert publish_without_injected_client(tmp_path) == 0
+
+    assert calls[0]["region_name"] == "us-east-1"
+
+
+def test_old_publisher_region_variable_is_rejected_naming_aws_region(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    s3_environment(monkeypatch)
+    monkeypatch.setenv("MARKED_TRAILS_S3_REGION", "us-east-1")
+    calls = capture_boto_client(monkeypatch, FakeS3Client())
+
+    with pytest.raises(SystemExit) as exc:
+        publish_without_injected_client(tmp_path)
+
+    assert exc.value.code == 2
+    assert "AWS_REGION" in capsys.readouterr().err
     assert calls == []
 
 

@@ -83,11 +83,11 @@ The target builds the builder image (osmium, Planetiler and the `trip-marked-tra
 
 ### Marked Trails on AWS
 
-Production serves the trail store from a private S3 bucket behind CloudFront. Both come from `infra/terraform/standalone-remote-render`, the root that deploys the render Lambdas. The bucket must be in `us-east-1` and the root rejects another region, but the Makefile default is `eu-central-1`, so deploy with `make remote-render-deploy REMOTE_RENDER_AWS_REGION=us-east-1` (`terraform.tfvars.example` also sets `us-east-1`). The Marked Trails resources are created only when `marked_trails_app_origins` is not empty; without it the deploy is the render stack alone. A cloud build needs these steps, in order:
+Production serves the trail store from a private S3 bucket behind CloudFront. Both come from `infra/terraform/standalone-remote-render`, the root that deploys the render Lambdas. The bucket must be in `us-east-1` and the root rejects another region, and the Makefile `REMOTE_RENDER_AWS_REGION` defaults to `AWS_REGION` when it is set, otherwise `us-east-1` (`terraform.tfvars.example` and the Terraform default are `us-east-1` too); override it with `make remote-render-deploy REMOTE_RENDER_AWS_REGION=<region>`. The Marked Trails resources are created only when `marked_trails_app_origins` is not empty; without it the deploy is the render stack alone. A cloud build needs these steps, in order:
 
 1. Set `marked_trails_app_origins` (default empty, which creates nothing) in that root's `terraform.tfvars` to the app origins that read the tiles in the browser, for example `["https://trips.example.com"]`. The CloudFront response headers policy answers only those origins, allows `GET` and `HEAD` with `Range`, and exposes `Content-Range`, `ETag` and `Accept-Ranges`. `marked_trails_prefix` (default `marked-trails`) is the key prefix of the store.
 2. Review `terraform plan`, then `terraform apply`. Read the outputs: `marked_trails_bucket_name`, `marked_trails_base_url`, `marked_trails_cloudfront_origin` and `marked_trails_publisher_policy_arn`.
-3. Attach the policy of `marked_trails_publisher_policy_arn` to the IAM user or role that Airflow uses; put that user's keys in `.env.marked-trails` as described in [Marked Trails build in Airflow](#marked-trails-build-in-airflow). It allows get, put, delete and abort-multipart on keys under the prefix and `ListBucket` only with the prefix condition. Existence checks of the CLI list the full key with `MaxKeys` 1 instead of sending a HEAD, so no unprefixed list permission is needed.
+3. Attach the policy of `marked_trails_publisher_policy_arn` to the same IAM user whose keys are `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in `.env`, next to the render policy, as described in [Marked Trails build in Airflow](#marked-trails-build-in-airflow). It allows get, put, delete and abort-multipart on keys under the prefix and `ListBucket` only with the prefix condition. Existence checks of the CLI list the full key with `MaxKeys` 1 instead of sending a HEAD, so no unprefixed list permission is needed.
 4. Add the CloudFront origin (`https://<id>.cloudfront.net`, from `marked_trails_cloudfront_origin`) to the render tile allowlist and to the edge CSP tile origins, keeping the origins that are already there:
    - Lambda renders: append it to `map_tile_allowlist` in the Terraform tfvars (comma-separated, for example `https://tiles.openfreemap.org,https://<id>.cloudfront.net`), then apply.
    - VPS renders: append it to `MAP_TILE_ALLOWLIST` in `.env`.
@@ -99,7 +99,7 @@ Production serves the trail store from a private S3 bucket behind CloudFront. Bo
 export MARKED_TRAILS_STORE=s3
 export MARKED_TRAILS_S3_BUCKET=<marked_trails_bucket_name>
 export MARKED_TRAILS_S3_PREFIX=marked-trails
-export MARKED_TRAILS_S3_REGION=us-east-1
+export AWS_REGION=us-east-1
 trip-marked-trails build-publish --region europe/andorra --work-dir /work
 ```
 
@@ -136,6 +136,8 @@ To roll back, check that `builds/<previous_build_id>/marked-trails.pmtiles` exis
 ## Docker Compose deployment
 
 `infra/compose.yaml` orchestrates PostgreSQL, RustFS (under the service name `minio`), initialization and migrations, the API, ingestion, the render worker, the web app, Caddy, and Airflow.
+
+**Operator step when upgrading:** rename `RENDER_AWS_ACCESS_KEY_ID` to `AWS_ACCESS_KEY_ID`, `RENDER_AWS_SECRET_ACCESS_KEY` to `AWS_SECRET_ACCESS_KEY` and `RENDER_AWS_REGION` or `MARKED_TRAILS_S3_REGION` to `AWS_REGION` (set it to `us-east-1`) in the production `.env` before deploying. The API refuses to start while an old name is set, and so does the Marked Trails publisher for `MARKED_TRAILS_S3_REGION`. The same keys and region now serve the render backend and the Marked Trails publisher.
 
 ```bash
 # Validate Compose configuration
@@ -250,7 +252,7 @@ make lint-airflow
 
 Prerequisites on the host:
 
-- Set `MARKED_TRAILS_STORE=s3`, `MARKED_TRAILS_S3_BUCKET`, `MARKED_TRAILS_S3_PREFIX` and `MARKED_TRAILS_S3_REGION` in `.env`, and copy `marked-trails.env.example` to `.env.marked-trails` with the keys of the publisher policy from [Marked Trails on AWS](#marked-trails-on-aws): `MARKED_TRAILS_AWS_ACCESS_KEY_ID`, `MARKED_TRAILS_AWS_SECRET_ACCESS_KEY` and, for temporary credentials, `MARKED_TRAILS_AWS_SESSION_TOKEN`. Only the `airflow` service loads that file (every service loads `.env`, so the keys must not go there), and the CLI gives them only to the trail store client, never to other AWS clients as `AWS_ACCESS_KEY_ID`. Without the file the default AWS chain applies. Never commit the file; it is ignored by git. The Airflow container mounts no local store, so production uses `s3`.
+- Set `MARKED_TRAILS_STORE=s3`, `MARKED_TRAILS_S3_BUCKET` and `MARKED_TRAILS_S3_PREFIX` in `.env`. The publisher uses the same `AWS_REGION`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` as the render backend; the IAM user needs the publisher policy from [Marked Trails on AWS](#marked-trails-on-aws) as well as the render policy. Like the render keys, they reach every service that loads `.env`. The CLI passes them explicitly to the trail store client. The RustFS and MinIO clients never use them: those get `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` explicitly. With both empty the default AWS chain applies; setting only one is an error. The Airflow container mounts no local store, so production uses `s3`.
 - Keep at least 12 GB free for the Docker volume `marked_trails_work`, mounted at `/work/marked-trails`. Airflow's root filesystem is read-only and `/tmp` is a 512 MB tmpfs, so the build writes only to that volume. The largest extract is France at about 5.1 GB (Germany is 4.9 GB, Poland 2.1 GB); with the filtered files, the Planetiler working files and the PMTiles output (0.8 to 1.6 GB before the zoom cuts) the peak is about 10 GB. The task checks the free space of the volume first and fails under 12 GiB before it downloads anything. The 35.6 GB Europe extract is never downloaded: Geofabrik lists the countries of Europe and each is downloaded, filtered and deleted before the next.
 
 To run it, unpause the DAG once (new DAGs start paused), then trigger it from the Airflow UI with the parameter `region`, or from the host:

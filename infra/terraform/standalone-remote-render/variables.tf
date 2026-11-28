@@ -1,6 +1,6 @@
 variable "aws_region" {
   type        = string
-  default     = "eu-central-1"
+  default     = "us-east-1"
   description = "AWS region for the standalone remote render worker stack."
 }
 

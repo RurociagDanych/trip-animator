@@ -5,7 +5,7 @@ MARKED_TRAILS_DIR ?= $(CURDIR)/.tmp/marked-trails
 MARKED_TRAILS_BUILDER_IMAGE ?= trip-animator-marked-trails-builder:local
 
 REMOTE_RENDER_TF_DIR ?= infra/terraform/standalone-remote-render
-REMOTE_RENDER_AWS_REGION ?= eu-central-1
+REMOTE_RENDER_AWS_REGION ?= $(or $(AWS_REGION),us-east-1)
 REMOTE_RENDER_IMAGE_TAG ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo latest)
 REMOTE_RENDER_TF_ARGS ?=
 

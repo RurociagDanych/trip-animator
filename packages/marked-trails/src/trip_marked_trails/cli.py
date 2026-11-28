@@ -94,8 +94,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     publish.add_argument(
         "--s3-region",
-        default=os.environ.get("MARKED_TRAILS_S3_REGION") or None,
-        help="AWS region of the bucket; defaults to MARKED_TRAILS_S3_REGION, then the AWS chain",
+        default=os.environ.get("AWS_REGION") or None,
+        help="AWS region of the bucket; defaults to AWS_REGION, then the AWS chain",
     )
     publish.add_argument(
         "--work-dir", required=True, type=Path, help="Scratch directory for the build"
@@ -141,9 +141,9 @@ def main(
     pointer deletes nothing. A parent region such as `europe` is built one Geofabrik child extract
     at a time; a leaf region or a local `--extract` is built directly.
 
-    With the s3 store, `MARKED_TRAILS_AWS_ACCESS_KEY_ID`, `MARKED_TRAILS_AWS_SECRET_ACCESS_KEY`
-    and the optional `MARKED_TRAILS_AWS_SESSION_TOKEN` are read from the environment and given
-    only to the trail store client; without them the default AWS chain applies.
+    With the s3 store, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are read
+    from the environment and passed to the trail store client; with both empty the default
+    AWS chain applies and exactly one of them set is an error.
 
     `build_step` replaces the osmium and Planetiler build in tests and `s3_client` replaces
     the boto3 client; publication policy is the same either way. The built file in the work
@@ -152,6 +152,8 @@ def main(
     parser = build_parser()
     args = parser.parse_args(argv)
     build_date = args.build_date or datetime.now(UTC).date()
+    if os.environ.get("MARKED_TRAILS_S3_REGION", "").strip():
+        parser.error("MARKED_TRAILS_S3_REGION was renamed to AWS_REGION; rename it in .env")
     if args.store not in STORE_CHOICES:
         parser.error(
             f"MARKED_TRAILS_STORE must be one of {', '.join(STORE_CHOICES)}, got {args.store!r}"
@@ -173,9 +175,8 @@ def main(
                 s3_bucket=args.s3_bucket,
                 s3_prefix=args.s3_prefix,
                 s3_region=args.s3_region,
-                s3_access_key_id=os.environ.get("MARKED_TRAILS_AWS_ACCESS_KEY_ID", ""),
-                s3_secret_access_key=os.environ.get("MARKED_TRAILS_AWS_SECRET_ACCESS_KEY", ""),
-                s3_session_token=os.environ.get("MARKED_TRAILS_AWS_SESSION_TOKEN", ""),
+                s3_access_key_id=os.environ.get("AWS_ACCESS_KEY_ID", ""),
+                s3_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY", ""),
             ),
             s3_client=s3_client,
         )

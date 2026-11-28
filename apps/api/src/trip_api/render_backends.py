@@ -261,9 +261,9 @@ def build_render_backend(settings: Settings) -> RenderBackend:
         return AwsSfnLambdaBackend(
             state_machine_arn=settings.render_aws_state_machine_arn,
             staging_bucket=settings.render_aws_staging_bucket,
-            region=settings.render_aws_region,
-            access_key_id=settings.render_aws_access_key_id,
-            secret_access_key=settings.render_aws_secret_access_key,
+            region=settings.aws_region,
+            access_key_id=settings.aws_access_key_id,
+            secret_access_key=settings.aws_secret_access_key,
             endpoint_url=settings.render_aws_endpoint_url,
         )
     return LocalRenderBackend()
