@@ -35,6 +35,7 @@ from trip_api.deps import (
     authenticate_request,
     ensure_utc,
 )
+from trip_api.marked_trails import fetch_marked_trails_pin, spec_json_with_pin
 from trip_api.rate_limit import check_rate_limit
 from trip_api.remote_renders import RenderCallbackPayload, handle_render_callback
 from trip_api.render_backends import (
@@ -345,6 +346,8 @@ def create_render_job(
             matched_photo_count=_count_matched_photos(photos),
             cached=False,
         )
+        # Network read before any row lock is taken (see AGENTS.md code invariants).
+        pin = fetch_marked_trails_pin(settings) if spec.marked_trail_types else None
         lock_user_for_credit_update(db, auth.user.id)
         existing_after_lock = db.scalar(
             select(RenderJob).where(
@@ -395,7 +398,7 @@ def create_render_job(
             idempotency_key=clean_key,
             idempotency_hash=payload_hash,
             content_hash=content_hash,
-            spec_json=spec.model_dump(mode="json"),
+            spec_json=spec_json_with_pin(spec.model_dump(mode="json"), pin),
             status="queued",
             progress_pct=0,
             attempt_count=0,

@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from trip_telemetry.analytics import bin_track_color_segments, extract_stage_highlights
 from trip_telemetry.pipeline import LOD_TOLERANCES_DEG, simplify_track_points
@@ -162,6 +162,39 @@ class ManifestPhoto(BaseModel):
     asset_url: str | None = None
 
 
+MARKED_TRAILS_PIN_KEY = "marked_trails_pin"
+
+
+class MarkedTrailsPin(BaseModel):
+    """Marked Trails build chosen when a render was enqueued.
+
+    `base_url` is absolute, so the render page needs no other configuration to read the
+    pinned PMTiles file or, when it is gone, `current.json`.
+    """
+
+    build_id: str
+    pmtiles_key: str
+    osm_data_date: str | None = None
+    base_url: str
+
+
+def marked_trails_pin_from_spec_json(
+    spec_json: dict[str, object], *, trail_types_enabled: bool
+) -> MarkedTrailsPin | None:
+    """Read the pin the API stored next to the render spec, or None when absent or invalid.
+
+    A malformed pin is dropped so that missing trail data never fails a render.
+    """
+    raw = spec_json.get(MARKED_TRAILS_PIN_KEY)
+    if not trail_types_enabled or not isinstance(raw, dict):
+        return None
+    try:
+        return MarkedTrailsPin.model_validate(raw)
+    except ValidationError:
+        logger.warning("Ignoring malformed %s in render spec", MARKED_TRAILS_PIN_KEY)
+        return None
+
+
 class RenderManifest(BaseModel):
     job_id: str
     project_id: str
@@ -176,6 +209,7 @@ class RenderManifest(BaseModel):
     stages: list[ManifestStage]
     photos: list[ManifestPhoto] = Field(default_factory=list)
     climbs: list[ManifestClimb] = Field(default_factory=list)
+    marked_trails: MarkedTrailsPin | None = None
 
 
 @dataclass(frozen=True)
@@ -742,6 +776,9 @@ def build_render_manifest(
         stages=manifest_stages,
         photos=manifest_photos,
         climbs=manifest_climbs,
+        marked_trails=marked_trails_pin_from_spec_json(
+            spec_json, trail_types_enabled=bool(spec.marked_trail_types)
+        ),
     )
 
 

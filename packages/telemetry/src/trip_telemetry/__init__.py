@@ -97,12 +97,14 @@ from trip_telemetry.pipeline import (
 from trip_telemetry.ref_data import build_reference_parquets, resolve_ref_data_dir
 from trip_telemetry.render_manifest import (
     ByteStore,
+    MARKED_TRAILS_PIN_KEY,
     FrameSpan,
     ManifestClimb,
     ManifestColorSegment,
     ManifestPhoto,
     ManifestPoint,
     ManifestStage,
+    MarkedTrailsPin,
     PhotoRecord,
     RenderBundle,
     RenderManifest,
@@ -219,6 +221,8 @@ __all__ = [
     "RenderManifest",
     "StageRecord",
     "build_color_segments",
+    "MARKED_TRAILS_PIN_KEY",
+    "MarkedTrailsPin",
     "build_render_bundle",
     "build_render_manifest",
     "chunk_manifest_key",
