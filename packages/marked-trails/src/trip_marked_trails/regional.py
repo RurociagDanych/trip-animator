@@ -22,6 +22,7 @@ from trip_marked_trails.pipeline import (
     build_tiles,
     download_extract,
     filter_extract,
+    log_disk_usage,
     remove_build_scratch,
     run_build,
     validate_region,
@@ -88,6 +89,7 @@ def _merge_history(
         for start in range(0, len(paths), MERGE_BATCH_SIZE):
             output = scratch / f"merge-{level}-{start // MERGE_BATCH_SIZE:03d}.osh.pbf"
             _merge(paths[start : start + MERGE_BATCH_SIZE], output, tools, runner)
+            log_disk_usage(scratch.parent, f"merge batch {level}-{start // MERGE_BATCH_SIZE}")
             merged.append(output)
         paths = merged
         level += 1
@@ -211,6 +213,7 @@ def run_regional_build(
         finally:
             extract.unlink(missing_ok=True)
         logger.info("%s has data date %s", child, date)
+        log_disk_usage(work_dir, f"filter of {child}")
         return _FilteredChild(filtered, date)
 
     succeeded = False
@@ -218,9 +221,11 @@ def run_regional_build(
         fetched = [fetch(position) for position in range(len(children))]
         history = scratch / MERGED_HISTORY_NAME
         _merge_history([child.path for child in fetched], history, scratch, tools, runner)
+        log_disk_usage(work_dir, "merge")
         merged = scratch / MERGED_NAME
         runner.run([tools.osmium, "time-filter", "--overwrite", "-o", str(merged), str(history)])
         history.unlink()
+        log_disk_usage(work_dir, "time-filter")
         artifact = build_tiles(merged, work_dir, _oldest_date(region, fetched), tools, runner)
         succeeded = True
         return artifact

@@ -1,8 +1,9 @@
-.PHONY: help setup bootstrap lint format format-check typecheck test test-pg dbt-parse dbt-build reap-dry-run check dev-api dev-web compose-config airflow-up airflow-down test-airflow lint-airflow remote-render-push remote-render-deploy marked-trails-image marked-trails-local test-marked-trails-image
+.PHONY: help setup bootstrap lint format format-check typecheck test test-pg dbt-parse dbt-build reap-dry-run check dev-api dev-web compose-config airflow-up airflow-down test-airflow lint-airflow remote-render-push remote-render-deploy marked-trails-image marked-trails-ecr-push marked-trails-local test-marked-trails-image
 
 MARKED_TRAILS_REGION ?= europe/andorra
 MARKED_TRAILS_DIR ?= $(CURDIR)/.tmp/marked-trails
 MARKED_TRAILS_BUILDER_IMAGE ?= trip-animator-marked-trails-builder:local
+MARKED_TRAILS_BUILDER_TAG ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo latest)
 
 REMOTE_RENDER_TF_DIR ?= infra/terraform/standalone-remote-render
 REMOTE_RENDER_AWS_REGION ?= $(or $(AWS_REGION),us-east-1)
@@ -34,6 +35,7 @@ help:
 		remote-render-push 'Build and push the AWS Lambda render image to ECR' \
 		remote-render-deploy 'Bootstrap ECR, push Lambda image, and apply standalone AWS Terraform' \
 		marked-trails-image 'Build the Marked Trails builder image (osmium, Planetiler, CLI)' \
+		marked-trails-ecr-push 'Build and push the Marked Trails builder image to its ECR repository' \
 		marked-trails-local 'Build and publish a small Marked Trails region to .tmp/marked-trails' \
 		test-marked-trails-image 'Run the Docker test that builds and runs the Marked Trails builder image'
 
@@ -132,6 +134,19 @@ lint-airflow:
 
 marked-trails-image:
 	docker build -f infra/docker/Dockerfile.marked-trails-builder -t $(MARKED_TRAILS_BUILDER_IMAGE) .
+
+marked-trails-ecr-push:
+	@set -eu; \
+	ecr_url="$$(terraform -chdir="$(REMOTE_RENDER_TF_DIR)" output -raw marked_trails_builder_ecr_repository_url)"; \
+	aws ecr get-login-password --region "$(REMOTE_RENDER_AWS_REGION)" \
+		| docker login --username AWS --password-stdin "$$ecr_url"; \
+	docker buildx build --platform linux/amd64 \
+		--provenance=false \
+		--sbom=false \
+		-f infra/docker/Dockerfile.marked-trails-builder \
+		-t "$$ecr_url:$(MARKED_TRAILS_BUILDER_TAG)" \
+		--push \
+		.
 
 marked-trails-local: marked-trails-image
 	@mkdir -p "$(MARKED_TRAILS_DIR)/store" "$(MARKED_TRAILS_DIR)/work"

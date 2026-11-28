@@ -540,7 +540,7 @@ def test_failing_country_fails_the_run_and_publishes_nothing(tmp_path: Path) -> 
 
 
 def test_limited_command_wraps_the_tool_in_nice_prlimit_taskset_and_setpriv() -> None:
-    limits = ResourceLimits(memory_bytes=3 * GIB, nice=10, cpu=2)
+    limits = ResourceLimits(memory_bytes=3 * GIB, nice=10, cpus=(2,))
 
     assert limited_command(["java", "-version"], limits) == [
         "nice",
@@ -559,8 +559,16 @@ def test_limited_command_wraps_the_tool_in_nice_prlimit_taskset_and_setpriv() ->
     ]
 
 
+def test_limited_command_pins_to_every_listed_cpu() -> None:
+    limits = ResourceLimits(memory_bytes=GIB, cpus=(0, 1, 2, 3))
+
+    command = limited_command(["java", "-version"], limits)
+
+    assert command[command.index("taskset") + 1 : command.index("taskset") + 3] == ["-c", "0,1,2,3"]
+
+
 def test_limited_osmium_runs_with_small_queues_to_bound_its_memory() -> None:
-    limits = ResourceLimits(memory_bytes=3 * GIB, nice=10, cpu=2)
+    limits = ResourceLimits(memory_bytes=3 * GIB, nice=10, cpus=(2,))
 
     assert limited_command(["osmium", "fileinfo", "x.pbf"], limits) == [
         "nice",
@@ -596,7 +604,7 @@ needs_limit_tools = pytest.mark.skipif(
 @needs_limit_tools
 def test_tool_cannot_allocate_more_than_the_memory_cap(tmp_path: Path) -> None:
     runner = SubprocessToolRunner(
-        BuildTools(limits=ResourceLimits(memory_bytes=512 * 1024**2, nice=10, cpu=None))
+        BuildTools(limits=ResourceLimits(memory_bytes=512 * 1024**2, nice=10, cpus=None))
     )
     script = (
         "import sys\ntry:\n    bytearray(1024**3)\nexcept MemoryError:\n    sys.exit('MemoryError')"
@@ -609,7 +617,7 @@ def test_tool_cannot_allocate_more_than_the_memory_cap(tmp_path: Path) -> None:
 @needs_limit_tools
 def test_tool_under_the_cap_runs_and_its_output_is_captured() -> None:
     runner = SubprocessToolRunner(
-        BuildTools(limits=ResourceLimits(memory_bytes=1 * GIB, nice=10, cpu=None))
+        BuildTools(limits=ResourceLimits(memory_bytes=1 * GIB, nice=10, cpus=None))
     )
 
     assert runner.capture([sys.executable, "-c", "print('ok')"]).strip() == "ok"

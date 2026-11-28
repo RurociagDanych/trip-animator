@@ -42,3 +42,33 @@ output "marked_trails_publisher_policy_arn" {
   value       = try(aws_iam_policy.marked_trails_publisher[0].arn, null)
   description = "IAM policy ARN to attach to the Airflow Marked Trails publisher user or role."
 }
+
+output "marked_trails_builder_ecr_repository_url" {
+  value       = try(aws_ecr_repository.marked_trails_builder[0].repository_url, null)
+  description = "ECR repository of the Marked Trails builder image for make marked-trails-ecr-push."
+}
+
+output "marked_trails_fargate_cluster" {
+  value       = try(aws_ecs_cluster.marked_trails_builder[0].name, null)
+  description = "ECS cluster name for MARKED_TRAILS_FARGATE_CLUSTER."
+}
+
+output "marked_trails_fargate_task_definition" {
+  value       = try(aws_ecs_task_definition.marked_trails_builder[0].family, null)
+  description = "Task definition family for MARKED_TRAILS_FARGATE_TASK_DEFINITION; RunTask uses the latest revision of the family."
+}
+
+output "marked_trails_fargate_subnet_ids" {
+  value       = length(aws_subnet.marked_trails_builder) > 0 ? join(",", aws_subnet.marked_trails_builder[*].id) : null
+  description = "Comma-separated public subnet IDs, one per zone, for MARKED_TRAILS_FARGATE_SUBNETS."
+}
+
+output "marked_trails_fargate_security_group_id" {
+  value       = try(aws_security_group.marked_trails_builder[0].id, null)
+  description = "Egress-only security group ID for MARKED_TRAILS_FARGATE_SECURITY_GROUPS."
+}
+
+output "marked_trails_fargate_launcher_policy_arn" {
+  value       = try(aws_iam_policy.marked_trails_launcher[0].arn, null)
+  description = "IAM policy ARN to attach to the Airflow Marked Trails user, next to the publisher policy."
+}

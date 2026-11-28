@@ -25,12 +25,18 @@ PLANETILER_HEAP_OPTION = "-Xmx2g"
 # push the JVM past the 3 GB limit on top of the 2 GB heap.
 PLANETILER_DIRECT_MEMORY_OPTION = "-XX:MaxDirectMemorySize=512m"
 DEFAULT_PLANETILER_CLASSPATH = "/opt/marked-trails/classes:/app/libs/*"
+# Planetiler's own names; with none given it uses a memory-mapped sparse array, which is what the
+# VPS has always run.
+NODEMAP_STORAGE_CHOICES = ("mmap", "ram", "direct")
+NODEMAP_TYPE_CHOICES = ("sparsearray", "sortedtable", "array")
 DOWNLOAD_TIMEOUT_SECONDS = 3600.0
 # Europe is estimated at 2 to 4 hours of Planetiler; the cap stops a hung tool, not a slow one.
 TOOL_TIMEOUT_SECONDS = 6 * 3600.0
 PMTILES_NAME = "marked-trails.pmtiles"
 MARKED_TRAIL_COUNT_NAME = "marked-trail-count.txt"
 PLANETILER_TMP_NAME = "tmp"
+FILTERED_NAME = "marked-trails-filtered.osm.pbf"
+EXTRACT_NAME = "extract.osm.pbf"
 # osmium reads ahead into queues whose default size makes `merge` grow by 48 to 90 MiB per input
 # file, so a merge of dozens of inputs ran out of the memory cap; small queues lower the peak.
 OSMIUM_QUEUE_ENVIRONMENT = (
@@ -61,27 +67,32 @@ class BuildArtifact:
 
 @dataclass(frozen=True, slots=True)
 class ResourceLimits:
-    """Caps for one tool process: `memory_bytes` of data memory, a `nice` level, one `cpu`.
+    """Caps for one tool process: `memory_bytes` of data memory, a `nice` level, and CPUs.
 
-    `cpu` is the CPU number to pin to; None pins to the lowest CPU the process may use.
+    `cpus` is the set of CPU numbers the process is pinned to; None pins to the lowest CPU
+    the process may use.
     """
 
     memory_bytes: int
     nice: int = 10
-    cpu: int | None = None
+    cpus: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class BuildTools:
-    """Executables, classpath, time and resource limits used by the build.
+    """Executables, classpath, time, JVM options and resource limits used by the build.
 
-    Defaults match the builder image. Without `limits` tools run uncapped, which suits a
-    container that Docker already limits.
+    Defaults match the builder image on the production VPS. Without `limits` tools run
+    uncapped, which suits a container that Docker or Fargate already limits.
     """
 
     osmium: str = "osmium"
     java: str = "java"
     planetiler_classpath: str = DEFAULT_PLANETILER_CLASSPATH
+    planetiler_heap_option: str = PLANETILER_HEAP_OPTION
+    planetiler_direct_memory_option: str = PLANETILER_DIRECT_MEMORY_OPTION
+    planetiler_nodemap_storage: str | None = None
+    planetiler_nodemap_type: str | None = None
     tool_timeout_seconds: float = TOOL_TIMEOUT_SECONDS
     limits: ResourceLimits | None = None
 
@@ -101,14 +112,57 @@ class ToolRunner(Protocol):
 Downloader = Callable[[str, Path], None]
 
 
+def directory_size(directory: Path) -> int:
+    """Return the bytes of the regular files below `directory`, ignoring files that vanish."""
+    total = 0
+    for root, _dirs, names in os.walk(directory):
+        for name in names:
+            try:
+                total += (Path(root) / name).lstat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def log_disk_usage(work_dir: Path, stage: str) -> None:
+    """Log the free space of the volume and the size of `work_dir` after `stage`.
+
+    A full disk is the failure that ended the first Europe run, so every stage leaves a line
+    that shows how close the build came.
+    """
+    free = shutil.disk_usage(work_dir).free
+    logger.info(
+        "Disk after %s: %.1f GiB free, work dir %.1f GiB",
+        stage,
+        free / 1024**3,
+        directory_size(work_dir) / 1024**3,
+    )
+
+
+def check_free_space(directory: Path, minimum_bytes: int) -> None:
+    """Raise `BuildToolError` unless the volume of `directory` has `minimum_bytes` free.
+
+    Both build backends call this before anything is downloaded, so a full volume fails in
+    seconds and not hours into the build.
+    """
+    free = shutil.disk_usage(directory).free
+    if free < minimum_bytes:
+        raise BuildToolError(
+            f"{directory} has {free / 1024**3:.1f} GiB free; "
+            f"a Marked Trails build needs {minimum_bytes / 1024**3:.1f} GiB"
+        )
+
+
 def limited_command(args: Sequence[str], limits: ResourceLimits | None) -> list[str]:
-    """Wrap a command so it runs niced, pinned to one CPU and with a data memory cap.
+    """Wrap a command so it runs niced, pinned to its CPUs and with a data memory cap.
 
     This must work in the Airflow container: it is unprivileged, has no capabilities and a
-    read-only root, so cgroups and `docker run` limits are unavailable. `prlimit --data`
-    (RLIMIT_DATA) counts heap and private anonymous mappings, which is the memory osmium and the
-    Planetiler JVM use, so a tool that needs more fails with an allocation error instead of
-    taking the host's memory. RLIMIT_AS would also count the JVM's reserved address space and
+    read-only root, so cgroups and `docker run` limits are unavailable. The Fargate task
+    uses the same wrapper, so a runaway tool fails with an allocation error instead of
+    taking the whole task down. `prlimit --data` (RLIMIT_DATA) counts heap and private
+    anonymous mappings, which is the memory osmium and the Planetiler JVM use, so a tool
+    that needs more fails with an allocation error instead of taking the host's memory.
+    RLIMIT_AS would also count the JVM's reserved address space and
     RLIMIT_RSS is not enforced by Linux. The JVM heap is capped separately by -Xmx.
 
     `setpriv --pdeathsig KILL` makes the kernel kill the tool when the process that started it
@@ -119,7 +173,7 @@ def limited_command(args: Sequence[str], limits: ResourceLimits | None) -> list[
     """
     if limits is None:
         return list(args)
-    cpu = limits.cpu if limits.cpu is not None else min(os.sched_getaffinity(0))
+    cpus = limits.cpus if limits.cpus is not None else (min(os.sched_getaffinity(0)),)
     environment = ["env", *OSMIUM_QUEUE_ENVIRONMENT] if Path(args[0]).name == "osmium" else []
     return [
         "nice",
@@ -129,7 +183,7 @@ def limited_command(args: Sequence[str], limits: ResourceLimits | None) -> list[
         f"--data={limits.memory_bytes}",
         "taskset",
         "-c",
-        str(cpu),
+        ",".join(str(cpu) for cpu in cpus),
         "setpriv",
         "--pdeathsig",
         "KILL",
@@ -225,9 +279,9 @@ def run_build(
     validate_region(region)
     work_dir.mkdir(parents=True, exist_ok=True)
     runner = runner or SubprocessToolRunner(tools)
-    filtered = work_dir / "marked-trails-filtered.osm.pbf"
+    filtered = work_dir / FILTERED_NAME
     owns_extract = extract_path is None
-    extract = extract_path or work_dir / "extract.osm.pbf"
+    extract = extract_path or work_dir / EXTRACT_NAME
     if owns_extract:
         extract.unlink(missing_ok=True)
     filtered.unlink(missing_ok=True)
@@ -236,9 +290,11 @@ def run_build(
     try:
         if owns_extract:
             (downloader or download_extract)(region, extract)
+            log_disk_usage(work_dir, "download")
         osm_data_date = filter_extract(extract, filtered, tools, runner)
         if owns_extract:
             extract.unlink()
+        log_disk_usage(work_dir, "filter")
         artifact = build_tiles(filtered, work_dir, osm_data_date, tools, runner)
         succeeded = True
         return artifact
@@ -288,11 +344,16 @@ def build_tiles(
     count_file = work_dir / MARKED_TRAIL_COUNT_NAME
     tmp_dir = work_dir / PLANETILER_TMP_NAME
     tmp_dir.mkdir(parents=True, exist_ok=True)
+    nodemap_arguments = []
+    if tools.planetiler_nodemap_storage is not None:
+        nodemap_arguments.append(f"--nodemap-storage={tools.planetiler_nodemap_storage}")
+    if tools.planetiler_nodemap_type is not None:
+        nodemap_arguments.append(f"--nodemap-type={tools.planetiler_nodemap_type}")
     runner.run(
         [
             tools.java,
-            PLANETILER_HEAP_OPTION,
-            PLANETILER_DIRECT_MEMORY_OPTION,
+            tools.planetiler_heap_option,
+            tools.planetiler_direct_memory_option,
             "-cp",
             tools.planetiler_classpath,
             PLANETILER_MAIN_CLASS,
@@ -302,11 +363,13 @@ def build_tiles(
             f"--minzoom={TILE_MIN_ZOOM}",
             f"--maxzoom={TILE_MAX_ZOOM}",
             f"--marked_trail_count_path={count_file}",
+            *nodemap_arguments,
             "--force",
         ]
     )
     filtered.unlink()
     shutil.rmtree(tmp_dir, ignore_errors=True)
+    log_disk_usage(work_dir, "planetiler")
     if not pmtiles.is_file() or pmtiles.stat().st_size == 0:
         raise BuildToolError(f"Planetiler produced no PMTiles output at {pmtiles}")
     marked_trail_count = _read_marked_trail_count(count_file)

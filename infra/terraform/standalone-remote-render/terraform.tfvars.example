@@ -12,3 +12,7 @@ map_tile_allowlist     = "https://tiles.openfreemap.org"
 render_callback_secret = ""
 marked_trails_app_origins = ["https://trips.example.com"]
 marked_trails_prefix      = "marked-trails"
+# The Fargate builder for the Marked Trails build is off by default. To enable it, set the toggle
+# and the tag that make marked-trails-ecr-push pushed (the tag has no default).
+marked_trails_builder_enabled   = false
+marked_trails_builder_image_tag = ""

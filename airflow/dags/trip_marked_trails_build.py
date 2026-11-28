@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
-from airflow.sdk import Param, dag, task
-from trip_airflow.marked_trails_build import POOL_NAME, run_marked_trails_build
+from airflow.sdk import Param, dag
+from trip_airflow.marked_trails_build import POOL_NAME, MarkedTrailsBuildOperator
 
 
 @dag(
@@ -28,12 +27,15 @@ from trip_airflow.marked_trails_build import POOL_NAME, run_marked_trails_build
     default_args={"owner": "trip-animator", "retries": 0},
 )
 def trip_marked_trails_build() -> None:
-    # Eight hours is well above the 2 to 4 hours estimated for Europe; it stops a hung build.
-    @task(pool=POOL_NAME, pool_slots=1, execution_timeout=timedelta(hours=8))
-    def build_and_publish(**context: Any) -> None:
-        run_marked_trails_build(str(context["params"]["region"]))
-
-    build_and_publish()
+    # Eight hours is above the 2 to 4 hours estimated for Europe; it stops a hung build. The
+    # fargate backend stops its task before this limit (7 h by default, see the launcher).
+    MarkedTrailsBuildOperator(
+        task_id="build_and_publish",
+        region="{{ params.region }}",
+        pool=POOL_NAME,
+        pool_slots=1,
+        execution_timeout=timedelta(hours=8),
+    )
 
 
 trip_marked_trails_build()

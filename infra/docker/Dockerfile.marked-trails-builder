@@ -36,4 +36,5 @@ COPY --from=python-env /opt/marked-trails/venv /opt/marked-trails/venv
 COPY --from=profile /opt/marked-trails/classes /opt/marked-trails/classes
 ENV PATH=/opt/marked-trails/venv/bin:${PATH} \
     MARKED_TRAILS_PLANETILER_CLASSPATH=/opt/marked-trails/classes:/app/libs/*
-ENTRYPOINT ["trip-marked-trails"]
+COPY --chmod=0755 infra/docker/marked-trails-entrypoint.sh /usr/local/bin/marked-trails-entrypoint
+ENTRYPOINT ["/usr/local/bin/marked-trails-entrypoint"]
