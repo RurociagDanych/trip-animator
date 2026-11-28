@@ -58,9 +58,9 @@ output "marked_trails_fargate_task_definition" {
   description = "Task definition family for MARKED_TRAILS_FARGATE_TASK_DEFINITION; RunTask uses the latest revision of the family."
 }
 
-output "marked_trails_fargate_subnet_id" {
-  value       = try(aws_subnet.marked_trails_builder[0].id, null)
-  description = "Public subnet ID for MARKED_TRAILS_FARGATE_SUBNETS."
+output "marked_trails_fargate_subnet_ids" {
+  value       = try(join(",", aws_subnet.marked_trails_builder[*].id), null)
+  description = "Comma-separated public subnet IDs, one per zone, for MARKED_TRAILS_FARGATE_SUBNETS."
 }
 
 output "marked_trails_fargate_security_group_id" {
