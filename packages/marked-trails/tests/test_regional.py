@@ -21,7 +21,6 @@ from trip_marked_trails.pipeline import (
 from trip_marked_trails.regional import list_child_regions, run_regional_build
 
 GIB = 1024**3
-REAL_EXTRA_CHILDREN = regional.EXTRA_CHILDREN
 
 
 def feature(
@@ -79,11 +78,6 @@ INDEX = {
         feature("ural-fed-district", "russia", "russia/ural-fed-district/ural-fed-district"),
     ],
 }
-
-
-@pytest.fixture(autouse=True)
-def no_extra_children(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(regional, "EXTRA_CHILDREN", {})
 
 
 def index_client() -> httpx.Client:
@@ -145,50 +139,7 @@ def test_parent_without_special_regions_keeps_all_children() -> None:
         assert list_child_regions("europe", client=client) == ["europe/dach"]
 
 
-def test_europe_gets_the_european_russia_federal_districts_as_extra_children(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(regional, "EXTRA_CHILDREN", REAL_EXTRA_CHILDREN)
-
-    with index_client() as client:
-        children = list_child_regions("europe", client=client)
-
-    assert children == [
-        "europe/andorra",
-        "europe/germany",
-        "europe/poland",
-        "russia/central-fed-district",
-        "russia/north-caucasus-fed-district",
-        "russia/northwestern-fed-district",
-        "russia/south-fed-district",
-        "russia/volga-fed-district",
-    ]
-
-
-def test_extra_children_are_a_fixed_list_for_europe_only() -> None:
-    assert REAL_EXTRA_CHILDREN == {
-        "europe": (
-            "russia/central-fed-district",
-            "russia/northwestern-fed-district",
-            "russia/south-fed-district",
-            "russia/north-caucasus-fed-district",
-            "russia/volga-fed-district",
-        )
-    }
-
-
-def test_extra_child_missing_from_the_index_is_rejected(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(regional, "EXTRA_CHILDREN", {"europe": ("russia/atlantis-fed-district",)})
-
-    with index_client() as client, pytest.raises(BuildToolError, match="atlantis"):
-        list_child_regions("europe", client=client)
-
-
-def test_extra_child_already_listed_is_not_duplicated(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(regional, "EXTRA_CHILDREN", {"europe": ("europe/poland",)})
-
+def test_europe_does_not_include_russia() -> None:
     with index_client() as client:
         children = list_child_regions("europe", client=client)
 
@@ -222,6 +173,8 @@ class Recorder:
         self.fail_download_for = fail_download_for
         self.fail_planetiler = fail_planetiler
         self.extracts: list[Path] = []
+        self.merged_inputs: list[Path] = []
+        self.merge_sizes: list[int] = []
         self.dates = {
             "europe/andorra": "2026-11-26T21:21:01Z",
             "europe/germany": "2026-11-25T20:00:00Z",
@@ -265,10 +218,13 @@ class Recorder:
             inputs = [Path(a) for a in args[args.index("-o") + 2 :] if not a.startswith("--")]
             assert inputs and all(path.is_file() for path in inputs)
             assert not any(path.exists() for path in self.extracts)
+            assert not any(path.exists() for path in self.merged_inputs)
+            self.merged_inputs.extend(inputs)
             output.write_bytes(b"".join(path.read_bytes() for path in inputs))
             assert "--with-history" in args
             assert output.name.endswith(".osh.pbf")
             self.events.append(("merge", *(path.read_bytes().decode() for path in inputs)))
+            self.merge_sizes.append(len(inputs))
         elif command == "time-filter":
             output, history = Path(args[args.index("-o") + 1]), Path(args[-1])
             assert history.is_file() and history.name.endswith(".osh.pbf")
@@ -330,6 +286,49 @@ def test_filtered_files_are_merged_then_built_in_one_planetiler_run(tmp_path: Pa
     ]
     assert artifact.pmtiles_path.read_bytes() == b"PMTiles-fake"
     assert artifact.marked_trail_count == 9
+
+
+def many_children(monkeypatch: pytest.MonkeyPatch, recorder: Recorder, count: int) -> list[str]:
+    names = [f"europe/country-{number:03d}" for number in range(count)]
+    monkeypatch.setattr(regional, "list_child_regions", lambda region, client=None: names)
+    recorder.dates.update({name: "2026-11-26T21:21:01Z" for name in names})
+    return names
+
+
+@pytest.mark.parametrize(
+    ("count", "expected_merges"),
+    [(8, [8]), (9, [8, 1, 2]), (20, [8, 8, 4, 3]), (65, [8] * 8 + [1, 8, 1, 2])],
+)
+def test_no_merge_gets_more_than_eight_inputs_and_the_result_is_time_filtered_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, count: int, expected_merges: list[int]
+) -> None:
+    recorder = Recorder(tmp_path / "work")
+    names = many_children(monkeypatch, recorder, count)
+
+    artifact = regional_build(tmp_path, recorder)
+
+    assert recorder.merge_sizes == expected_merges
+    assert [event[0] for event in recorder.events].count("time-filter") == 1
+    assert [event[0] for event in recorder.events][-2:] == ["time-filter", "planetiler"]
+    assert artifact.marked_trail_count == 9
+    assert recorder.events[-1][1].count("filtered-") == len(names)
+    assert not (tmp_path / "work" / "regional").exists()
+
+
+def test_a_malformed_extract_date_is_logged_and_skipped_without_failing_the_run(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    recorder = Recorder(tmp_path / "work")
+    recorder.dates["europe/germany"] = "yesterday"
+
+    with caplog.at_level("INFO", logger="trip_marked_trails.regional"):
+        artifact = regional_build(tmp_path, recorder)
+
+    assert artifact.osm_data_date == "2026-11-26T21:21:01Z"
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "europe/germany" in warnings[0]
+    assert "yesterday" in warnings[0]
 
 
 def test_osm_data_date_is_the_oldest_extract_date(tmp_path: Path) -> None:
@@ -543,6 +542,26 @@ def test_failing_country_fails_the_run_and_publishes_nothing(tmp_path: Path) -> 
 def test_limited_command_wraps_the_tool_in_nice_prlimit_taskset_and_setpriv() -> None:
     limits = ResourceLimits(memory_bytes=3 * GIB, nice=10, cpu=2)
 
+    assert limited_command(["java", "-version"], limits) == [
+        "nice",
+        "-n",
+        "10",
+        "prlimit",
+        f"--data={3 * GIB}",
+        "taskset",
+        "-c",
+        "2",
+        "setpriv",
+        "--pdeathsig",
+        "KILL",
+        "java",
+        "-version",
+    ]
+
+
+def test_limited_osmium_runs_with_small_queues_to_bound_its_memory() -> None:
+    limits = ResourceLimits(memory_bytes=3 * GIB, nice=10, cpu=2)
+
     assert limited_command(["osmium", "fileinfo", "x.pbf"], limits) == [
         "nice",
         "-n",
@@ -555,6 +574,9 @@ def test_limited_command_wraps_the_tool_in_nice_prlimit_taskset_and_setpriv() ->
         "setpriv",
         "--pdeathsig",
         "KILL",
+        "env",
+        "OSMIUM_MAX_INPUT_QUEUE_SIZE=2",
+        "OSMIUM_MAX_OSMDATA_QUEUE_SIZE=2",
         "osmium",
         "fileinfo",
         "x.pbf",

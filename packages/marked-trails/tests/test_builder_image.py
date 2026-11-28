@@ -245,10 +245,7 @@ from pathlib import Path
 import httpx
 from trip_marked_trails.pipeline import BuildToolError, BuildTools, ResourceLimits
 from trip_marked_trails.pipeline import SubprocessToolRunner
-from trip_marked_trails import regional
 from trip_marked_trails.regional import run_regional_build
-
-regional.EXTRA_CHILDREN = {}
 
 BASE = "https://download.geofabrik.de"
 index = {"features": [
@@ -394,3 +391,99 @@ def test_builder_image_keeps_the_newest_relation_across_different_sequence_numbe
     assert newer["count"] == 1
     assert newer["date"] == "2026-01-01T00:00:00Z"
     assert newer["files"] == ["marked-trails.pmtiles"]
+
+
+MANY_CHILDREN_SCRIPT = """
+import json, shutil
+from pathlib import Path
+import httpx
+from trip_marked_trails import regional
+from trip_marked_trails.pipeline import BuildTools, ResourceLimits, SubprocessToolRunner
+from trip_marked_trails.regional import run_regional_build
+
+BASE = "https://download.geofabrik.de"
+names = [f"child-{number:03d}" for number in range(%(count)d)]
+features = [
+    {"properties": {"id": "europe", "urls": {"pbf": f"{BASE}/europe/europe-latest.osm.pbf"}}}
+]
+features += [
+    {"properties": {"id": name, "parent": "europe",
+                    "urls": {"pbf": f"{BASE}/europe/{name}/{name}-latest.osm.pbf"}}}
+    for name in names
+]
+client = httpx.Client(
+    transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"features": features}))
+)
+
+
+class CountingRunner(SubprocessToolRunner):
+    merges = []
+    time_filters = 0
+
+    def run(self, args):
+        if args[1] == "merge":
+            self.merges.append(len(args) - args.index("-o") - 2)
+        if args[1] == "time-filter":
+            type(self).time_filters += 1
+        super().run(args)
+
+
+tools = BuildTools(limits=ResourceLimits(memory_bytes=3 * 1024**3))
+artifact = run_regional_build(
+    "europe", Path("/work"), tools, runner=CountingRunner(tools),
+    downloader=lambda region, dest: shutil.copyfile("/fixtures/%(fixture)s", dest),
+    index_client=client,
+)
+print(json.dumps({
+    "merges": CountingRunner.merges, "time_filters": CountingRunner.time_filters,
+    "count": artifact.marked_trail_count, "files": sorted(p.name for p in Path("/work").iterdir()),
+}))
+"""
+
+
+@pytest.mark.parametrize(
+    ("children", "merges"),
+    [(49, [8] * 6 + [1, 7]), (60, [8] * 7 + [4, 8])],
+)
+def test_builder_image_merges_many_children_under_the_memory_cap(
+    tmp_path: Path, builder_image: str, children: int, merges: list[int]
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    script = MANY_CHILDREN_SCRIPT % {"count": children, "fixture": FIXTURE_NAME}
+
+    result = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--cpus",
+            "1",
+            "--memory",
+            "3g",
+            "--user",
+            f"{os.getuid()}:{os.getgid()}",
+            "-v",
+            f"{work}:/work",
+            "-v",
+            f"{FIXTURES_DIR}:/fixtures:ro",
+            "--entrypoint",
+            "python",
+            builder_image,
+            "-c",
+            script,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=1800,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr[-4000:]
+
+    summary = json.loads(result.stdout.strip().splitlines()[-1])
+    assert summary["merges"] == merges
+    assert summary["time_filters"] == 1
+    assert summary["count"] == FIXTURE_ROUTE_RELATIONS
+    assert summary["files"] == ["marked-trails.pmtiles"]

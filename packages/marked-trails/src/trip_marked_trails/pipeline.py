@@ -31,6 +31,12 @@ TOOL_TIMEOUT_SECONDS = 6 * 3600.0
 PMTILES_NAME = "marked-trails.pmtiles"
 MARKED_TRAIL_COUNT_NAME = "marked-trail-count.txt"
 PLANETILER_TMP_NAME = "tmp"
+# osmium reads ahead into queues whose default size makes `merge` grow by 48 to 90 MiB per input
+# file, so a merge of dozens of inputs ran out of the memory cap; small queues lower the peak.
+OSMIUM_QUEUE_ENVIRONMENT = (
+    "OSMIUM_MAX_INPUT_QUEUE_SIZE=2",
+    "OSMIUM_MAX_OSMDATA_QUEUE_SIZE=2",
+)
 # Must match MarkedTrailsProfile, which narrows zooms per feature.
 TILE_MIN_ZOOM = 5
 TILE_MAX_ZOOM = 13
@@ -108,10 +114,13 @@ def limited_command(args: Sequence[str], limits: ResourceLimits | None) -> list[
     `setpriv --pdeathsig KILL` makes the kernel kill the tool when the process that started it
     dies, so a task killed by Airflow does not leave a multi-hour tool running. Every wrapper
     execs the next one, so the signal is armed on the tool process itself.
+
+    osmium additionally gets `OSMIUM_QUEUE_ENVIRONMENT` through `env`, which also execs.
     """
     if limits is None:
         return list(args)
     cpu = limits.cpu if limits.cpu is not None else min(os.sched_getaffinity(0))
+    environment = ["env", *OSMIUM_QUEUE_ENVIRONMENT] if Path(args[0]).name == "osmium" else []
     return [
         "nice",
         "-n",
@@ -124,6 +133,7 @@ def limited_command(args: Sequence[str], limits: ResourceLimits | None) -> list[
         "setpriv",
         "--pdeathsig",
         "KILL",
+        *environment,
         *args,
     ]
 

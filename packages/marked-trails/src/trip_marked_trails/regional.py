@@ -32,18 +32,9 @@ SCRATCH_DIR_NAME = "regional"
 MERGED_HISTORY_NAME = "marked-trails-merged.osh.pbf"
 MERGED_NAME = "marked-trails-merged.osm.pbf"
 MAX_SNAPSHOT_SPREAD = timedelta(days=2)
-# Geofabrik lists European Russia under russia, not under europe, so the europe parent alone
-# would drop it. These are the federal districts west of the Urals; Kaliningrad is part of the
-# northwestern one, and the districts east of them lie almost entirely in Asia.
-EXTRA_CHILDREN: dict[str, tuple[str, ...]] = {
-    "europe": (
-        "russia/central-fed-district",
-        "russia/northwestern-fed-district",
-        "russia/south-fed-district",
-        "russia/north-caucasus-fed-district",
-        "russia/volga-fed-district",
-    ),
-}
+# One merge holds memory per input (48 to 90 MiB each, measured), so 56 inputs exceeded the 3 GiB
+# cap while 8 peaked below 1 GiB.
+MERGE_BATCH_SIZE = 8
 _PBF_SUFFIX = "-latest.osm.pbf"
 
 logger = logging.getLogger(__name__)
@@ -77,13 +68,55 @@ def _parse_date(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _valid_date(child: str, value: str | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        _parse_date(value)
+    except ValueError:
+        logger.warning("Ignoring the malformed data date %r of %s", value, child)
+        return None
+    return value
+
+
+def _merge_history(
+    paths: list[Path], history: Path, scratch: Path, tools: BuildTools, runner: ToolRunner
+) -> None:
+    level = 0
+    while len(paths) > MERGE_BATCH_SIZE:
+        merged: list[Path] = []
+        for start in range(0, len(paths), MERGE_BATCH_SIZE):
+            output = scratch / f"merge-{level}-{start // MERGE_BATCH_SIZE:03d}.osh.pbf"
+            _merge(paths[start : start + MERGE_BATCH_SIZE], output, tools, runner)
+            merged.append(output)
+        paths = merged
+        level += 1
+    _merge(paths, history, tools, runner)
+
+
+def _merge(inputs: list[Path], output: Path, tools: BuildTools, runner: ToolRunner) -> None:
+    runner.run(
+        [
+            tools.osmium,
+            "merge",
+            "--with-history",
+            "--overwrite",
+            "-o",
+            str(output),
+            *(str(path) for path in inputs),
+        ]
+    )
+    for path in inputs:
+        path.unlink()
+
+
 def list_child_regions(region: str, *, client: httpx.Client | None = None) -> list[str]:
     """Return the Geofabrik regions to build below `region`, or an empty list for a leaf.
 
     These are the direct children with a PBF extract, except those named in the parent's
     `special_regions` property of the index (extracts that overlap their siblings, such as
-    `alps` and `dach` below `europe`), plus the `EXTRA_CHILDREN` of the region. Raises
-    `BuildToolError` when the index does not know `region` or an extra child.
+    `alps` and `dach` below `europe`). Raises `BuildToolError` when the index does not know
+    `region`.
     """
     validate_region(region)
     owned_client = client is None
@@ -111,12 +144,6 @@ def list_child_regions(region: str, *, client: httpx.Client | None = None) -> li
         for path, properties in known.items()
         if properties.get("parent") == parent["id"] and properties["id"] not in excluded
     }
-    for extra in EXTRA_CHILDREN.get(region, ()):
-        if extra not in known:
-            raise BuildToolError(
-                f"Extra child {extra!r} of {region!r} is not in the Geofabrik index"
-            )
-        children.add(extra)
     return sorted(children)
 
 
@@ -148,14 +175,17 @@ def run_regional_build(
     failure in any child raises and leaves nothing to publish. A leaf region is built directly.
 
     Children are downloaded at different times, so two extracts can hold different versions of
-    the same relation. The filtered files are merged with `osmium merge --with-history` and
-    `osmium time-filter` then keeps only the newest version of each object, so one relation
-    with its current members survives. An object deleted between two snapshots can survive from
-    the older extract; this is accepted. The `osmosis_replication_timestamp` of every child is
-    logged, `osm_data_date` is the oldest of them, and a spread of more than
-    `MAX_SNAPSHOT_SPREAD` is only logged as a warning. Scratch files and Planetiler's temporary
-    files live under `work_dir` and are removed on success and on failure, and stale ones of a
-    killed run are removed at the start; only the PMTiles file of the result stays.
+    the same relation. The filtered files are merged with `osmium merge --with-history`, at
+    most `MERGE_BATCH_SIZE` inputs at a time and then the intermediate results the same way,
+    to bound memory. `osmium time-filter` runs once on the final result and keeps only the
+    newest version of each object, so one relation with its current members survives. An
+    object deleted between two snapshots can survive from the older extract; this is accepted.
+    The `osmosis_replication_timestamp` of every child is logged right after its download; a
+    malformed one is logged and ignored. `osm_data_date` is the oldest valid one, and a spread
+    of more than `MAX_SNAPSHOT_SPREAD` is only logged as a warning. Scratch files and
+    Planetiler's temporary files live under `work_dir` and are removed on success and on
+    failure, and stale ones of a killed run are removed at the start; only the PMTiles file of
+    the result stays.
     """
     validate_region(region)
     runner = runner or SubprocessToolRunner(tools)
@@ -177,7 +207,7 @@ def run_regional_build(
         filtered = scratch / f"{position + 1:03d}-filtered.osm.pbf"
         download(child, extract)
         try:
-            date = filter_extract(extract, filtered, tools, runner)
+            date = _valid_date(child, filter_extract(extract, filtered, tools, runner))
         finally:
             extract.unlink(missing_ok=True)
         logger.info("%s has data date %s", child, date)
@@ -187,19 +217,7 @@ def run_regional_build(
     try:
         fetched = [fetch(position) for position in range(len(children))]
         history = scratch / MERGED_HISTORY_NAME
-        runner.run(
-            [
-                tools.osmium,
-                "merge",
-                "--with-history",
-                "--overwrite",
-                "-o",
-                str(history),
-                *(str(child.path) for child in fetched),
-            ]
-        )
-        for child in fetched:
-            child.path.unlink()
+        _merge_history([child.path for child in fetched], history, scratch, tools, runner)
         merged = scratch / MERGED_NAME
         runner.run([tools.osmium, "time-filter", "--overwrite", "-o", str(merged), str(history)])
         history.unlink()

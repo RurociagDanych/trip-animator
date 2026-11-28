@@ -45,4 +45,4 @@ The build is a standalone CLI using osmium and Planetiler from a dedicated build
 - Map attribution "(c) OpenStreetMap contributors" (ODbL) is always shown in the editor and in exported films, together with the trail data date while the overlay is on. It also covers the OpenFreeMap basemap, which needed it already.
 - Projects store the enabled Marked Trail types in one list field; an empty list means the overlay is off, which is the default.
 - Without a published build the trail toggles are disabled and renders still succeed.
-- Coverage outside Europe needs a rebuild with a larger extract.
+- Coverage outside Europe needs a rebuild with a larger extract. Europe means the children of the Geofabrik `europe` extract without its overlapping special regions; Russia and Kaliningrad are not covered.
