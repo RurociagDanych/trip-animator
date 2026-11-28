@@ -350,8 +350,6 @@ services:
     build:
       context: ..
       dockerfile: infra/docker/Dockerfile.airflow
-      additional_contexts:
-        marked-trails-builder: docker-image://trip-animator-marked-trails-builder:local
     pull_policy: build
     env_file:
       - path: ../.env
@@ -425,11 +423,11 @@ services:
     build:
       context: ..
       dockerfile: infra/docker/Dockerfile.airflow
-      additional_contexts:
-        marked-trails-builder: docker-image://trip-animator-marked-trails-builder:local
     pull_policy: build
     env_file:
       - path: ../.env
+        required: false
+      - path: ../.env.marked-trails
         required: false
     environment:
       <<: *app-env
@@ -439,7 +437,8 @@ services:
       MARKED_TRAILS_WORK_DIR: /work/marked-trails
       TRIP_DBT_PROJECT_DIR: /app/dbt
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__CORE__PARALLELISM: "2"
+      # A Marked Trails build holds one slot for hours; two more keep the minutely Strava sync and the hourly dbt run going.
+      AIRFLOW__CORE__PARALLELISM: "3"
       AIRFLOW__CORE__DAGS_FOLDER: /app/airflow/dags
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"

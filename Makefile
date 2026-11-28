@@ -116,7 +116,7 @@ dev-web:
 compose-config:
 	docker compose -f infra/compose.yaml --env-file .env.example config --quiet
 
-airflow-up: marked-trails-image
+airflow-up:
 	docker compose -f infra/compose.yaml --env-file .env up -d --build airflow
 
 airflow-down:

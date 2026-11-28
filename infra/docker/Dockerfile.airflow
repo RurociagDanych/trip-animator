@@ -1,25 +1,27 @@
-# Named build context: compose builds it from the marked-trails-builder service; a plain
-# docker build needs --build-context marked-trails-builder=docker-image://<builder image>.
-FROM marked-trails-builder AS marked-trails-tools
-# The builder is Ubuntu and this image is Debian, so osmium ships with its non-glibc libraries and
-# a wrapper that points the loader at them. glibc itself stays the host's: osmium needs GLIBC 2.38,
-# Debian trixie has 2.41.
-RUN set -eux; \
-    mkdir -p /out/bin /out/libexec /out/lib; \
-    cp -L "$(command -v osmium)" /out/libexec/osmium; \
-    ldd /out/libexec/osmium | awk '/=> \//{print $3}' \
-        | grep -Ev '/(libc|libm|libdl|libpthread|librt)\.so' \
-        | xargs -r -I{} cp -L {} /out/lib/; \
-    printf '#!/bin/sh\nLD_LIBRARY_PATH=/opt/marked-trails/lib exec /opt/marked-trails/libexec/osmium "$@"\n' > /out/bin/osmium; \
-    chmod 0755 /out/bin/osmium
+# syntax=docker/dockerfile:1
+# The digest must stay equal to PLANETILER_IMAGE in Dockerfile.marked-trails-builder so Airflow runs
+# the same Planetiler libraries as `make marked-trails-local`; a test compares the two.
+ARG PLANETILER_IMAGE=ghcr.io/onthegomap/planetiler@sha256:bde2424546edfa40460bdd1c40c19d54e3af332b25d16c6db9d980ca3355623d
+
+FROM ${PLANETILER_IMAGE} AS marked-trails-profile
+COPY packages/marked-trails/java /src/java
+RUN mkdir -p /opt/marked-trails/classes \
+ && javac -d /opt/marked-trails/classes -cp "/app/libs/*" $(find /src/java -name '*.java')
 
 FROM python:3.12-slim AS base
 
 COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /uvx /bin/
 
+# The profile classes are compiled for the Java of the Planetiler image, which is 25, so the runtime
+# must be at least that; the checks make a broken toolchain fail the build, not the first run.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get install -y --no-install-recommends ca-certificates curl osmium-tool openjdk-25-jre-headless \
+    && rm -rf /var/lib/apt/lists/* \
+    && osmium --version \
+    && java -version \
+    && prlimit --version \
+    && setpriv --version \
+    && taskset --version
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -71,14 +73,10 @@ RUN groupadd --system --gid 10001 appgroup \
     && chmod -R a+rX /app/data/ref \
     && chown -R 10001:10001 /home/appuser /opt/airflow /data/objects /data/gold /work/marked-trails
 
-COPY --from=marked-trails-tools /out /opt/marked-trails
-COPY --from=marked-trails-tools /opt/java/openjdk /opt/java/openjdk
-COPY --from=marked-trails-tools /opt/marked-trails/classes /opt/marked-trails/classes
-COPY --from=marked-trails-tools /app/libs /app/libs
+COPY --from=marked-trails-profile /opt/marked-trails/classes /opt/marked-trails/classes
+COPY --from=marked-trails-profile /app/libs /app/libs
 
 ENV HOME=/home/appuser \
-    JAVA_HOME=/opt/java/openjdk \
-    PATH="/opt/marked-trails/bin:/opt/java/openjdk/bin:$PATH" \
     MARKED_TRAILS_PLANETILER_CLASSPATH=/opt/marked-trails/classes:/app/libs/* \
     MARKED_TRAILS_WORK_DIR=/work/marked-trails
 
