@@ -2313,6 +2313,7 @@ source = { editable = "." }
 dependencies = [
     { name = "apache-airflow" },
     { name = "apache-airflow-providers-postgres" },
+    { name = "boto3" },
     { name = "dbt-duckdb" },
     { name = "trip-api" },
     { name = "trip-marked-trails" },
@@ -2330,6 +2331,7 @@ dev = [
 requires-dist = [
     { name = "apache-airflow", specifier = ">=3.0.0,<3.2" },
     { name = "apache-airflow-providers-postgres", specifier = ">=6.0.0" },
+    { name = "boto3", specifier = ">=1.36.0" },
     { name = "dbt-duckdb", specifier = ">=1.9.0" },
     { name = "trip-api", editable = "../apps/api" },
     { name = "trip-marked-trails", editable = "../packages/marked-trails" },
