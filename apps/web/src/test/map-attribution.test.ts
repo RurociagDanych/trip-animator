@@ -52,3 +52,33 @@ describe("buildMapAttributionCredits", () => {
     }
   });
 });
+
+describe("buildMapAttributionCredits trail data date", () => {
+  it("puts the trail data date right after the OpenStreetMap credit when given", () => {
+    expect(buildMapAttributionCredits("liberty", "2026-11-26")).toEqual([
+      "© OpenFreeMap",
+      "© OpenMapTiles",
+      "© OpenStreetMap contributors",
+      "Marked Trails data: 2026-11-26",
+    ]);
+  });
+
+  it("keeps the preset credits after the trail data date", () => {
+    expect(buildMapAttributionCredits("topo-relief", "2026-11-26")).toEqual([
+      "© OpenFreeMap",
+      "© OpenMapTiles",
+      "© OpenStreetMap contributors",
+      "Marked Trails data: 2026-11-26",
+      "Elevation: Mapzen Terrain Tiles",
+    ]);
+  });
+
+  it("adds no date line when the overlay is off or the date is unknown", () => {
+    for (const preset of PRESETS) {
+      const plain = buildMapAttributionCredits(preset);
+      expect(buildMapAttributionCredits(preset, null)).toEqual(plain);
+      expect(buildMapAttributionCredits(preset, undefined)).toEqual(plain);
+      expect(plain.some((credit) => credit.includes("Marked Trails"))).toBe(false);
+    }
+  });
+});
