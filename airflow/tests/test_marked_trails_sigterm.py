@@ -14,7 +14,7 @@ from trip_airflow import marked_trails_build as build
 from trip_airflow.marked_trails_fargate import FargateBuild, FargateBuildSettings
 
 marker = sys.argv[1]
-ARN = "arn:aws:ecs:us-east-1:111122223333:task/cluster-a/abc"
+ARN = "arn:aws:ecs:us-east-1:000000000000:task/cluster-a/abc"
 
 
 class Ecs:

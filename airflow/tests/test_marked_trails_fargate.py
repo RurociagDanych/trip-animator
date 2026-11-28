@@ -18,7 +18,7 @@ from trip_airflow.marked_trails_fargate import (
 )
 
 CLUSTER = "cluster-a"
-ACCOUNT_ARN_PREFIX = "arn:aws:ecs:us-east-1:111122223333"
+ACCOUNT_ARN_PREFIX = "arn:aws:ecs:us-east-1:000000000000"
 TASK_ARN = f"{ACCOUNT_ARN_PREFIX}:task/{CLUSTER}/0123456789abcdef"
 FAMILY_ARN = f"{ACCOUNT_ARN_PREFIX}:task-definition/builder-family:7"
 RUN_ID = "11111111-2222-3333-4444-555555555555-1"
