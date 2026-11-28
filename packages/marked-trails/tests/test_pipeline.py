@@ -1,11 +1,18 @@
 import hashlib
 import logging
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
 import pytest
-from trip_marked_trails.pipeline import BuildToolError, BuildTools, download_extract, run_build
+from trip_marked_trails.pipeline import (
+    BuildToolError,
+    BuildTools,
+    check_free_space,
+    download_extract,
+    run_build,
+)
 
 OSM_DATA_DATE = "2026-11-26T21:21:01Z"
 EXTRACT_BYTES = b"fake-osm-pbf-extract"
@@ -134,3 +141,58 @@ def test_download_rejects_an_extract_whose_md5_differs(tmp_path: Path) -> None:
         download_extract("europe/andorra", dest, client=client)
 
     assert list(tmp_path.iterdir()) == []
+
+
+def test_planetiler_gets_no_nodemap_arguments_by_default(tmp_path: Path) -> None:
+    extract = tmp_path / "andorra.osm.pbf"
+    extract.write_bytes(EXTRACT_BYTES)
+    seen = tmp_path / "java-args.txt"
+    body = f"open({str(seen)!r}, 'w').write(' '.join(args))\n" + PLANETILER_OK
+
+    run_build("europe/andorra", tmp_path / "work", fake_tools(tmp_path, body), extract_path=extract)
+
+    assert "nodemap" not in seen.read_text()
+
+
+def test_planetiler_gets_the_configured_nodemap_arguments(tmp_path: Path) -> None:
+    extract = tmp_path / "andorra.osm.pbf"
+    extract.write_bytes(EXTRACT_BYTES)
+    seen = tmp_path / "java-args.txt"
+    body = f"open({str(seen)!r}, 'w').write(' '.join(args))\n" + PLANETILER_OK
+    tools = replace(
+        fake_tools(tmp_path, body),
+        planetiler_nodemap_storage="ram",
+        planetiler_nodemap_type="sparsearray",
+    )
+
+    run_build("europe/andorra", tmp_path / "work", tools, extract_path=extract)
+
+    assert "--nodemap-storage=ram --nodemap-type=sparsearray" in seen.read_text()
+
+
+def test_each_stage_logs_free_space_and_work_dir_size(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    extract = tmp_path / "andorra.osm.pbf"
+    extract.write_bytes(EXTRACT_BYTES)
+    caplog.set_level(logging.INFO, logger="trip_marked_trails")
+
+    run_build(
+        "europe/andorra",
+        tmp_path / "work",
+        fake_tools(tmp_path, PLANETILER_OK),
+        extract_path=extract,
+    )
+
+    stages = [
+        record.getMessage().split(":")[0]
+        for record in caplog.records
+        if record.getMessage().startswith("Disk after")
+    ]
+    assert stages == ["Disk after filter", "Disk after planetiler"]
+    assert any("GiB free, work dir" in record.getMessage() for record in caplog.records)
+
+
+def test_check_free_space_names_the_volume_and_both_sizes(tmp_path: Path) -> None:
+    with pytest.raises(BuildToolError, match="GiB free; a Marked Trails build needs"):
+        check_free_space(tmp_path, 10**18)

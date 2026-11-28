@@ -25,6 +25,10 @@ PLANETILER_HEAP_OPTION = "-Xmx2g"
 # push the JVM past the 3 GB limit on top of the 2 GB heap.
 PLANETILER_DIRECT_MEMORY_OPTION = "-XX:MaxDirectMemorySize=512m"
 DEFAULT_PLANETILER_CLASSPATH = "/opt/marked-trails/classes:/app/libs/*"
+# Planetiler's own names; with none given it uses a memory-mapped sparse array, which is what the
+# VPS has always run.
+NODEMAP_STORAGE_CHOICES = ("mmap", "ram", "direct")
+NODEMAP_TYPE_CHOICES = ("sparsearray", "sortedtable", "array")
 DOWNLOAD_TIMEOUT_SECONDS = 3600.0
 # Europe is estimated at 2 to 4 hours of Planetiler; the cap stops a hung tool, not a slow one.
 TOOL_TIMEOUT_SECONDS = 6 * 3600.0
@@ -85,6 +89,8 @@ class BuildTools:
     planetiler_classpath: str = DEFAULT_PLANETILER_CLASSPATH
     planetiler_heap_option: str = PLANETILER_HEAP_OPTION
     planetiler_direct_memory_option: str = PLANETILER_DIRECT_MEMORY_OPTION
+    planetiler_nodemap_storage: str | None = None
+    planetiler_nodemap_type: str | None = None
     tool_timeout_seconds: float = TOOL_TIMEOUT_SECONDS
     limits: ResourceLimits | None = None
 
@@ -102,6 +108,47 @@ class ToolRunner(Protocol):
 
 
 Downloader = Callable[[str, Path], None]
+
+
+def directory_size(directory: Path) -> int:
+    """Return the bytes of the regular files below `directory`, ignoring files that vanish."""
+    total = 0
+    for root, _dirs, names in os.walk(directory):
+        for name in names:
+            try:
+                total += (Path(root) / name).lstat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def log_disk_usage(work_dir: Path, stage: str) -> None:
+    """Log the free space of the volume and the size of `work_dir` after `stage`.
+
+    A full disk is the failure that ended the first Europe run, so every stage leaves a line
+    that shows how close the build came.
+    """
+    free = shutil.disk_usage(work_dir).free
+    logger.info(
+        "Disk after %s: %.1f GiB free, work dir %.1f GiB",
+        stage,
+        free / 1024**3,
+        directory_size(work_dir) / 1024**3,
+    )
+
+
+def check_free_space(directory: Path, minimum_bytes: int) -> None:
+    """Raise `BuildToolError` unless the volume of `directory` has `minimum_bytes` free.
+
+    Both build backends call this before anything is downloaded, so a full volume fails in
+    seconds and not hours into the build.
+    """
+    free = shutil.disk_usage(directory).free
+    if free < minimum_bytes:
+        raise BuildToolError(
+            f"{directory} has {free / 1024**3:.1f} GiB free; "
+            f"a Marked Trails build needs {minimum_bytes / 1024**3:.1f} GiB"
+        )
 
 
 def limited_command(args: Sequence[str], limits: ResourceLimits | None) -> list[str]:
@@ -241,9 +288,11 @@ def run_build(
     try:
         if owns_extract:
             (downloader or download_extract)(region, extract)
+            log_disk_usage(work_dir, "download")
         osm_data_date = filter_extract(extract, filtered, tools, runner)
         if owns_extract:
             extract.unlink()
+        log_disk_usage(work_dir, "filter")
         artifact = build_tiles(filtered, work_dir, osm_data_date, tools, runner)
         succeeded = True
         return artifact
@@ -293,6 +342,11 @@ def build_tiles(
     count_file = work_dir / MARKED_TRAIL_COUNT_NAME
     tmp_dir = work_dir / PLANETILER_TMP_NAME
     tmp_dir.mkdir(parents=True, exist_ok=True)
+    nodemap_arguments = []
+    if tools.planetiler_nodemap_storage is not None:
+        nodemap_arguments.append(f"--nodemap-storage={tools.planetiler_nodemap_storage}")
+    if tools.planetiler_nodemap_type is not None:
+        nodemap_arguments.append(f"--nodemap-type={tools.planetiler_nodemap_type}")
     runner.run(
         [
             tools.java,
@@ -307,11 +361,13 @@ def build_tiles(
             f"--minzoom={TILE_MIN_ZOOM}",
             f"--maxzoom={TILE_MAX_ZOOM}",
             f"--marked_trail_count_path={count_file}",
+            *nodemap_arguments,
             "--force",
         ]
     )
     filtered.unlink()
     shutil.rmtree(tmp_dir, ignore_errors=True)
+    log_disk_usage(work_dir, "planetiler")
     if not pmtiles.is_file() or pmtiles.stat().st_size == 0:
         raise BuildToolError(f"Planetiler produced no PMTiles output at {pmtiles}")
     marked_trail_count = _read_marked_trail_count(count_file)
