@@ -977,6 +977,14 @@ export interface ManifestPhoto {
   asset_url?: string | null;
 }
 
+/** Marked Trails build the API pinned when the render was enqueued. */
+export interface RenderManifestMarkedTrails {
+  build_id: string;
+  pmtiles_key: string;
+  osm_data_date: string | null;
+  base_url: string;
+}
+
 export interface RenderManifest {
   job_id: string;
   project_id: string;
@@ -991,6 +999,7 @@ export interface RenderManifest {
   stages: RenderManifestStage[];
   photos?: ManifestPhoto[];
   climbs?: ManifestClimb[];
+  marked_trails?: RenderManifestMarkedTrails | null;
 }
 
 export interface TripRendererApi {

@@ -1,4 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import type { RenderManifestMarkedTrails } from "../api/types";
 
 export const MARKED_TRAILS_PMTILES_PROTOCOL = "pmtiles";
 export const MARKED_TRAILS_POINTER_FILE = "current.json";
@@ -86,6 +88,91 @@ export async function fetchMarkedTrailsBuild(
   }
   const pointer = parseMarkedTrailsPointer(raw);
   return pointer ? buildMarkedTrailsBuild(root, pointer) : null;
+}
+
+/**
+ * Resolves the build a render draws. The pinned build is kept unless its PMTiles file answers
+ * 404 or 403 to a HEAD request, which means a later publication deleted it. Then the current
+ * build of the same store is used, and when there is none either (or its pointer cannot be
+ * read) the result is null and the render goes on without trails. Any other failure of the
+ * availability check keeps the pinned build, because it does not prove the file is gone.
+ */
+export async function resolvePinnedMarkedTrailsBuild(
+  pin: RenderManifestMarkedTrails,
+): Promise<MarkedTrailsBuild | null> {
+  const root = stripTrailingSlashes(pin.base_url);
+  if (MARKED_TRAILS_PMTILES_KEY_PATTERN.test(pin.pmtiles_key)) {
+    const pinned: MarkedTrailsBuild = {
+      buildId: pin.build_id,
+      dataDate: pin.osm_data_date,
+      pmtilesUrl: `${root}/${pin.pmtiles_key}`,
+    };
+    if (!(await markedTrailsFileIsGone(pinned.pmtilesUrl))) {
+      return pinned;
+    }
+  }
+  try {
+    return await fetchMarkedTrailsBuild(root);
+  } catch {
+    return null;
+  }
+}
+
+async function markedTrailsFileIsGone(url: string): Promise<boolean> {
+  try {
+    const response = await fetch(url, {
+      method: "HEAD",
+      signal: AbortSignal.timeout(MARKED_TRAILS_POINTER_TIMEOUT_MS),
+    });
+    return response.status === 404 || response.status === 403;
+  } catch {
+    return false;
+  }
+}
+
+export interface PinnedMarkedTrailsBuildState {
+  settled: boolean;
+  build: MarkedTrailsBuild | null;
+}
+
+/**
+ * Resolves the pinned build of a render manifest once. `settled` stays false until the
+ * answer is known, so the caller can hold back the map and avoid loading its style twice.
+ * Without a pin or with `enabled` false nothing is requested and the state is settled.
+ */
+export function usePinnedMarkedTrailsBuild(
+  pin: RenderManifestMarkedTrails | null | undefined,
+  enabled: boolean,
+): PinnedMarkedTrailsBuildState {
+  const pinKey = pin ? JSON.stringify(pin) : "";
+  const active = enabled && pin != null;
+  const [resolved, setResolved] = useState<{ key: string; build: MarkedTrailsBuild | null } | null>(
+    null,
+  );
+
+  useEffect(() => {
+    if (!active || !pin) {
+      return;
+    }
+    let cancelled = false;
+    void resolvePinnedMarkedTrailsBuild(pin).then((build) => {
+      if (!cancelled) {
+        setResolved({ key: pinKey, build });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+    // `pin` is covered by `pinKey`; a new object with the same content must not refetch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, pinKey]);
+
+  if (!active) {
+    return { settled: true, build: null };
+  }
+  return resolved?.key === pinKey
+    ? { settled: true, build: resolved.build }
+    : { settled: false, build: null };
 }
 
 export type MarkedTrailsAvailability =
