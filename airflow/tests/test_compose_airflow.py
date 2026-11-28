@@ -57,7 +57,7 @@ def test_credential_file_is_optional_and_has_a_tracked_example() -> None:
     compose = (REPO_ROOT / "infra" / "compose.yaml").read_text(encoding="utf-8")
 
     assert "path: ../.env.marked-trails\n        required: false" in compose
-    example = (REPO_ROOT / ".env.marked-trails.example").read_text(encoding="utf-8")
+    example = (REPO_ROOT / "marked-trails.env.example").read_text(encoding="utf-8")
     assert "MARKED_TRAILS_AWS_ACCESS_KEY_ID=\n" in example
     assert "MARKED_TRAILS_AWS_SECRET_ACCESS_KEY=\n" in example
     assert "MARKED_TRAILS_AWS_SESSION_TOKEN=\n" in example
