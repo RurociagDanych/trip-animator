@@ -87,7 +87,7 @@ Production serves the trail store from a private S3 bucket behind CloudFront. Bo
 
 1. Set `marked_trails_app_origins` (default empty, which creates nothing) in that root's `terraform.tfvars` to the app origins that read the tiles in the browser, for example `["https://trips.example.com"]`. The CloudFront response headers policy answers only those origins, allows `GET` and `HEAD` with `Range`, and exposes `Content-Range`, `ETag` and `Accept-Ranges`. `marked_trails_prefix` (default `marked-trails`) is the key prefix of the store.
 2. Review `terraform plan`, then `terraform apply`. Read the outputs: `marked_trails_bucket_name`, `marked_trails_base_url`, `marked_trails_cloudfront_origin` and `marked_trails_publisher_policy_arn`.
-3. Attach the policy of `marked_trails_publisher_policy_arn` to the same IAM user whose keys are `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in `.env`, next to the render policy, as described in [Marked Trails build in Airflow](#marked-trails-build-in-airflow). When the build runs on Fargate, attach `marked_trails_fargate_launcher_policy_arn` to that user as well. It allows get, put, delete and abort-multipart on keys under the prefix and `ListBucket` only with the prefix condition. Existence checks of the CLI list the full key with `MaxKeys` 1 instead of sending a HEAD, so no unprefixed list permission is needed.
+3. Set `vps_iam_user_name` in `terraform.tfvars` to the IAM user whose keys are `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in `.env`. Terraform then attaches the render dispatcher policy, `marked_trails_publisher_policy_arn` and, when the builder is enabled, `marked_trails_fargate_launcher_policy_arn` to that user, and removes an attachment when its feature is turned off. The user and its keys stay outside Terraform. Policies that are already attached by hand are adopted with `terraform import`, see [VPS IAM user](#vps-iam-user). It allows get, put, delete and abort-multipart on keys under the prefix and `ListBucket` only with the prefix condition. Existence checks of the CLI list the full key with `MaxKeys` 1 instead of sending a HEAD, so no unprefixed list permission is needed.
 4. Add the CloudFront origin (`https://<id>.cloudfront.net`, from `marked_trails_cloudfront_origin`) to the render tile allowlist and to the edge CSP tile origins, keeping the origins that are already there:
    - Lambda renders reach only the hosts of `MAP_TILE_ALLOWLIST`, and PMTiles reads are `Range` requests through the same IP-pinned proxy, so without the host the proxy blocks the trail requests and the film shows no trails: append it to `map_tile_allowlist` in the Terraform tfvars (comma-separated, for example `https://tiles.openfreemap.org,https://<id>.cloudfront.net`), then apply.
    - VPS renders: append it to `MAP_TILE_ALLOWLIST` in `.env`.
@@ -117,6 +117,20 @@ To roll back, check that `builds/<previous_build_id>/marked-trails.pmtiles` exis
 1. Set `current_build_id` to the old `previous_build_id`, and set `pmtiles_key` to `builds/<that build id>/marked-trails.pmtiles` (it must match `current_build_id`, or the next run refuses to prune), `size_bytes`, `sha256`, `osm_data_date` and `marked_trail_count` to that build's values.
 2. Set `previous_build_id` to the build being rolled back from, or to `null`. Never change or remove `last_build_id`: it is the highest build id ever allocated, and the next build id is allocated above it. Do not set `previous_build_id` to `null` on a pointer that has no `last_build_id` (written by an older version); first set `last_build_id` to the highest build id that existed.
 3. Write the file back with `Cache-Control: no-cache`. For an S3 store use `aws s3 cp current.json s3://<marked_trails_bucket_name>/<marked_trails_prefix>/current.json --content-type application/json --cache-control "no-cache, no-store, must-revalidate"`; the content type and cache control are replaced by the upload, so pass both. The next `build-publish` run then deletes every build except the new current one.
+
+### VPS IAM user
+
+The VPS uses one IAM user for every AWS call (render dispatch, Marked Trails publication and the Fargate build). The user and its access keys are created by hand and are not in the Terraform state. Its policy attachments are managed in `infra/terraform/standalone-remote-render/vps_iam_user.tf` when `vps_iam_user_name` is set; with the default empty value Terraform attaches nothing.
+
+To adopt attachments that were made by hand, import each one before the first apply with the variable set (the import ID is the user name and the policy ARN joined by `/`):
+
+```sh
+terraform import 'aws_iam_user_policy_attachment.vps["dispatcher"]' "<user>/$(terraform output -raw dispatcher_policy_arn)"
+terraform import 'aws_iam_user_policy_attachment.vps["marked_trails_publisher"]' "<user>/$(terraform output -raw marked_trails_publisher_policy_arn)"
+terraform import 'aws_iam_user_policy_attachment.vps["marked_trails_launcher"]' "<user>/$(terraform output -raw marked_trails_fargate_launcher_policy_arn)"
+```
+
+Then `terraform plan` must show no changes for the attachments.
 
 ## Strava OAuth2 setup
 
@@ -287,7 +301,7 @@ Set up once, in this order. None of these steps is run by the repository's tests
 
 1. In `infra/terraform/standalone-remote-render`, set `marked_trails_builder_enabled = true` and `marked_trails_builder_image_tag` in `terraform.tfvars` (see `terraform.tfvars.example`) to the tag you will push, for example the short commit. The tag has no default and Terraform refuses an empty one. The builder needs `marked_trails_app_origins`. Review `terraform plan`, then `terraform apply`. This creates the ECR repository, the ECS cluster, the task definition, the dedicated VPC with two public subnets in different zones, an internet gateway and no NAT gateway, the egress-only security group, the log group with 14 days retention, the task and execution roles and the launcher policy. With the toggle off (the default), nothing of this exists and `make remote-render-deploy` is unchanged.
 2. Push the builder image: `MARKED_TRAILS_BUILDER_TAG=<the same tag> make marked-trails-ecr-push`. The target builds `linux/amd64` and pushes to the ECR repository. Tags are immutable, so a new build needs a new tag and a new `marked_trails_builder_image_tag`. ECR keeps the last five images and cannot exempt the pinned one, so apply the new tag before pushing a sixth image after it.
-3. Attach `marked_trails_fargate_launcher_policy_arn` to the IAM user of `AWS_ACCESS_KEY_ID`, next to the render and publisher policies.
+3. With `vps_iam_user_name` set, the apply in step 1 attaches `marked_trails_fargate_launcher_policy_arn` to the VPS IAM user next to the render and publisher policies; see [VPS IAM user](#vps-iam-user).
 4. In `.env`, set `MARKED_TRAILS_BUILD_BACKEND=fargate`, `MARKED_TRAILS_FARGATE_CLUSTER`, `MARKED_TRAILS_FARGATE_TASK_DEFINITION`, `MARKED_TRAILS_FARGATE_SUBNETS` and `MARKED_TRAILS_FARGATE_SECURITY_GROUPS` from the outputs `marked_trails_fargate_cluster`, `marked_trails_fargate_task_definition`, `marked_trails_fargate_subnet_ids` and `marked_trails_fargate_security_group_id`. Recreate the Airflow service so it reads the new values: `docker compose -f infra/compose.yaml --env-file .env up -d airflow`.
 
 The run is the same as on the local backend: [trigger the DAG](#marked-trails-build-in-airflow). Europe on Fargate uses the same country-by-country build; the task has 50 GiB of ephemeral storage against an estimated peak of 17 to 19 GB and a worst case of about 25 GB, and the CLI refuses to start with less than 24 GiB (about 25.8 GB) free, which is above the 25 GB worst case estimate.

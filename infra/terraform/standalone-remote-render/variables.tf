@@ -217,3 +217,9 @@ variable "marked_trails_log_retention_days" {
   default     = 14
   description = "CloudWatch Logs retention in days for the Marked Trails builder task."
 }
+
+variable "vps_iam_user_name" {
+  type        = string
+  default     = ""
+  description = "Existing IAM user whose access keys the VPS uses (AWS_ACCESS_KEY_ID in .env). When set, Terraform attaches the dispatcher policy and, when enabled, the Marked Trails publisher and launcher policies to it. Empty leaves attachments to the operator."
+}
