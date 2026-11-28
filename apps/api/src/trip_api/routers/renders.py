@@ -35,7 +35,7 @@ from trip_api.deps import (
     authenticate_request,
     ensure_utc,
 )
-from trip_api.marked_trails import get_marked_trails_pin, spec_json_with_pin
+from trip_api.marked_trails import configured_base, get_marked_trails_pin, spec_json_with_pin
 from trip_api.rate_limit import check_rate_limit
 from trip_api.remote_renders import RenderCallbackPayload, handle_render_callback
 from trip_api.render_backends import (
@@ -83,6 +83,7 @@ def _compute_content_hash(
     stages: list[Stage],
     photos: list[ProjectPhoto],
     pin: MarkedTrailsPin | None = None,
+    trails_base_url: str = "",
 ) -> str:
     stage_payload = [
         {
@@ -116,11 +117,13 @@ def _compute_content_hash(
         "photos": photo_payload,
     }
     if spec.marked_trail_types:
-        # The film shows the pinned build, so a render of another build must not be reused.
+        # The film shows the pinned build from the configured base, so a render of another build
+        # or of another store must not be reused.
         # Specs without trails keep their hash.
         payload["marked_trails"] = (
             {"build_id": pin.build_id, "pmtiles_key": pin.pmtiles_key} if pin is not None else None
         )
+        payload["marked_trails_base_url"] = trails_base_url
     canonical = json.dumps(
         payload,
         sort_keys=True,
@@ -213,7 +216,9 @@ def quote_render_job(
 
     photos = get_project_photos(db, project.id, only_enabled=True)
     pin = get_marked_trails_pin(settings) if spec.marked_trail_types else None
-    content_hash = _compute_content_hash(spec, stages, photos, pin)
+    content_hash = _compute_content_hash(
+        spec, stages, photos, pin, configured_base(settings)
+    )
     now = datetime.now(UTC)
     cached_hit = db.scalar(
         select(RenderJob.id)
@@ -309,7 +314,9 @@ def create_render_job(
     # Network read before the content hash and before any row lock (see AGENTS.md code
     # invariants). The hash includes the pinned build, so the reuse lookup needs it first.
     pin = get_marked_trails_pin(settings) if spec.marked_trail_types else None
-    content_hash = _compute_content_hash(spec, stages, photos, pin)
+    content_hash = _compute_content_hash(
+        spec, stages, photos, pin, configured_base(settings)
+    )
     now = datetime.now(UTC)
 
     cached_hit = db.scalar(

@@ -18,6 +18,7 @@ from trip_api.config import Settings
 logger = logging.getLogger(__name__)
 
 POINTER_TIMEOUT_S = 3.0
+POINTER_PHASE_TIMEOUT_S = 1.0
 PIN_CACHE_TTL_S = 30.0
 _POINTER_MAX_BYTES = 64 * 1024
 
@@ -97,14 +98,18 @@ def _parse_pointer(raw: Any, base_url: str) -> MarkedTrailsPin | None:
 def _read_pointer(url: str) -> Any:
     """GET the pointer within one total deadline. Raises on any failure."""
     deadline = _now() + POINTER_TIMEOUT_S
+    if _now() > deadline:
+        raise ValueError("pointer deadline")
     with (
-        _build_client(POINTER_TIMEOUT_S) as client,
+        _build_client(min(POINTER_PHASE_TIMEOUT_S, POINTER_TIMEOUT_S)) as client,
         client.stream("GET", url, headers={"Accept-Encoding": "identity"}) as response,
     ):
         if response.status_code != 200:
             logger.info("Marked Trails pointer not usable status=%d", response.status_code)
             raise ValueError("pointer status")
         body = bytearray()
+        if _now() > deadline:
+            raise ValueError("pointer deadline")
         for chunk in response.iter_raw():
             body += chunk
             if len(body) > _POINTER_MAX_BYTES:
@@ -119,7 +124,9 @@ def _read_pointer(url: str) -> Any:
 def fetch_marked_trails_pin(settings: Settings) -> MarkedTrailsPin | None:
     """Read `current.json` and return the build to pin, or None when there is no trail data.
 
-    Blocking network call with a total deadline. Callers must not hold a database row lock.
+    Blocking network call with a total deadline of `POINTER_TIMEOUT_S`: each connect, write and
+    read phase has its own shorter timeout and the deadline is checked between chunks, so a
+    slow server costs a little more than the deadline at worst. Callers must not hold a database row lock.
     Any failure (timeout, HTTP error, invalid pointer or URL) means no trail data, so a render
     is never blocked by the trail store.
     """
@@ -128,7 +135,7 @@ def fetch_marked_trails_pin(settings: Settings) -> MarkedTrailsPin | None:
         return None
     try:
         return _parse_pointer(_read_pointer(url), configured_base(settings))
-    except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
+    except (httpx.HTTPError, httpx.InvalidURL, ValueError, RecursionError) as exc:
         logger.warning("Marked Trails pointer unavailable error_type=%s", type(exc).__name__)
         return None
 

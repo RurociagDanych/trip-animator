@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import pytest
 from trip_api import marked_trails
+from trip_api.config import Settings
 from trip_api.db import RenderJob
 
 if TYPE_CHECKING:
@@ -381,6 +382,22 @@ def test_render_made_before_a_new_build_is_not_reused_after_it(
     assert stored["build_id"] == "2026-11-28"
 
 
+def test_switching_the_trail_store_base_url_prevents_reuse(
+    make_harness: HarnessFactory, sample_gpx: bytes, fake_store: tuple[_FakeStore, str]
+) -> None:
+    _, origin = fake_store
+    h = _harness(make_harness, origin)
+    project = _Project(h, sample_gpx)
+    first = project.enqueue(_TRAILS, "base-first-0001").json()["id"]
+    project.finish(first)
+    assert project.quote(_TRAILS)["cached"] is True
+
+    h.settings.marked_trails_base_url = "/tiles/other-store"
+
+    assert project.quote(_TRAILS)["cached"] is False
+    assert project.enqueue(_TRAILS, "base-second-001").json()["status"] == "queued"
+
+
 def test_render_with_no_pin_is_not_reused_once_a_build_exists(
     make_harness: HarnessFactory,
     sample_gpx: bytes,
@@ -524,6 +541,59 @@ def test_a_pointer_over_64_kib_is_ignored(
 
     assert job.status == "queued"
     assert "marked_trails_pin" not in job.spec_json
+
+
+def test_a_deeply_nested_pointer_under_the_size_cap_means_no_pin(
+    make_harness: HarnessFactory, sample_gpx: bytes, fake_store: tuple[_FakeStore, str]
+) -> None:
+    state, origin = fake_store
+    state.body = b"[" * 60_000
+    h = _harness(make_harness, origin)
+
+    job = _enqueue(h, sample_gpx, _TRAILS, "deep-nest-0001")
+
+    assert job.status == "queued"
+    assert "marked_trails_pin" not in job.spec_json
+
+
+@pytest.mark.parametrize("mode", ["headers_late", "first_chunk_late"])
+def test_a_slow_store_gets_no_pin_within_the_total_deadline(mode: str) -> None:
+    body = json.dumps(_POINTER).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            try:
+                if mode == "headers_late":
+                    time.sleep(2.5)
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                if mode == "first_chunk_late":
+                    self.wfile.flush()
+                    time.sleep(2.5)
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def log_message(self, *_args: Any) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        settings = Settings(
+            marked_trails_base_url="/store",
+            render_base_url=f"http://127.0.0.1:{server.server_port}",
+        )
+        started = time.monotonic()
+        pin = marked_trails.fetch_marked_trails_pin(settings)
+        elapsed = time.monotonic() - started
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert pin is None
+    assert elapsed < 3.5
 
 
 def test_a_slow_trickling_pointer_hits_the_total_deadline(
