@@ -122,3 +122,41 @@ def test_dag_schedules_tasks_edges_and_zero_secret_literals(
     params_blob = json.dumps({k: maint_dag.params[k] for k in maint_dag.params})
     for marker in forbidden_markers:
         assert marker not in params_blob
+
+
+def test_marked_trails_build_dag_is_manual_single_run_with_its_own_pool(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    dagbag = _load_dagbag(tmp_path, monkeypatch)
+    assert dagbag.import_errors == {}
+
+    dag = dagbag.dags["trip_marked_trails_build"]
+    assert dag.schedule is None
+    assert dag.catchup is False
+    assert dag.max_active_runs == 1
+    assert {"trip-animator", "marked-trails"} <= set(dag.tags)
+    assert dag.params["region"] == "europe"
+    assert set(dag.task_ids) == {"build_and_publish"}
+    task = dag.get_task("build_and_publish")
+    assert task.pool == "marked_trails_build"
+    assert task.retries == 0
+
+
+def test_marked_trails_build_dag_rejects_a_malformed_region(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    from airflow.exceptions import ParamValidationError
+
+    dag = _load_dagbag(tmp_path, monkeypatch).dags["trip_marked_trails_build"]
+
+    dag.params.update({"region": "europe/andorra"})
+    with pytest.raises(ParamValidationError):
+        dag.params.update({"region": "Europe;bad"})
+
+
+def test_pool_is_created_idempotently_in_airflow_init() -> None:
+    compose = (Path(__file__).resolve().parents[2] / "infra" / "compose.yaml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "airflow pools set marked_trails_build 1" in compose

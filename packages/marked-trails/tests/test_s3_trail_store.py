@@ -1,7 +1,9 @@
 import json
+import os
 from pathlib import Path
 from typing import Any
 
+import boto3
 import pytest
 from botocore.exceptions import ClientError
 from trip_marked_trails.cli import main
@@ -340,3 +342,114 @@ def test_invalid_store_settings_exit_with_a_usage_error(
 
     assert exc.value.code == 2
     assert client.objects == {}
+
+
+def capture_boto_client(
+    monkeypatch: pytest.MonkeyPatch, client: FakeS3Client
+) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+
+    def fake_boto_client(*_args: Any, **kwargs: Any) -> FakeS3Client:
+        calls.append(kwargs)
+        return client
+
+    monkeypatch.setattr(boto3, "client", fake_boto_client)
+    return calls
+
+
+def s3_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "MARKED_TRAILS_AWS_ACCESS_KEY_ID",
+        "MARKED_TRAILS_AWS_SECRET_ACCESS_KEY",
+        "MARKED_TRAILS_AWS_SESSION_TOKEN",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("MARKED_TRAILS_STORE", "s3")
+    monkeypatch.setenv("MARKED_TRAILS_S3_BUCKET", BUCKET)
+
+
+def publish_without_injected_client(tmp_path: Path) -> int:
+    return main(
+        [
+            "build-publish",
+            "--region",
+            "europe/andorra",
+            "--work-dir",
+            str(tmp_path / "work"),
+            "--build-date",
+            "2026-11-27",
+        ],
+        build_step=fake_build,
+    )
+
+
+def test_dedicated_credentials_go_only_to_the_trail_store_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s3_environment(monkeypatch)
+    monkeypatch.setenv("MARKED_TRAILS_AWS_ACCESS_KEY_ID", "AKIATRAILS")
+    monkeypatch.setenv("MARKED_TRAILS_AWS_SECRET_ACCESS_KEY", "trail-secret")
+    monkeypatch.setenv("MARKED_TRAILS_AWS_SESSION_TOKEN", "trail-token")
+    client = FakeS3Client()
+    calls = capture_boto_client(monkeypatch, client)
+
+    assert publish_without_injected_client(tmp_path) == 0
+
+    assert len(calls) == 1
+    assert calls[0]["aws_access_key_id"] == "AKIATRAILS"
+    assert calls[0]["aws_secret_access_key"] == "trail-secret"
+    assert calls[0]["aws_session_token"] == "trail-token"
+    assert "marked-trails/current.json" in client.objects
+    assert "AWS_ACCESS_KEY_ID" not in os.environ
+
+
+def test_without_dedicated_credentials_the_default_aws_chain_is_used(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s3_environment(monkeypatch)
+    calls = capture_boto_client(monkeypatch, FakeS3Client())
+
+    assert publish_without_injected_client(tmp_path) == 0
+
+    assert calls[0]["aws_access_key_id"] is None
+    assert calls[0]["aws_secret_access_key"] is None
+    assert "aws_session_token" not in calls[0]
+
+
+@pytest.mark.parametrize(
+    "present",
+    [
+        {"MARKED_TRAILS_AWS_ACCESS_KEY_ID": "AKIATRAILS"},
+        {"MARKED_TRAILS_AWS_SECRET_ACCESS_KEY": "trail-secret"},
+        {"MARKED_TRAILS_AWS_SESSION_TOKEN": "trail-token"},
+    ],
+)
+def test_incomplete_dedicated_credentials_are_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, present: dict[str, str]
+) -> None:
+    s3_environment(monkeypatch)
+    for name, value in present.items():
+        monkeypatch.setenv(name, value)
+    calls = capture_boto_client(monkeypatch, FakeS3Client())
+
+    with pytest.raises(SystemExit) as exc:
+        publish_without_injected_client(tmp_path)
+
+    assert exc.value.code == 2
+    assert calls == []
+
+
+def test_credentials_are_not_part_of_the_settings_repr() -> None:
+    settings = TrailStoreSettings(
+        backend="s3",
+        s3_bucket=BUCKET,
+        s3_access_key_id="AKIATRAILS",
+        s3_secret_access_key="trail-secret",
+        s3_session_token="trail-token",
+    )
+
+    assert "trail-secret" not in repr(settings)
+    assert "trail-token" not in repr(settings)
+    assert "AKIATRAILS" not in repr(settings)

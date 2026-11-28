@@ -404,7 +404,8 @@ services:
                     )
                 )
         PY
-        exec airflow db migrate
+        airflow db migrate
+        exec airflow pools set marked_trails_build 1 "Marked Trails build, one at a time"
     read_only: true
     tmpfs:
       - /tmp:size=64M,mode=1777,nosuid,nodev
@@ -426,14 +427,18 @@ services:
     env_file:
       - path: ../.env
         required: false
+      - path: ../.env.marked-trails
+        required: false
     environment:
       <<: *app-env
       HOME: /tmp
       AIRFLOW_HOME: /opt/airflow
       GOLD_OUTPUT_DIR: /data/gold
+      MARKED_TRAILS_WORK_DIR: /work/marked-trails
       TRIP_DBT_PROJECT_DIR: /app/dbt
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__CORE__PARALLELISM: "2"
+      # A Marked Trails build holds one slot for hours; two more keep the minutely Strava sync and the hourly dbt run going.
+      AIRFLOW__CORE__PARALLELISM: "3"
       AIRFLOW__CORE__DAGS_FOLDER: /app/airflow/dags
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
@@ -451,6 +456,7 @@ services:
       - object_data:/data/objects
       - gold_data:/data/gold
       - airflow_logs:/opt/airflow/logs
+      - marked_trails_work:/work/marked-trails
       - ../airflow/dags:/app/airflow/dags:ro
     depends_on:
       airflow-init:
@@ -480,6 +486,7 @@ volumes:
   gold_data:
   tile_cache:
   airflow_logs:
+  marked_trails_work:
   caddy_data:
   caddy_config:
 

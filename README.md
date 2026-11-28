@@ -130,7 +130,7 @@ Copy [`.env.example`](.env.example) to `.env` (`make bootstrap` does this when `
 | Security and encryption | `SESSION_SECRET`, `TOKEN_ENCRYPTION_KEY`, `ALLOWED_ORIGINS` |
 | Object storage (`local` or `s3`) | `OBJECT_STORE_BACKEND`, `LOCAL_OBJECT_STORE_DIR`, `S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET`, `S3_REGION` |
 | Strava OAuth2 | `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`, `STRAVA_REDIRECT_URI` |
-| Marked Trails overlay | `MARKED_TRAILS_BASE_URL` (empty turns the overlay off), publisher: `MARKED_TRAILS_STORE`, `MARKED_TRAILS_S3_BUCKET`, `MARKED_TRAILS_S3_PREFIX`, `MARKED_TRAILS_S3_REGION` |
+| Marked Trails overlay | `MARKED_TRAILS_BASE_URL` (empty turns the overlay off), publisher: `MARKED_TRAILS_STORE`, `MARKED_TRAILS_S3_BUCKET`, `MARKED_TRAILS_S3_PREFIX`, `MARKED_TRAILS_S3_REGION`; Airflow publisher keys `MARKED_TRAILS_AWS_*` in `.env.marked-trails` (see `marked-trails.env.example`) |
 | Google OIDC Sign-In | `GOOGLE_AUTH_CLIENT_ID`, `GOOGLE_AUTH_CLIENT_SECRET`, `GOOGLE_AUTH_REDIRECT_URI` |
 | Map tiles and render worker | `MAP_TILE_ALLOWLIST`, `RENDER_BASE_URL`, `WORKER_CONCURRENCY`, `WORKER_GPU_ENABLED`, `WORKER_CPU_RENDERER`, `RENDER_BACKEND`, `RENDER_AWS_*`, `RENDER_CALLBACK_*`, `RENDER_REMOTE_*` |
 | Apache Airflow 3 | `AIRFLOW_PORT`, `AIRFLOW_DB`, `AIRFLOW_FERNET_KEY`, `AIRFLOW_API_SECRET_KEY`, `AIRFLOW_JWT_SECRET`, `AIRFLOW_SIMPLE_AUTH_USERS`, `GOLD_OUTPUT_DIR` |
