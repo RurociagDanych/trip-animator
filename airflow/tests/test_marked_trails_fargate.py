@@ -6,13 +6,21 @@ from typing import Any
 
 import boto3
 import pytest
-from botocore.exceptions import EndpointConnectionError
+from botocore.exceptions import (
+    ConnectionClosedError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    NoCredentialsError,
+    ParamValidationError,
+    ReadTimeoutError,
+)
 from botocore.stub import Stubber
 from trip_airflow.marked_trails_fargate import (
     CONTAINER_NAME,
     FargateBuild,
     FargateBuildError,
     FargateBuildSettings,
+    _is_retryable,
     client_token,
     task_definition_family,
 )
@@ -131,6 +139,7 @@ def _describe(
     exit_code: int | None = None,
     stop_reason: str | None = None,
     container_reason: str | None = None,
+    stop_code: str | None = None,
 ) -> dict[str, Any]:
     container: dict[str, Any] = {"name": CONTAINER_NAME}
     if exit_code is not None:
@@ -140,6 +149,8 @@ def _describe(
     task: dict[str, Any] = {"taskArn": TASK_ARN, "lastStatus": status, "containers": [container]}
     if stop_reason is not None:
         task["stoppedReason"] = stop_reason
+    if stop_code is not None:
+        task["stopCode"] = stop_code
     return {"tasks": [task], "failures": []}
 
 
@@ -232,17 +243,41 @@ def test_non_zero_exit_reports_the_container_and_task_stop_reasons(
 
 
 @pytest.mark.parametrize(
-    "exit_code, text",
-    [(124, "in-container deadline expired"), (137, "killed with SIGKILL")],
+    "exit_code, stop_code, text",
+    [
+        (124, "EssentialContainerExited", "in-container deadline expired"),
+        (137, "EssentialContainerExited", "killed with SIGKILL"),
+    ],
 )
 def test_deadline_and_kill_exit_codes_get_a_clear_message(
-    ecs: Any, stopper: Any, settings: FargateBuildSettings, exit_code: int, text: str
+    ecs: Any,
+    stopper: Any,
+    settings: FargateBuildSettings,
+    exit_code: int,
+    stop_code: str,
+    text: str,
 ) -> None:
     _add_start(ecs)
-    _add_describe(ecs, _describe("STOPPED", exit_code=exit_code))
+    _add_describe(ecs, _describe("STOPPED", exit_code=exit_code, stop_code=stop_code))
 
     with pytest.raises(FargateBuildError, match=text):
         _build(settings, ecs, stopper, Clock()).run("europe", RUN_ID)
+
+
+@pytest.mark.parametrize("stop_code", ["UserInitiated", None])
+def test_exit_124_after_an_external_stop_does_not_claim_the_deadline(
+    ecs: Any, stopper: Any, settings: FargateBuildSettings, stop_code: str | None
+) -> None:
+    _add_start(ecs)
+    _add_describe(ecs, _describe("STOPPED", exit_code=124, stop_code=stop_code))
+
+    with pytest.raises(FargateBuildError) as raised:
+        _build(settings, ecs, stopper, Clock()).run("europe", RUN_ID)
+
+    message = str(raised.value)
+    assert "external stop" in message
+    assert str(stop_code or "unknown") in message
+    assert "deadline expired" not in message
 
 
 def test_task_stopped_without_an_exit_code_fails_the_build(
@@ -327,18 +362,60 @@ def test_stop_from_a_signal_handler_stops_the_task_once_and_ends_the_wait(
     stopper.stubber.assert_no_pending_responses()
 
 
-def test_stop_before_the_task_exists_stops_it_as_soon_as_it_starts(
+def test_stop_during_the_orphan_sweep_does_not_start_a_task(
+    ecs: Any, stopper: Any, settings: FargateBuildSettings
+) -> None:
+    ecs.stubber.add_response(
+        "list_tasks", {"taskArns": []}, {"cluster": CLUSTER, "startedBy": "trip-animator-airflow"}
+    )
+    build = _build(settings, ecs, stopper, Clock())
+    real_list = ecs.list_tasks
+
+    def list_then_stop(**kwargs: Any) -> Any:
+        response = real_list(**kwargs)
+        build.stop()
+        return response
+
+    ecs.list_tasks = list_then_stop
+
+    with pytest.raises(FargateBuildError, match="stopped before it started"):
+        build.run("europe", RUN_ID)
+
+    ecs.stubber.assert_no_pending_responses()
+    stopper.stubber.assert_no_pending_responses()
+
+
+def test_stop_during_run_task_stops_the_task_as_soon_as_it_exists(
     ecs: Any, stopper: Any, settings: FargateBuildSettings
 ) -> None:
     _add_start(ecs)
     _add_stop(stopper)
     build = _build(settings, ecs, stopper, Clock())
-    build.stop()
+    real_run = ecs.run_task
+
+    def run_then_stop(**kwargs: Any) -> Any:
+        response = real_run(**kwargs)
+        build.stop()
+        return response
+
+    ecs.run_task = run_then_stop
 
     with pytest.raises(FargateBuildError, match="stopped before it started"):
         build.run("europe", RUN_ID)
 
     stopper.stubber.assert_no_pending_responses()
+
+
+def test_run_task_returning_other_than_one_task_fails_the_build(
+    ecs: Any, stopper: Any, settings: FargateBuildSettings
+) -> None:
+    ecs.stubber.add_response(
+        "list_tasks", {"taskArns": []}, {"cluster": CLUSTER, "startedBy": "trip-animator-airflow"}
+    )
+    ecs.stubber.add_response("run_task", {"tasks": [], "failures": []}, _run_task_expected())
+
+    with pytest.raises(FargateBuildError, match="returned 0 tasks"):
+        _build(settings, ecs, stopper, Clock()).run("europe", RUN_ID)
 
 
 def test_failed_stop_during_a_kill_keeps_the_original_error(
@@ -415,6 +492,47 @@ def test_connection_errors_are_retried_with_a_growing_delay(
     _build(settings, ecs, stopper, clock).run("europe", RUN_ID)
 
     assert sum(clock.sleeps) == 60 + 120
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        EndpointConnectionError(endpoint_url="https://ecs.invalid"),
+        ConnectionClosedError(endpoint_url="https://ecs.invalid"),
+        ReadTimeoutError(endpoint_url="https://ecs.invalid"),
+        ConnectTimeoutError(endpoint_url="https://ecs.invalid"),
+    ],
+    ids=lambda error: type(error).__name__,
+)
+def test_connection_and_timeout_errors_are_retryable(error: Exception) -> None:
+    assert _is_retryable(error)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ParamValidationError(report="bad parameter"),
+        NoCredentialsError(),
+    ],
+    ids=lambda error: type(error).__name__,
+)
+def test_other_botocore_errors_fail_fast_and_stop_the_task(
+    ecs: Any, stopper: Any, settings: FargateBuildSettings, error: Exception
+) -> None:
+    clock = Clock()
+    _add_start(ecs)
+    _add_stop(stopper)
+
+    def failing(**kwargs: Any) -> Any:
+        raise error
+
+    ecs.describe_tasks = failing
+
+    with pytest.raises(FargateBuildError, match=type(error).__name__):
+        _build(settings, ecs, stopper, clock).run("europe", RUN_ID)
+
+    assert clock.sleeps == []
+    stopper.stubber.assert_no_pending_responses()
 
 
 @pytest.mark.parametrize("code", ["AccessDeniedException", "InvalidParameterException"])

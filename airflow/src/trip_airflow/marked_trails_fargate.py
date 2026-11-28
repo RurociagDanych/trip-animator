@@ -13,7 +13,14 @@ from typing import Any
 
 import boto3
 from botocore.config import Config
-from botocore.exceptions import BotoCoreError, ClientError
+from botocore.exceptions import (
+    BotoCoreError,
+    ClientError,
+    ConnectionClosedError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    ReadTimeoutError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +55,7 @@ CLIENT_TOKEN_MAX_LENGTH = 64
 DESCRIBE_BATCH_SIZE = 100
 EXIT_DEADLINE = 124
 EXIT_KILLED = 137
+STOP_CODE_ESSENTIAL_EXITED = "EssentialContainerExited"
 # Throttling and transient server codes that are worth waiting out; HTTP 5xx is added separately.
 RETRYABLE_ERROR_CODES = frozenset(
     {
@@ -69,6 +77,13 @@ RETRYABLE_ERROR_CODES = frozenset(
         "ServiceUnavailableException",
         "InternalError",
     }
+)
+# Other BotoCoreError subclasses (bad parameters, missing credentials) cannot succeed on a retry.
+RETRYABLE_BOTOCORE_ERRORS = (
+    ConnectionClosedError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    ReadTimeoutError,
 )
 # What ECS answers for a task that stopped between ListTasks and StopTask.
 TASK_GONE_ERROR_CODES = frozenset({"InvalidParameterException", "ResourceNotFoundException"})
@@ -149,7 +164,7 @@ def _is_retryable(error: Exception) -> bool:
         code = error.response.get("Error", {}).get("Code", "")
         status = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0)
         return code in RETRYABLE_ERROR_CODES or status >= 500
-    return isinstance(error, BotoCoreError)
+    return isinstance(error, RETRYABLE_BOTOCORE_ERRORS)
 
 
 def _error_code(error: Exception) -> str:
@@ -211,6 +226,8 @@ class FargateBuild:
         an exit-status failure propagates.
         """
         self._stop_orphans()
+        if self._stop_requested:
+            raise FargateBuildError("The Marked Trails build was stopped before it started")
         task_arn = self._start_task(region, run_id)
         self._task_arn = task_arn
         stream = self._log_stream(task_arn)
@@ -463,16 +480,24 @@ class FargateBuild:
         ]
         reason = "; ".join(dict.fromkeys(details)) or "no stop reason given"
         raise FargateBuildError(
-            f"Marked Trails Fargate task {task_arn} {_describe_exit(exit_code)}: {reason} "
+            f"Marked Trails Fargate task {task_arn} "
+            f"{_describe_exit(exit_code, task.get('stopCode'))}: {reason} "
             f"(CloudWatch log stream {stream})"
         )
 
 
-def _describe_exit(exit_code: object) -> str:
+def _describe_exit(exit_code: object, stop_code: object) -> str:
     if exit_code == EXIT_DEADLINE:
+        # timeout also exits 124 when a stop signal reaches it under an init process, so only
+        # a task that ended by itself proves that the deadline expired.
+        if stop_code == STOP_CODE_ESSENTIAL_EXITED:
+            return (
+                "exited with status 124: the in-container deadline expired and the build was "
+                "stopped by timeout"
+            )
         return (
-            "exited with status 124: the in-container deadline expired and the build was "
-            "stopped by timeout"
+            f"exited with status 124 after an external stop (stop code {stop_code or 'unknown'}), "
+            "not necessarily the in-container deadline"
         )
     if exit_code == EXIT_KILLED:
         return (
