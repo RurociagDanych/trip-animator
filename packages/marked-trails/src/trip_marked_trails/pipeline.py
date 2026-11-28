@@ -61,27 +61,30 @@ class BuildArtifact:
 
 @dataclass(frozen=True, slots=True)
 class ResourceLimits:
-    """Caps for one tool process: `memory_bytes` of data memory, a `nice` level, one `cpu`.
+    """Caps for one tool process: `memory_bytes` of data memory, a `nice` level, and CPUs.
 
-    `cpu` is the CPU number to pin to; None pins to the lowest CPU the process may use.
+    `cpus` is the set of CPU numbers the process is pinned to; None pins to the lowest CPU
+    the process may use.
     """
 
     memory_bytes: int
     nice: int = 10
-    cpu: int | None = None
+    cpus: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class BuildTools:
-    """Executables, classpath, time and resource limits used by the build.
+    """Executables, classpath, time, JVM options and resource limits used by the build.
 
-    Defaults match the builder image. Without `limits` tools run uncapped, which suits a
-    container that Docker already limits.
+    Defaults match the builder image on the production VPS. Without `limits` tools run
+    uncapped, which suits a container that Docker or Fargate already limits.
     """
 
     osmium: str = "osmium"
     java: str = "java"
     planetiler_classpath: str = DEFAULT_PLANETILER_CLASSPATH
+    planetiler_heap_option: str = PLANETILER_HEAP_OPTION
+    planetiler_direct_memory_option: str = PLANETILER_DIRECT_MEMORY_OPTION
     tool_timeout_seconds: float = TOOL_TIMEOUT_SECONDS
     limits: ResourceLimits | None = None
 
@@ -102,13 +105,15 @@ Downloader = Callable[[str, Path], None]
 
 
 def limited_command(args: Sequence[str], limits: ResourceLimits | None) -> list[str]:
-    """Wrap a command so it runs niced, pinned to one CPU and with a data memory cap.
+    """Wrap a command so it runs niced, pinned to its CPUs and with a data memory cap.
 
     This must work in the Airflow container: it is unprivileged, has no capabilities and a
-    read-only root, so cgroups and `docker run` limits are unavailable. `prlimit --data`
-    (RLIMIT_DATA) counts heap and private anonymous mappings, which is the memory osmium and the
-    Planetiler JVM use, so a tool that needs more fails with an allocation error instead of
-    taking the host's memory. RLIMIT_AS would also count the JVM's reserved address space and
+    read-only root, so cgroups and `docker run` limits are unavailable. The Fargate task
+    uses the same wrapper, so a runaway tool fails with an allocation error instead of
+    taking the whole task down. `prlimit --data` (RLIMIT_DATA) counts heap and private
+    anonymous mappings, which is the memory osmium and the Planetiler JVM use, so a tool
+    that needs more fails with an allocation error instead of taking the host's memory.
+    RLIMIT_AS would also count the JVM's reserved address space and
     RLIMIT_RSS is not enforced by Linux. The JVM heap is capped separately by -Xmx.
 
     `setpriv --pdeathsig KILL` makes the kernel kill the tool when the process that started it
@@ -119,7 +124,7 @@ def limited_command(args: Sequence[str], limits: ResourceLimits | None) -> list[
     """
     if limits is None:
         return list(args)
-    cpu = limits.cpu if limits.cpu is not None else min(os.sched_getaffinity(0))
+    cpus = limits.cpus if limits.cpus is not None else (min(os.sched_getaffinity(0)),)
     environment = ["env", *OSMIUM_QUEUE_ENVIRONMENT] if Path(args[0]).name == "osmium" else []
     return [
         "nice",
@@ -129,7 +134,7 @@ def limited_command(args: Sequence[str], limits: ResourceLimits | None) -> list[
         f"--data={limits.memory_bytes}",
         "taskset",
         "-c",
-        str(cpu),
+        ",".join(str(cpu) for cpu in cpus),
         "setpriv",
         "--pdeathsig",
         "KILL",
@@ -291,8 +296,8 @@ def build_tiles(
     runner.run(
         [
             tools.java,
-            PLANETILER_HEAP_OPTION,
-            PLANETILER_DIRECT_MEMORY_OPTION,
+            tools.planetiler_heap_option,
+            tools.planetiler_direct_memory_option,
             "-cp",
             tools.planetiler_classpath,
             PLANETILER_MAIN_CLASS,

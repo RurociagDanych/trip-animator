@@ -12,6 +12,8 @@ from typing import Any
 
 from trip_marked_trails.pipeline import (
     DEFAULT_PLANETILER_CLASSPATH,
+    PLANETILER_DIRECT_MEMORY_OPTION,
+    PLANETILER_HEAP_OPTION,
     BuildArtifact,
     BuildTools,
     ResourceLimits,
@@ -40,6 +42,7 @@ BuildStep = Callable[[str, Path], BuildArtifact]
 
 # The production host has 8 GB and no swap; osmium needs about 2.4 GB and Planetiler about 2.3 GB.
 TOOL_MEMORY_LIMIT_BYTES = 3 * 1024**3
+TOOL_CPU_COUNT = 1
 
 
 def positive_int(value: str) -> int:
@@ -51,6 +54,21 @@ def positive_int(value: str) -> int:
     if number <= 0:
         raise argparse.ArgumentTypeError(f"{value!r} must be greater than zero")
     return number
+
+
+def jvm_option(prefix: str) -> Callable[[str], str]:
+    """Return a parser for a JVM option that starts with `prefix`, such as `-Xmx`.
+
+    A malformed option would only fail inside the JVM after the download, so it is rejected
+    when the command starts.
+    """
+
+    def parse(value: str) -> str:
+        if not value.startswith(prefix) or len(value) == len(prefix):
+            raise argparse.ArgumentTypeError(f"{value!r} must start with {prefix} and a value")
+        return value
+
+    return parse
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -120,8 +138,38 @@ def build_parser() -> argparse.ArgumentParser:
     publish.add_argument(
         "--cap-resources",
         action="store_true",
-        help="Run osmium and Planetiler niced, on one CPU and with a 3 GB memory cap, for hosts "
-        "where the CLI is not already limited by its container",
+        help="Run osmium and Planetiler niced, pinned to --tool-cpus CPUs and with a data memory "
+        "cap of --tool-memory-bytes, for hosts where the CLI is not already limited by its "
+        "container",
+    )
+    publish.add_argument(
+        "--tool-memory-bytes",
+        type=positive_int,
+        default=os.environ.get("MARKED_TRAILS_TOOL_MEMORY_BYTES") or TOOL_MEMORY_LIMIT_BYTES,
+        help="Data memory cap of each tool with --cap-resources, in bytes; defaults to "
+        "MARKED_TRAILS_TOOL_MEMORY_BYTES, then 3 GiB",
+    )
+    publish.add_argument(
+        "--tool-cpus",
+        type=positive_int,
+        default=os.environ.get("MARKED_TRAILS_TOOL_CPUS") or TOOL_CPU_COUNT,
+        help="Lowest CPUs each tool is pinned to with --cap-resources; defaults to "
+        "MARKED_TRAILS_TOOL_CPUS, then 1",
+    )
+    publish.add_argument(
+        "--planetiler-heap",
+        type=jvm_option("-Xmx"),
+        default=os.environ.get("MARKED_TRAILS_PLANETILER_HEAP") or PLANETILER_HEAP_OPTION,
+        help="Planetiler JVM heap option, for example -Xmx10g; defaults to "
+        "MARKED_TRAILS_PLANETILER_HEAP, then -Xmx2g",
+    )
+    publish.add_argument(
+        "--planetiler-direct-memory",
+        type=jvm_option("-XX:MaxDirectMemorySize="),
+        default=os.environ.get("MARKED_TRAILS_PLANETILER_DIRECT_MEMORY")
+        or PLANETILER_DIRECT_MEMORY_OPTION,
+        help="Planetiler JVM direct memory option, for example -XX:MaxDirectMemorySize=1g; "
+        "defaults to MARKED_TRAILS_PLANETILER_DIRECT_MEMORY, then 512 MiB",
     )
     return parser
 
@@ -182,9 +230,7 @@ def main(
         )
     except ValueError as exc:
         parser.error(str(exc))
-    step = build_step or _default_build_step(
-        args.planetiler_classpath, args.extract, args.cap_resources
-    )
+    step = build_step or _default_build_step(_build_tools(args), args.extract)
     try:
         pointer = read_pointer(store)
         for key in delete_superseded_builds(store, pointer):
@@ -222,14 +268,20 @@ def main(
     return 0
 
 
-def _default_build_step(
-    planetiler_classpath: str, extract_path: Path | None, cap_resources: bool
-) -> BuildStep:
-    tools = BuildTools(
-        planetiler_classpath=planetiler_classpath,
-        limits=ResourceLimits(memory_bytes=TOOL_MEMORY_LIMIT_BYTES) if cap_resources else None,
+def _build_tools(args: argparse.Namespace) -> BuildTools:
+    limits = None
+    if args.cap_resources:
+        cpus = tuple(sorted(os.sched_getaffinity(0))[: args.tool_cpus])
+        limits = ResourceLimits(memory_bytes=args.tool_memory_bytes, cpus=cpus)
+    return BuildTools(
+        planetiler_classpath=args.planetiler_classpath,
+        planetiler_heap_option=args.planetiler_heap,
+        planetiler_direct_memory_option=args.planetiler_direct_memory,
+        limits=limits,
     )
 
+
+def _default_build_step(tools: BuildTools, extract_path: Path | None) -> BuildStep:
     def step(region: str, work_dir: Path) -> BuildArtifact:
         if extract_path is not None:
             return run_build(region, work_dir, tools, extract_path=extract_path)
