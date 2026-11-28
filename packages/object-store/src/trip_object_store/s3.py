@@ -86,6 +86,7 @@ class S3ObjectStore:
         endpoint_url: str | None = None,
         access_key_id: str | None = None,
         secret_access_key: str | None = None,
+        session_token: str | None = None,
         region: str | None = None,
         key_prefix: str = "",
         client: Any | None = None,
@@ -95,14 +96,15 @@ class S3ObjectStore:
         endpoint = _normalize_optional_str(endpoint_url)
         access_key = _normalize_optional_str(access_key_id)
         secret_key = _normalize_optional_str(secret_access_key)
+        token = _normalize_optional_str(session_token)
         region_name = _normalize_optional_str(region)
         self.bucket = bucket
         self.key_prefix = _normalize_key_prefix(key_prefix)
         self.transfer_config = transfer_config or DEFAULT_TRANSFER_CONFIG
         if client is not None:
-            if any(v is not None for v in (endpoint, access_key, secret_key, region_name)) or (
-                botocore_config is not None
-            ):
+            if any(
+                v is not None for v in (endpoint, access_key, secret_key, token, region_name)
+            ) or (botocore_config is not None):
                 raise ValueError(
                     "client cannot be combined with endpoint_url, credentials, region "
                     "or botocore_config"
@@ -110,6 +112,8 @@ class S3ObjectStore:
             self.client: Any = client
             return
         extra: dict[str, Any] = {}
+        if token is not None:
+            extra["aws_session_token"] = token
         if botocore_config is not None:
             extra["config"] = botocore_config
         self.client = boto3.client(

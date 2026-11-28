@@ -141,6 +141,10 @@ def main(
     pointer deletes nothing. A parent region such as `europe` is built one Geofabrik child extract
     at a time; a leaf region or a local `--extract` is built directly.
 
+    With the s3 store, `MARKED_TRAILS_AWS_ACCESS_KEY_ID`, `MARKED_TRAILS_AWS_SECRET_ACCESS_KEY`
+    and the optional `MARKED_TRAILS_AWS_SESSION_TOKEN` are read from the environment and given
+    only to the trail store client; without them the default AWS chain applies.
+
     `build_step` replaces the osmium and Planetiler build in tests and `s3_client` replaces
     the boto3 client; publication policy is the same either way. The built file in the work
     directory is deleted once published.
@@ -161,16 +165,22 @@ def main(
             parser.error("--s3-bucket or MARKED_TRAILS_S3_BUCKET is required for the s3 store")
         if not args.s3_prefix.strip().strip("/"):
             parser.error("--s3-prefix or MARKED_TRAILS_S3_PREFIX must not be empty")
-    store = build_trail_store(
-        TrailStoreSettings(
-            backend=args.store,
-            store_dir=args.store_dir,
-            s3_bucket=args.s3_bucket,
-            s3_prefix=args.s3_prefix,
-            s3_region=args.s3_region,
-        ),
-        s3_client=s3_client,
-    )
+    try:
+        store = build_trail_store(
+            TrailStoreSettings(
+                backend=args.store,
+                store_dir=args.store_dir,
+                s3_bucket=args.s3_bucket,
+                s3_prefix=args.s3_prefix,
+                s3_region=args.s3_region,
+                s3_access_key_id=os.environ.get("MARKED_TRAILS_AWS_ACCESS_KEY_ID", ""),
+                s3_secret_access_key=os.environ.get("MARKED_TRAILS_AWS_SECRET_ACCESS_KEY", ""),
+                s3_session_token=os.environ.get("MARKED_TRAILS_AWS_SESSION_TOKEN", ""),
+            ),
+            s3_client=s3_client,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     step = build_step or _default_build_step(
         args.planetiler_classpath, args.extract, args.cap_resources
     )
