@@ -41,7 +41,7 @@ build.fargate_build_from_environment = lambda env: FargateBuild(
     settings, ecs_client=Ecs(), stop_client=Stopper(), poll_seconds=30
 )
 operator = build.MarkedTrailsBuildOperator(task_id="t", region="europe")
-# The handler Airflow 3 installs in task_runner._execute_task: it calls on_kill and returns.
+# The handler Airflow 3 installs in task_runner.run: it calls on_kill and returns.
 signal.signal(signal.SIGTERM, lambda signum, frame: operator.on_kill())
 os.environ["MARKED_TRAILS_BUILD_BACKEND"] = "fargate"
 
