@@ -139,7 +139,6 @@ export interface TripStageCanvasProps {
     stageCount: number;
   };
   markedTrailsBuild?: MarkedTrailsBuild | null;
-  markedTrailsAttributionDate?: string | null;
 }
 
 let markedTrailsProtocolRegistered = false;
@@ -754,7 +753,6 @@ export function TripStageCanvas({
   projectTitle,
   totalStats,
   markedTrailsBuild = null,
-  markedTrailsAttributionDate = null,
 }: TripStageCanvasProps) {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
@@ -2508,9 +2506,7 @@ export function TripStageCanvas({
       <MapAttribution
         styleId={spec.map_style}
         markedTrailsDataDate={
-          markedTrailsOverlay.pmtilesUrl
-            ? (markedTrailsAttributionDate ?? markedTrailsDataDate(markedTrailsBuild))
-            : null
+          markedTrailsOverlay.pmtilesUrl ? markedTrailsDataDate(markedTrailsBuild) : null
         }
       />
     </div>

@@ -267,11 +267,13 @@ export function InspectorPanel({
 
             {markedTrailsAvailability !== "not-configured" ? (
               <div className="space-y-2">
-                {MARKED_TRAIL_TOGGLES.map(({ type, label }) => (
+                {MARKED_TRAIL_TOGGLES.map(({ type, label }) => {
+                  const checked = spec.marked_trail_types.includes(type);
+                  return (
                   <label key={type} className="flex items-center gap-2 text-ink">
                     <input
                       type="checkbox"
-                      checked={spec.marked_trail_types.includes(type)}
+                      checked={checked}
                       onChange={(e) =>
                         onUpdateSpec({
                           marked_trail_types: toggleMarkedTrailType(
@@ -281,15 +283,26 @@ export function InspectorPanel({
                           ),
                         })
                       }
-                      disabled={markedTrailsAvailability === "unavailable"}
+                      disabled={
+                        markedTrailsAvailability !== "available" &&
+                        !(checked && markedTrailsAvailability !== "loading")
+                      }
                       className="h-4 w-4 accent-sky-accent disabled:cursor-not-allowed"
                     />
                     <span className="font-medium">{label}</span>
                   </label>
-                ))}
+                  );
+                })}
                 {markedTrailsAvailability === "unavailable" ? (
                   <p className="text-[11px] text-ink-muted">
                     Marked Trails data is not published yet, so trails cannot be shown or rendered.
+                    Saved choices apply once data is published.
+                  </p>
+                ) : null}
+                {markedTrailsAvailability === "error" ? (
+                  <p className="text-[11px] text-ink-muted">
+                    Marked Trails data could not be loaded, so trails cannot be shown or rendered.
+                    Saved choices apply once data is published.
                   </p>
                 ) : null}
               </div>

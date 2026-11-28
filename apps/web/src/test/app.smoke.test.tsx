@@ -31,10 +31,11 @@ const PUBLISHED_POINTER = {
 
 function mockStandardApiFetch(
   publicConfigExtra: Record<string, unknown> = {},
-  markedTrailsPointer: { status: number; body: unknown } = {
+  markedTrailsPointer: { status: number; body: unknown } | "reject" | "pending" = {
     status: 404,
     body: { detail: "not published" },
   },
+  savedMarkedTrailTypes: string[] = [],
 ) {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
@@ -42,6 +43,12 @@ function mockStandardApiFetch(
       return mockJsonResponse({ dev_auth_enabled: true, strava_configured: true, ...publicConfigExtra });
     }
     if (url.endsWith("/tiles/marked-trails/current.json")) {
+      if (markedTrailsPointer === "reject") {
+        throw new TypeError("Failed to fetch");
+      }
+      if (markedTrailsPointer === "pending") {
+        return new Promise<Response>(() => {});
+      }
       return mockJsonResponse(markedTrailsPointer.body, markedTrailsPointer.status);
     }
     if (url.includes("/api/v1/auth/me")) {
@@ -80,7 +87,7 @@ function mockStandardApiFetch(
         revision: 1,
         stage_count: 0,
         total_distance_m: 0,
-        settings: createDefaultRenderSpecV2(),
+        settings: { ...createDefaultRenderSpecV2(), marked_trail_types: savedMarkedTrailTypes },
         stages: [],
         created_at: "2001-06-14T08:00:00Z",
         updated_at: "2001-06-14T08:00:00Z",
@@ -258,6 +265,72 @@ describe("Trip Animator web routes and config builders", () => {
     await waitFor(() =>
       expect(screen.getByTestId("map-attribution")).not.toHaveTextContent("Marked Trails data"),
     );
+  });
+
+  it("disables the toggles without an explanation while the build is loading", async () => {
+    mockStandardApiFetch({ marked_trails_base_url: "/tiles/marked-trails" }, "pending");
+    const router = createAppRouter(
+      createMemoryHistory({ initialEntries: ["/projects/fictional-route-2040"] }),
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<App router={router} queryClient={queryClient} />);
+
+    for (const name of ["Hiking Marked Trails", "Cycling Marked Trails", "MTB Marked Trails"]) {
+      expect(await screen.findByRole("checkbox", { name })).toBeDisabled();
+    }
+    expect(screen.queryByText(/not published yet/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/could not be loaded/)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["the request fails", "reject" as const],
+    ["the server answers 500", { status: 500, body: { detail: "boom" } }],
+  ])(
+    "disables the toggles with a could-not-be-loaded message when %s",
+    async (_name, pointer) => {
+      const fetchSpy = mockStandardApiFetch({ marked_trails_base_url: "/tiles/marked-trails" }, pointer);
+      const router = createAppRouter(
+        createMemoryHistory({ initialEntries: ["/projects/fictional-route-2040"] }),
+      );
+      const queryClient = new QueryClient();
+      render(<App router={router} queryClient={queryClient} />);
+
+      expect(
+        await screen.findByText(/Marked Trails data could not be loaded/, undefined, {
+          timeout: 9000,
+        }),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/not published yet/)).not.toBeInTheDocument();
+      for (const name of ["Hiking Marked Trails", "Cycling Marked Trails", "MTB Marked Trails"]) {
+        expect(screen.getByRole("checkbox", { name })).toBeDisabled();
+      }
+      const pointerCalls = fetchSpy.mock.calls.filter(([input]) =>
+        String(input).endsWith("/tiles/marked-trails/current.json"),
+      );
+      expect(pointerCalls).toHaveLength(3);
+    },
+    15000,
+  );
+
+  it("lets the user uncheck saved types while the data is not published and explains the saved choices", async () => {
+    mockStandardApiFetch(
+      { marked_trails_base_url: "/tiles/marked-trails" },
+      { status: 404, body: { detail: "not published" } },
+      ["hiking"],
+    );
+    const router = createAppRouter(
+      createMemoryHistory({ initialEntries: ["/projects/fictional-route-2040"] }),
+    );
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<App router={router} queryClient={queryClient} />);
+
+    expect(await screen.findByText(/Saved choices apply once data is published/)).toBeInTheDocument();
+    const hiking = screen.getByRole("checkbox", { name: "Hiking Marked Trails" });
+    expect(hiking).toBeChecked();
+    expect(hiking).toBeEnabled();
+    expect(screen.getByRole("checkbox", { name: "Cycling Marked Trails" })).toBeDisabled();
+    fireEvent.click(hiking);
+    expect(hiking).not.toBeChecked();
   });
 
   it("toggles hiking, cycling and MTB Marked Trails independently and saves each to the project", async () => {

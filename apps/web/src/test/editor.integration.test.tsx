@@ -789,6 +789,70 @@ describe("Login, Editor state, Stage reorder & Revision Conflict handling", () =
     );
   });
 
+  it("shows no trail date and no error in shared playback when no build is published", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof Request
+            ? input.url
+            : "";
+      if (url.includes("/api/v1/public-config")) {
+        return jsonResponse({ marked_trails_base_url: "/tiles/marked-trails" });
+      }
+      if (url.endsWith("/tiles/marked-trails/current.json")) {
+        return jsonResponse({ detail: "not published" }, 404);
+      }
+      if (url.endsWith("/api/v1/share/active-slug")) {
+        return jsonResponse({
+          id: "proj-1",
+          title: "Shared Fictional Meridian Tour",
+          stage_count: 0,
+          total_distance_m: 0,
+          settings: {
+            ...createDefaultRenderSpecV2(),
+            marked_trail_types: ["hiking"],
+          },
+          stages: [],
+          has_rendered_video: false,
+          latest_render_id: null,
+          created_at: "2001-06-14T08:00:00Z",
+          updated_at: "2001-06-14T08:00:00Z",
+        });
+      }
+      return jsonResponse({}, 404);
+    });
+
+    const router = createAppRouter(
+      createMemoryHistory({ initialEntries: ["/share/active-slug"] }),
+    );
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(<App router={router} queryClient={queryClient} />);
+
+    await screen.findByText("Shared Fictional Meridian Tour");
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryState([
+          "marked-trails",
+          "build",
+          "/tiles/marked-trails",
+        ])?.status,
+      ).toBe("success"),
+    );
+    expect(queryClient.getQueryData(["system", "public-config"])).toMatchObject(
+      {
+        marked_trails_base_url: "/tiles/marked-trails",
+      },
+    );
+    expect(
+      screen.queryByTestId("map-attribution")?.textContent ?? "",
+    ).not.toContain("Marked Trails data");
+    expect(screen.queryByText(/could not be loaded/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/not published yet/)).not.toBeInTheDocument();
+  });
+
   it("renders public share view (/share/:slug) and shows unavailable message on 404", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";

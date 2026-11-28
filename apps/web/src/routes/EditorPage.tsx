@@ -217,7 +217,7 @@ export function EditorPage() {
   });
 
   const publicConfigQuery = useQuery<PublicConfigOut>({
-    queryKey: ["public-config"],
+    queryKey: ["system", "public-config"],
     queryFn: ({ signal }) => systemApi.publicConfig(signal),
     retry: false,
     staleTime: 60_000,
