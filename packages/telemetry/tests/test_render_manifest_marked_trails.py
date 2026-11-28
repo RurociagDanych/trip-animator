@@ -67,9 +67,7 @@ def stage_and_store(tmp_path: Path) -> tuple[StageRecord, _Store]:
     return stage, _Store({key: parquet.read_bytes()})
 
 
-def _bundle(
-    stage: StageRecord, store: _Store, spec_extra: dict[str, object]
-) -> RenderManifest:
+def _bundle(stage: StageRecord, store: _Store, spec_extra: dict[str, object]) -> RenderManifest:
     return build_render_bundle(
         job_id=uuid.uuid4(),
         project_id=stage.project_id,

@@ -96,8 +96,8 @@ from trip_telemetry.pipeline import (
 )
 from trip_telemetry.ref_data import build_reference_parquets, resolve_ref_data_dir
 from trip_telemetry.render_manifest import (
-    ByteStore,
     MARKED_TRAILS_PIN_KEY,
+    ByteStore,
     FrameSpan,
     ManifestClimb,
     ManifestColorSegment,

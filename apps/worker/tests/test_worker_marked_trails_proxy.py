@@ -48,9 +48,7 @@ async def _public_dns(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", fake_getaddrinfo)
 
 
-def _handler(
-    upstream: Any, client: httpx.AsyncClient, tile_cache: TileCache | None = None
-) -> Any:
+def _handler(upstream: Any, client: httpx.AsyncClient, tile_cache: TileCache | None = None) -> Any:
     return make_ssrf_route_handler(
         render_origin="http://localhost:5173",
         allowed_external_hosts=frozenset({"trails.example.test"}),
@@ -165,9 +163,7 @@ async def test_range_requests_bypass_the_tile_cache_in_both_directions(tmp_path:
     def upstream(request: httpx.Request) -> httpx.Response:
         calls.append(request.headers.get("range"))
         if "range" in request.headers:
-            return httpx.Response(
-                206, content=b"PART", headers={"content-range": "bytes 0-3/8"}
-            )
+            return httpx.Response(206, content=b"PART", headers={"content-range": "bytes 0-3/8"})
         return httpx.Response(200, content=b"WHOLEFIL")
 
     cache = TileCache(tmp_path / "tiles")
