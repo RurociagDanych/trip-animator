@@ -216,9 +216,7 @@ def quote_render_job(
 
     photos = get_project_photos(db, project.id, only_enabled=True)
     pin = get_marked_trails_pin(settings) if spec.marked_trail_types else None
-    content_hash = _compute_content_hash(
-        spec, stages, photos, pin, configured_base(settings)
-    )
+    content_hash = _compute_content_hash(spec, stages, photos, pin, configured_base(settings))
     now = datetime.now(UTC)
     cached_hit = db.scalar(
         select(RenderJob.id)
@@ -314,9 +312,7 @@ def create_render_job(
     # Network read before the content hash and before any row lock (see AGENTS.md code
     # invariants). The hash includes the pinned build, so the reuse lookup needs it first.
     pin = get_marked_trails_pin(settings) if spec.marked_trail_types else None
-    content_hash = _compute_content_hash(
-        spec, stages, photos, pin, configured_base(settings)
-    )
+    content_hash = _compute_content_hash(spec, stages, photos, pin, configured_base(settings))
     now = datetime.now(UTC)
 
     cached_hit = db.scalar(

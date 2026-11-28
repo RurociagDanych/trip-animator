@@ -126,7 +126,8 @@ def fetch_marked_trails_pin(settings: Settings) -> MarkedTrailsPin | None:
 
     Blocking network call with a total deadline of `POINTER_TIMEOUT_S`: each connect, write and
     read phase has its own shorter timeout and the deadline is checked between chunks, so a
-    slow server costs a little more than the deadline at worst. Callers must not hold a database row lock.
+    slow server costs a little more than the deadline at worst. Callers must not hold a database
+    row lock.
     Any failure (timeout, HTTP error, invalid pointer or URL) means no trail data, so a render
     is never blocked by the trail store.
     """
